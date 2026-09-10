@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { createHmac } from "node:crypto";
 import {
   GREETING,
-  PHOTO_FIRST,
   PHOTO_THANKS,
   OUTSIDE,
   quickReply,
@@ -56,11 +55,16 @@ test("canonical phones reject LID and malformed identities", () => {
   for (const p of ["12345@lid", "123", "phone:501111111", "972050111111100"])
     assert.throws(() => canonicalPhone(p));
 });
-test("donor without receiver: PHOTO FIRST, no names/address/floor", () => {
+test("donor without receiver can continue without photo", () => {
   const r = sampleRequest();
   r.parties = r.parties.slice(0, 1);
   r.photo_ids = [];
-  assert.equal(nextQuestion(r, r.parties[0]!.phone).text, PHOTO_FIRST);
+  assert.match(nextQuestion(r, r.parties[0]!.phone).text, /נא לאשר|יישוב|כתובת|מקבל/);
+});
+test("direct recipient does not require a photo to coordinate", () => {
+  const r = sampleRequest();
+  r.photo_ids = [];
+  assert.equal(readyToCoordinate(r), true);
 });
 test("מחולה בכניסה enough and never mentions floor, including supplied floor", () => {
   const r = sampleRequest();

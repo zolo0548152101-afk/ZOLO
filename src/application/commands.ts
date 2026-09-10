@@ -10,14 +10,12 @@ import {
 } from "../domain/types.js";
 import { Store } from "../infrastructure/store.js";
 import {
-  PHOTO_FIRST,
   HUMAN_REPLY,
   OUTSIDE,
   canonicalPhone,
   donationIntent,
   explicitApproval,
   itemError,
-  photoGate,
   ownParty,
   mutable,
   appliance,
@@ -294,7 +292,6 @@ export class Commands {
     mutable(r);
     if (cmd.type === "details") {
       const p = ownParty(r, phone, cmd.role ?? undefined);
-      if (photoGate(r)) return output(PHOTO_FIRST);
       if (cmd.settlement) {
         const reg = await this.s.region(c, cmd.settlement);
         if (reg.decision === "outside") {
@@ -315,7 +312,6 @@ export class Commands {
         p.floor = cmd.floor;
     } else if (cmd.type === "item_facts") {
       ownParty(r, phone, "donor");
-      if (photoGate(r)) return output(PHOTO_FIRST);
       const oldItems = structuredClone(r.items);
       if (cmd.items)
         r.items = cmd.items.map((i, index) => ({
@@ -367,7 +363,6 @@ export class Commands {
         return { ...output(HUMAN_REPLY, r), humanReason: "evacuation" };
       }
     } else if (cmd.type === "counterparty") {
-      if (photoGate(r)) return output(PHOTO_FIRST);
       const role = ownParty(r, phone).role === "donor" ? "receiver" : "donor";
       const other = r.parties.find((p) => p.role === role);
       const targetPhone = suppliedPhone(ctx, cmd.phone);

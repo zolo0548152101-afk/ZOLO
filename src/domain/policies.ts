@@ -160,11 +160,8 @@ export function nextQuestion(
   if (isClosed(r))
     return { text: `פנייה ${r.number} סגורה.`, floorNote: false };
   if (r.status === "human") return { text: HUMAN_REPLY, floorNote: false };
-  if (photoGate(r)) return { text: PHOTO_FIRST, floorNote: false };
   const p = ownParty(r, phone);
   const donor = p.role === "donor";
-  if (donor && r.photo_ids.length === 0)
-    return { text: PHOTO_FIRST, floorNote: false };
   if (
     donor &&
     r.items.some(
@@ -228,7 +225,8 @@ export function readyToCoordinate(r: Request): boolean {
       "awaiting_approval",
       "waiting_capacity",
     ].includes(r.status) ||
-    r.photo_ids.length === 0 ||
+    (r.photo_ids.length === 0 &&
+      !r.parties.some((p) => p.role === "receiver")) ||
     r.parties.length !== 2 ||
     itemError(r.items, true)
   )
