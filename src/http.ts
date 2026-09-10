@@ -12,6 +12,13 @@ const uuid = z.uuid();
 const reason = z.string().trim().min(3).max(500);
 const number = z.coerce.number().int().positive();
 const paramsNumber = z.object({ number });
+const databaseTable = z.enum([
+  "requests",
+  "contacts",
+  "conversations",
+  "messages",
+  "outbox",
+]);
 function authorized(req: FastifyRequest, c: Config): boolean {
   const input = req.headers["x-admin-token"];
   if (typeof input !== "string") return false;
@@ -103,7 +110,8 @@ export async function makeHttp(
 <section class="grid" id="metrics"><div class="card metric"><span>תיבת כניסה ממתינה</span><b>—</b></div><div class="card metric"><span>הודעות יוצאות</span><b>—</b></div><div class="card metric"><span>תורי עבודה</span><b>—</b></div><div class="card metric"><span>קריאות AI</span><b>—</b></div></section>
 <section class="two"><div class="card"><h2>רשומות הובלות</h2><div class="hint">כל הובלה נשמרת במסד הנתונים ומופיעה כאן.</div><div class="table"><table><thead><tr><th>#</th><th>סטטוס</th><th>פריטים</th><th>מוסר ← מקבל</th><th>תאריך</th></tr></thead><tbody id="requests"><tr><td colspan="5">התחבר כדי לטעון נתונים</td></tr></tbody></table></div></div><div class="card"><h2>תור הודעות לא ודאיות</h2><div class="table"><table><thead><tr><th>טלפון</th><th>מצב</th><th>שגיאה</th></tr></thead><tbody id="outbox"><tr><td colspan="3">—</td></tr></tbody></table></div></div></section>
 <section class="two"><div class="card"><h2>סימולציית צ׳אט</h2><div class="hint">ההודעות רצות בסביבה נפרדת, ולא נשלחות ל־WhatsApp.</div><div id="chat" class="chat"><div class="hint">כתוב הודעה כדי לדבר עם הבוט.</div></div><form id="simulate" class="form"><input id="phone" inputmode="numeric" placeholder="טלפון לדוגמה, למשל 584152101" required><textarea id="text" rows="3" placeholder="כתוב הודעה לבוט…" required></textarea><button>שלח לבוט</button></form></div><div class="card"><h2>גישת בוט</h2><div class="radios"><label><input type="radio" name="access" value="open" checked> פתוח לכולם</label><label><input type="radio" name="access" value="allowlist"> פתוח רק למספרים שאגדיר</label></div><label>מספרים מורשים<textarea id="allowlist" rows="5" placeholder="מספר אחד בכל שורה או מופרד בפסיקים"></textarea></label><div class="hint">מספר חסום אינו מקבל תגובה מהבוט.</div><div class="actions"><button id="save-access" type="button">שמור הגדרת גישה</button></div><hr><h2>איפוס שיחה</h2><input id="reset-phone" inputmode="numeric" placeholder="מספר טלפון לאיפוס"><div class="actions"><button id="reset-one" class="secondary" type="button">אפס שיחה למספר</button><button id="reset-all" class="danger" type="button">אפס את כל זיכרון הבוט</button></div><div class="hint">הפעולה מתחילה שיחה חדשה; רשומות ההובלות וההיסטוריה נשמרות.</div></div></section>
-<section class="two"><div class="card"><h2>תורים שנכשלו</h2><div class="table"><table><thead><tr><th>תור</th><th>ניסיונות</th><th>מזהה</th></tr></thead><tbody id="failed"><tr><td colspan="3">—</td></tr></tbody></table></div></div></section></main>
+<section class="two"><div class="card"><h2>תורים שנכשלו</h2><div class="table"><table><thead><tr><th>תור</th><th>ניסיונות</th><th>מזהה</th></tr></thead><tbody id="failed"><tr><td colspan="3">—</td></tr></tbody></table></div></div></section>
+<section class="card" style="margin-top:14px"><h2>מסד הנתונים</h2><div class="hint">צפייה, עריכה ומחיקה של רשומות. סיסמאות ומסוף SQL אינם חשופים בדף.</div><div class="actions"><select id="db-table"><option value="requests">פניות והובלות</option><option value="contacts">אנשי קשר</option><option value="conversations">שיחות</option><option value="messages">הודעות נכנסות</option><option value="outbox">הודעות יוצאות</option></select><button id="db-load" type="button">טען רשומות</button></div><div class="table"><table><thead id="db-head"></thead><tbody id="db-rows"><tr><td>בחר טבלה וטען נתונים</td></tr></tbody></table></div></section></main>
 <script>
 const token=document.querySelector('#token'),msg=document.querySelector('#message'),chat=document.querySelector('#chat');token.value=sessionStorage.getItem('haim-admin-token')||'';
 function say(text,kind){msg.textContent=text;msg.className='notice '+(kind||'')}function esc(value){const s=String(value??'');return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}function rows(id,html,span){document.querySelector(id).innerHTML=html||'<tr><td colspan="'+span+'">אין נתונים</td></tr>'}function header(extra){return Object.assign({'x-admin-token':token.value.trim()},extra||{})}async function api(path,options){if(!token.value.trim())throw new Error('יש להזין טוקן ניהול');const o=Object.assign({},options||{});o.headers=header(o.headers);const r=await fetch('/admin/'+path,o);const j=await r.json();if(!r.ok)throw new Error(j.error?.message||j.error?.code||'הפעולה נכשלה');return j}function bubble(text,kind){if(chat.querySelector('.hint'))chat.innerHTML='';const d=document.createElement('div');d.className='bubble '+kind;d.textContent=text;chat.appendChild(d);chat.scrollTop=chat.scrollHeight}function party(x,role){const p=(x.parties||[]).find(v=>v.role===role);return p?(p.name||p.phone||'—'):'—'}
@@ -111,6 +119,7 @@ async function refresh(){try{sessionStorage.setItem('haim-admin-token',token.val
 async function waitForReply(url){for(let i=0;i<90;i++){await new Promise(resolve=>setTimeout(resolve,500));const r=await fetch(url,{headers:header()});const j=await r.json();if(!r.ok)throw new Error(j.error?.message||'הסימולציה נכשלה');if(j.message?.processed_at){const reply=j.message.reply||(j.outbox||[]).map(x=>x.text).filter(Boolean).join('\n');return reply||'הבוט עיבד את ההודעה ללא תשובה.'}}throw new Error('הסימולציה עדיין מעבדת. נסה שוב בעוד רגע.')}document.querySelector('#connect').onclick=refresh;document.querySelector('#refresh').onclick=refresh;
 document.querySelector('#simulate').onsubmit=async e=>{e.preventDefault();const phone=document.querySelector('#phone').value,text=document.querySelector('#text').value;try{bubble(text,'me');document.querySelector('#text').value='';say('הבוט חושב…');const r=await api('simulate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({phone,text})});const reply=await waitForReply(r.result_url);bubble(reply,'bot');say('הסימולציה הושלמה','ok');refresh()}catch(e){bubble('לא התקבלה תשובה: '+(e.message||'שגיאה'),'bot');say(e.message||'הסימולציה נכשלה','error')}};
 document.querySelector('#save-access').onclick=async()=>{try{const mode=document.querySelector('input[name="access"]:checked').value,phones=document.querySelector('#allowlist').value.split(/[\s,]+/).filter(Boolean);await api('access',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({mode,phones})});say('הגדרת הגישה נשמרה','ok')}catch(e){say(e.message||'השמירה נכשלה','error')}};document.querySelector('#reset-one').onclick=async()=>{const phone=document.querySelector('#reset-phone').value.trim();if(!phone)return say('יש להזין מספר טלפון','error');if(!confirm('לאפס את זיכרון השיחה עבור '+phone+'? רשומות ההובלה לא יימחקו.'))return;try{await api('conversations/'+encodeURIComponent(phone)+'/reset',{method:'POST'});say('השיחה אופסה','ok')}catch(e){say(e.message||'האיפוס נכשל','error')}};document.querySelector('#reset-all').onclick=async()=>{if(!confirm('לאפס את זיכרון הבוט לכל המשתמשים? רשומות ההובלה יישמרו.'))return;try{await api('conversations/reset-all',{method:'POST'});say('זיכרון הבוט אופס לכל המשתמשים','ok')}catch(e){say(e.message||'האיפוס נכשל','error')}};
+let dbRows={};async function loadDb(){try{const table=document.querySelector('#db-table').value,r=await api('database?table='+encodeURIComponent(table));dbRows=Object.fromEntries(r.rows.map(x=>[x.id,x]));document.querySelector('#db-head').innerHTML='<tr>'+r.columns.map(x=>'<th>'+esc(x)+'</th>').join('')+'<th>פעולות</th></tr>';document.querySelector('#db-rows').innerHTML=r.rows.map(x=>'<tr>'+r.columns.map(k=>'<td>'+esc(x[k])+'</td>').join('')+'<td><button class="secondary" onclick="dbEdit(\''+x.id+'\')">ערוך</button> <button class="danger" onclick="dbDelete(\''+x.id+'\')">מחק</button></td></tr>').join('')||'<tr><td>אין רשומות</td></tr>';say('רשומות המסד נטענו','ok')}catch(e){say(e.message||'טעינת המסד נכשלה','error')}}window.dbEdit=async id=>{const table=document.querySelector('#db-table').value,row=dbRows[id],raw=prompt('ערוך רק את השדות שברצונך לשנות בפורמט JSON',JSON.stringify(row,null,2));if(raw===null)return;try{const changes=JSON.parse(raw);delete changes.id;for(const k of Object.keys(row))if(k!=='id'&&changes[k]===row[k])delete changes[k];await api('database/'+table+'/'+encodeURIComponent(id),{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({changes})});await loadDb();say('הרשומה עודכנה','ok')}catch(e){say(e.message||'העדכון נכשל','error')}};window.dbDelete=async id=>{const table=document.querySelector('#db-table').value;if(!confirm('למחוק את הרשומה? פעולה זו אינה ניתנת לביטול.'))return;try{await api('database/'+table+'/'+encodeURIComponent(id),{method:'DELETE'});await loadDb();say('הרשומה נמחקה','ok')}catch(e){say(e.message||'המחיקה נכשלה','error')}};document.querySelector('#db-load').onclick=loadDb;
 </script></body></html>`),
   );
   app.post(
@@ -182,6 +191,94 @@ document.querySelector('#save-access').onclick=async()=>{try{const mode=document
         const requests = [];
         for (const id of ids.rows) requests.push(await s.request(id.id));
         return { ok: true, requests };
+      });
+      admin.get("/database", async (req) => {
+        const q = z
+          .object({ table: databaseTable, limit: z.coerce.number().int().min(1).max(100).default(50) })
+          .parse(req.query);
+        const views = {
+          requests: {
+            columns: ["number", "status", "origin", "run_date", "human_reason", "updated_at"],
+            sql: "SELECT id,number,status,origin,run_date,human_reason,updated_at FROM requests ORDER BY number DESC LIMIT $1",
+          },
+          contacts: {
+            columns: ["phone", "created_at"],
+            sql: "SELECT id,phone,created_at FROM contacts ORDER BY created_at DESC LIMIT $1",
+          },
+          conversations: {
+            columns: ["phone", "mode", "session", "chat_id", "selected_request_id", "version"],
+            sql: "SELECT cv.id,co.phone,cv.mode,cv.session,cv.chat_id,cv.selected_request_id,cv.version FROM conversations cv JOIN contacts co ON co.id=cv.contact_id ORDER BY cv.id DESC LIMIT $1",
+          },
+          messages: {
+            columns: ["seq", "phone", "kind", "text", "reply", "error_code", "received_at"],
+            sql: "SELECT m.id,m.seq,co.phone,m.kind,m.text,m.reply,m.error_code,m.received_at FROM messages m LEFT JOIN contacts co ON co.id=m.contact_id ORDER BY m.seq DESC LIMIT $1",
+          },
+          outbox: {
+            columns: ["seq", "phone", "state", "text", "error_code", "created_at"],
+            sql: "SELECT id,seq,phone,state,text,error_code,created_at FROM outbox ORDER BY seq DESC LIMIT $1",
+          },
+        }[q.table];
+        const rows = await runtime.requireStore().pool.query(views.sql, [q.limit]);
+        return { ok: true, table: q.table, columns: views.columns, rows: rows.rows };
+      });
+      admin.patch("/database/:table/:id", async (req) => {
+        const p = z.object({ table: databaseTable, id: uuid }).parse(req.params);
+        const body = z.object({ changes: z.record(z.string(), z.unknown()) }).parse(req.body);
+        const schemas = {
+          requests: z.strictObject({
+            status: z.enum(["collecting","available","awaiting_approval","waiting_capacity","coordinated","human","cancel_pending","cancelled","closed","rejected"]).optional(),
+            run_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+            human_reason: z.string().max(1000).nullable().optional(),
+          }),
+          contacts: z.strictObject({ phone: z.string().optional() }),
+          conversations: z.strictObject({ mode: z.enum(["bot", "human"]).optional(), selected_request_id: uuid.nullable().optional() }),
+          messages: z.strictObject({ text: z.string().max(16000).optional(), reply: z.string().max(16000).nullable().optional(), error_code: z.string().max(160).nullable().optional() }),
+          outbox: z.strictObject({ text: z.string().min(1).max(16000).optional(), state: z.enum(["pending","sending","sent","shadow","simulation","uncertain","failed","cancelled"]).optional(), error_code: z.string().max(160).nullable().optional() }),
+        };
+        const parsed = schemas[p.table].parse(body.changes);
+        if (!Object.keys(parsed).length) throw new AppError("database_empty_update", 400, "לא נבחרו שדות לעדכון.");
+        if (p.table === "contacts" && parsed.phone)
+          (parsed as { phone: string }).phone = canonicalPhone((parsed as { phone: string }).phone);
+        const fields = Object.keys(parsed);
+        const assignment = fields.map((field, i) => `${field}=$${i + 1}`).join(",");
+        const values = fields.map((field) => (parsed as Record<string, unknown>)[field]);
+        const s = runtime.requireStore();
+        await s.transaction(async (client) => {
+          const r = await client.query(
+            `UPDATE ${p.table} SET ${assignment}${p.table === "requests" ? ",updated_at=clock_timestamp(),version=version+1" : ""} WHERE id=$${values.length + 1}`,
+            [...values, p.id],
+          );
+          if (!r.rowCount) throw new AppError("database_record_not_found", 404, "הרשומה לא נמצאה.");
+          await s.event(client, { trace_id: req.id }, "admin", "database_record_updated", { table: p.table, id: p.id, fields });
+        });
+        return { ok: true };
+      });
+      admin.delete("/database/:table/:id", async (req) => {
+        const p = z.object({ table: databaseTable, id: uuid }).parse(req.params);
+        const s = runtime.requireStore();
+        await s.transaction(async (client) => {
+          if (p.table === "requests") {
+            await client.query("UPDATE conversations SET selected_request_id=NULL WHERE selected_request_id=$1", [p.id]);
+            await client.query("DELETE FROM integration_outbox WHERE event_id IN (SELECT id FROM request_events WHERE request_id=$1)", [p.id]);
+            await client.query("DELETE FROM request_events WHERE request_id=$1", [p.id]);
+            await client.query("DELETE FROM outbox WHERE request_id=$1", [p.id]);
+            await client.query("DELETE FROM matches WHERE request_id=$1", [p.id]);
+            await client.query("DELETE FROM request_media WHERE request_id=$1", [p.id]);
+            await client.query("DELETE FROM request_parties WHERE request_id=$1", [p.id]);
+            await client.query("DELETE FROM request_items WHERE request_id=$1", [p.id]);
+          }
+          if (p.table === "messages") {
+            const media = await client.query("SELECT 1 FROM media WHERE message_id=$1", [p.id]);
+            if (media.rowCount) throw new AppError("database_message_has_media", 409, "יש למחוק קודם את קובץ המדיה המקושר להודעה.");
+            await client.query("DELETE FROM command_results WHERE message_id=$1", [p.id]);
+            await client.query("DELETE FROM outbox WHERE message_id=$1", [p.id]);
+            await client.query("UPDATE request_events SET message_id=NULL WHERE message_id=$1", [p.id]);
+          }
+          const result = await client.query(`DELETE FROM ${p.table} WHERE id=$1`, [p.id]);
+          if (!result.rowCount) throw new AppError("database_record_not_found", 404, "הרשומה לא נמצאה.");
+          await s.event(client, { trace_id: req.id }, "admin", "database_record_deleted", { table: p.table, id: p.id });
+        });
+        return { ok: true };
       });
       admin.get("/access", async () => {
         return { ok: true, ...(await runtime.requireStore().botAccess()) };
