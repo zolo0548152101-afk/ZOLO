@@ -332,6 +332,27 @@ test("contact card supplies name/phone; location is optional and bounded", () =>
   );
   assert.deepEqual(m?.contacts, [{ phone: "502222222", name: "בדיקה" }]);
 });
+
+test("contact card accepts WhatsApp grouped TEL fields", () => {
+  const m = parseWebhook(
+    {
+      event: "message",
+      session: "HAIM_YAHAD",
+      payload: {
+        id: "grouped-card",
+        from: "972501111111@c.us",
+        body:
+          "BEGIN:VCARD\nVERSION:3.0\nFN:אא טל\nitem1.TEL;waid=972536662043:+972 53-666-2043\nEND:VCARD",
+      },
+    },
+    "HAIM_YAHAD",
+  );
+  assert.equal(m?.kind, "contact");
+  assert.equal(m?.text, "[כרטיס איש קשר]");
+  assert.deepEqual(m?.contacts, [
+    { phone: "536662043", name: "אא טל" },
+  ]);
+});
 test("@lid resolution uses configured session API and does not treat LID as phone", async () => {
   let path = "";
   const mock: typeof fetch = async (input) => {

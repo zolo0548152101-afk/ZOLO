@@ -81,7 +81,9 @@ export function parseWebhook(
   for (const value of cards.slice(0, 10)) {
     const card =
       typeof value === "string" ? value : string(record(value).vcard);
-    const phone = card.match(/^TEL[^:]*:([^\r\n]+)/im)?.[1];
+    // WhatsApp contact cards may use a grouped vCard property such as
+    // `item1.TEL;waid=...`, not only the plain `TEL;CELL:...` form.
+    const phone = card.match(/^(?:[A-Za-z0-9_-]+\.)?TEL[^:]*:([^\r\n]+)/im)?.[1];
     const name = card.match(/^FN:([^\r\n]+)/im)?.[1] ?? null;
     if (phone) {
       try {
