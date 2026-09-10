@@ -560,10 +560,13 @@ export class Engine {
         reply = HUMAN_REPLY;
         reason = "no_plan";
       }
+      const metadata = await c.query<{ ai_metadata: Record<string, unknown> | null }>(
+        "SELECT ai_metadata FROM messages WHERE id=$1",
+        [id],
+      );
+      const candidateReply = metadata.rows[0]?.ai_metadata?.managed_reply;
       const managedReply =
-        typeof ctx.message.ai_metadata?.managed_reply === "string"
-          ? ctx.message.ai_metadata.managed_reply.trim()
-          : "";
+        typeof candidateReply === "string" ? candidateReply.trim() : "";
       // The prompt may never override an operational failure, a human handoff,
       // or a missing reply. Those require fixed, auditable wording. For normal
       // conversation, its reply is the exact text delivered to WhatsApp.
