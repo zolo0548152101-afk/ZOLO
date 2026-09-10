@@ -51,7 +51,7 @@ export class Runtime {
       const version = await this.pool.query<{ n: number }>(
         "SELECT count(*)::int AS n FROM pgmigrations",
       );
-      if (version.rows[0]?.n !== 3)
+      if (version.rows[0]?.n !== 4)
         throw new AppError("migrations_required", 503);
       const queue = new Queue(
         this.config,
