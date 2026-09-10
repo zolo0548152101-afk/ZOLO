@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: disposable-test-only
+      POSTGRES_DB: haim_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d haim_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  tests:
+    build:
+      context: .
+      target: verification
+    environment:
+      TEST_DATABASE_URL: postgres://postgres:disposable-test-only@postgres:5432/haim_test
+    depends_on:
+      postgres:
+        condition: service_healthy

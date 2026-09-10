@@ -1,0 +1,9 @@
+node_modules
+dist
+dist-tests
+.env
+.env.*
+!ENV.example
+.git
+*.zip
+verification
