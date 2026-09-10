@@ -17,6 +17,10 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
   OPENAI_API_KEY: z.string().default(""),
   OPENAI_MODEL: z.string().default("gpt-5.6-luna"),
+  OPENAI_PROMPT_ID: z
+    .string()
+    .default("pmpt_6a9d0c66737881938a0f60f5df9088cb0806a26699929a86"),
+  OPENAI_PROMPT_VERSION: z.string().default("23"),
   OPENAI_REASONING_EFFORT: z.enum(["none", "low", "medium"]).default("low"),
   OPENAI_TIMEOUT_MS: z.coerce
     .number()

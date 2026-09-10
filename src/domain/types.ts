@@ -17,6 +17,7 @@ export const itemKind = z.enum([
   "piano",
   "house_move",
 ]);
+export type ItemKind = z.infer<typeof itemKind>;
 export const itemInput = z
   .strictObject({
     kind: itemKind,

@@ -74,7 +74,9 @@ export function explicitApproval(t: string): boolean {
   );
 }
 export function donationIntent(t: string): boolean {
-  return /(?:למסירה|לתרומה|למסור|לתרום|מוסר|מוסרת)/.test(t);
+  return /(?:למסירה|לתרומה|למסור|לתרום|מוסר|מוסרת|להעביר|מעביר|מעבירה|יש לי להעביר)/.test(
+    t,
+  );
 }
 export function grounded(plan: Plan, text: string): boolean {
   return (
@@ -225,8 +227,6 @@ export function readyToCoordinate(r: Request): boolean {
       "awaiting_approval",
       "waiting_capacity",
     ].includes(r.status) ||
-    (r.photo_ids.length === 0 &&
-      !r.parties.some((p) => p.role === "receiver")) ||
     r.parties.length !== 2 ||
     itemError(r.items, true)
   )
