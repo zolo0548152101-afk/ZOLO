@@ -38,6 +38,10 @@ export interface Outbound {
   trace_id: string;
   job_id: string | null;
 }
+export interface BotAccess {
+  mode: "open" | "allowlist";
+  phones: string[];
+}
 export class Store {
   constructor(
     readonly pool: pg.Pool,
@@ -169,6 +173,27 @@ export class Store {
     for (const r of ids.rows) list.push(await this.request(r.id, c));
     return list;
   }
+  async botAccess(c: DB = this.pool): Promise<BotAccess> {
+    const row = await c.query<{ value: unknown }>(
+      "SELECT value FROM app_settings WHERE key='bot_access'",
+    );
+    const value = row.rows[0]?.value;
+    if (
+      !value ||
+      typeof value !== "object" ||
+      !("mode" in value) ||
+      (value.mode !== "open" && value.mode !== "allowlist") ||
+      !("phones" in value) ||
+      !Array.isArray(value.phones) ||
+      !value.phones.every((phone) => typeof phone === "string")
+    )
+      return { mode: "open", phones: [] };
+    return { mode: value.mode, phones: value.phones };
+  }
+  async allowed(phone: string, c: DB = this.pool): Promise<boolean> {
+    const access = await this.botAccess(c);
+    return access.mode === "open" || access.phones.includes(phone);
+  }
   async candidates(phone: string, c: DB = this.pool): Promise<Candidate[]> {
     const ids = await c.query<{
       id: string;
@@ -207,7 +232,11 @@ export class Store {
       transcript: string | null;
       reply: string | null;
     }>(
-      `SELECT text,transcript,reply FROM messages WHERE conversation_id=$1 AND seq<$2 AND processed_at IS NOT NULL ORDER BY seq DESC LIMIT 8`,
+      `SELECT m.text,m.transcript,m.reply FROM messages m
+       LEFT JOIN conversation_resets cr ON cr.conversation_id=m.conversation_id
+       WHERE m.conversation_id=$1 AND m.seq<$2 AND m.processed_at IS NOT NULL
+         AND (cr.reset_at IS NULL OR m.received_at>cr.reset_at)
+       ORDER BY m.seq DESC LIMIT 8`,
       [conv.rows[0].id, message.seq],
     );
     const history: Context["history"] = [];
@@ -220,7 +249,11 @@ export class Store {
         history.push({ role: "assistant", content: row.reply.slice(0, 2000) });
     }
     const latest = await c.query<{ text: string }>(
-      `SELECT o.text FROM outbox o JOIN messages current ON current.id=$2 WHERE o.phone=$1 AND o.state IN ('sent','shadow','simulation') AND o.created_at<=current.received_at ORDER BY o.seq DESC LIMIT 1`,
+      `SELECT o.text FROM outbox o JOIN messages current ON current.id=$2
+       LEFT JOIN conversation_resets cr ON cr.conversation_id=current.conversation_id
+       WHERE o.phone=$1 AND o.state IN ('sent','shadow','simulation') AND o.created_at<=current.received_at
+         AND (cr.reset_at IS NULL OR o.created_at>cr.reset_at)
+       ORDER BY o.seq DESC LIMIT 1`,
       [message.phone, id],
     );
     if (latest.rows[0] && history.at(-1)?.content !== latest.rows[0].text)

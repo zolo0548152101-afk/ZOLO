@@ -145,6 +145,20 @@ export class Engine {
   async process(id: string, lastAiAttempt = false): Promise<void> {
     let ctx = await this.s.context(id);
     if (ctx.message.processed_at) return;
+    if (!(await this.s.allowed(ctx.conversation.phone))) {
+      await this.s.transaction(async (c) => {
+        const current = await this.s.message(id, c, true);
+        if (current.processed_at) return;
+        await c.query(
+          "UPDATE messages SET processed_at=clock_timestamp(),error_code='access_denied' WHERE id=$1",
+          [id],
+        );
+        await this.s.event(c, current, "system", "access_denied", {
+          phone: ctx.conversation.phone,
+        });
+      });
+      return;
+    }
     if (ctx.message.media_state === "pending")
       throw new RetryableError("waiting_for_media");
     if (

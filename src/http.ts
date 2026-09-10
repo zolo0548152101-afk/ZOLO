@@ -95,42 +95,22 @@ export async function makeHttp(
   });
   app.get("/haim-admin", async (_req, reply) =>
     reply.type("text/html; charset=utf-8").send(String.raw`<!doctype html>
-<html lang="he" dir="rtl">
-<head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>חיים יחד | ניהול</title>
-  <style>
-    :root{color-scheme:dark;--bg:#09121b;--panel:#101f2c;--line:#254056;--ink:#edf5fa;--muted:#9bb1c2;--accent:#43d5a1;--warn:#ffbd59;--bad:#ff7474}
-    *{box-sizing:border-box} body{margin:0;background:linear-gradient(135deg,#08131d,#102b36);color:var(--ink);font:15px Arial,sans-serif}
-    header{padding:26px max(20px,calc((100% - 1160px)/2));border-bottom:1px solid var(--line);display:flex;gap:18px;align-items:center;justify-content:space-between}
-    h1{margin:0;font-size:24px}.sub{color:var(--muted);margin-top:5px}.badge{padding:7px 11px;border-radius:99px;background:#12372d;color:var(--accent);font-weight:bold}
-    main{max-width:1160px;margin:24px auto;padding:0 20px}.login,.card{background:rgba(16,31,44,.94);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 8px 28px #0003}
-    .login{display:flex;gap:10px;align-items:end;margin-bottom:20px}.login label{flex:1}.login input,input,textarea{width:100%;margin-top:6px;padding:10px;border:1px solid #38546a;border-radius:8px;background:#09151f;color:var(--ink)}
-    button{padding:10px 14px;border:0;border-radius:8px;background:#2cae83;color:#041510;font-weight:bold;cursor:pointer}.secondary{background:#28465b;color:var(--ink)}button:disabled{opacity:.5;cursor:not-allowed}
-    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.metric b{display:block;font-size:28px;margin-top:8px}.metric span{color:var(--muted)}
-    .two{display:grid;grid-template-columns:1.1fr .9fr;gap:14px;margin-top:14px}.card h2{font-size:17px;margin:0 0 12px}.table{max-height:330px;overflow:auto}table{width:100%;border-collapse:collapse}th,td{padding:9px;text-align:right;border-bottom:1px solid #203a4e;white-space:nowrap}th{color:var(--muted);font-size:12px}
-    .form{display:grid;gap:10px}.notice{margin-top:14px;padding:11px;border-radius:8px;background:#112a3a;color:#cbe5f5}.error{color:var(--bad)}.ok{color:var(--accent)}@media(max-width:800px){.grid,.two{grid-template-columns:1fr}.login{display:grid}}
-  </style>
-</head>
-<body>
-<header><div><h1>חיים יחד · מרכז ניהול</h1><div class="sub">V5 · תפעול, מעקב וסימולציות</div></div><div class="badge">SHADOW · ללא שליחה חיה</div></header>
-<main>
-  <section class="login"><label>טוקן ניהול<input id="token" type="password" autocomplete="off" placeholder="הדבק את HAIM_ADMIN_TOKEN"></label><button id="connect">התחבר</button><button class="secondary" id="refresh">רענן נתונים</button></section>
-  <div id="message" class="notice">הדף אינו שומר את הטוקן בשרת. הוא נשמר רק בדפדפן שלך עד לסגירת הלשונית.</div>
-  <section class="grid" id="metrics"><div class="card metric"><span>תיבת כניסה ממתינה</span><b>—</b></div><div class="card metric"><span>הודעות יוצאות</span><b>—</b></div><div class="card metric"><span>תורי עבודה</span><b>—</b></div><div class="card metric"><span>שגיאות AI</span><b>—</b></div></section>
-  <section class="two"><div class="card"><h2>בקשות פעילות</h2><div class="table"><table><thead><tr><th>#</th><th>סטטוס</th><th>סוג</th><th>תאריך</th></tr></thead><tbody id="requests"><tr><td colspan="4">התחבר כדי לטעון נתונים</td></tr></tbody></table></div></div>
-  <div class="card"><h2>תור הודעות לא ודאיות</h2><div class="table"><table><thead><tr><th>טלפון</th><th>מצב</th><th>שגיאה</th></tr></thead><tbody id="outbox"><tr><td colspan="3">—</td></tr></tbody></table></div></div></section>
-  <section class="two"><div class="card"><h2>סימולציית שיחה</h2><form id="simulate" class="form"><input id="phone" inputmode="numeric" placeholder="טלפון, למשל 584152101" required><textarea id="text" rows="4" placeholder="הודעת WhatsApp לדוגמה" required></textarea><button>הרץ סימולציה</button></form><pre id="result" class="notice">הסימולציה רצה רק בסכמת simulation.</pre></div>
-  <div class="card"><h2>תורים שנכשלו</h2><div class="table"><table><thead><tr><th>תור</th><th>ניסיונות</th><th>מזהה</th></tr></thead><tbody id="failed"><tr><td colspan="3">—</td></tr></tbody></table></div></div></section>
-</main>
+<html lang="he" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>חיים יחד | ניהול</title>
+<style>
+:root{color-scheme:dark;--bg:#09121b;--panel:#101f2c;--line:#254056;--ink:#edf5fa;--muted:#9bb1c2;--accent:#43d5a1;--bad:#ff7474}*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#08131d,#102b36);color:var(--ink);font:15px Arial,sans-serif}header{padding:26px max(20px,calc((100% - 1160px)/2));border-bottom:1px solid var(--line);display:flex;gap:18px;align-items:center;justify-content:space-between}h1{margin:0;font-size:24px}.sub{color:var(--muted);margin-top:5px}.badge{padding:7px 11px;border-radius:99px;background:#12372d;color:var(--accent);font-weight:bold}main{max-width:1160px;margin:24px auto;padding:0 20px}.login,.card{background:rgba(16,31,44,.94);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 8px 28px #0003}.login{display:flex;gap:10px;align-items:end;margin-bottom:20px}.login label{flex:1}input,textarea{width:100%;margin-top:6px;padding:10px;border:1px solid #38546a;border-radius:8px;background:#09151f;color:var(--ink)}button{padding:10px 14px;border:0;border-radius:8px;background:#2cae83;color:#041510;font-weight:bold;cursor:pointer}.secondary{background:#28465b;color:var(--ink)}.danger{background:#b93636;color:white}button:disabled{opacity:.5;cursor:not-allowed}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.metric b{display:block;font-size:28px;margin-top:8px}.metric span{color:var(--muted)}.two{display:grid;grid-template-columns:1.1fr .9fr;gap:14px;margin-top:14px}.card h2{font-size:17px;margin:0 0 12px}.table{max-height:330px;overflow:auto}table{width:100%;border-collapse:collapse}th,td{padding:9px;text-align:right;border-bottom:1px solid #203a4e;vertical-align:top}th{color:var(--muted);font-size:12px}.form{display:grid;gap:10px}.notice{margin:14px 0;padding:11px;border-radius:8px;background:#112a3a;color:#cbe5f5}.error{color:var(--bad)}.ok{color:var(--accent)}.chat{min-height:220px;max-height:390px;overflow:auto;background:#09151f;border:1px solid #38546a;border-radius:10px;padding:10px}.bubble{max-width:86%;padding:10px;margin:7px 0;border-radius:12px;white-space:pre-wrap;line-height:1.45}.me{margin-right:auto;background:#1d5b70}.bot{margin-left:auto;background:#1d493a}.hint{color:var(--muted);font-size:13px}.radios{display:flex;gap:12px;margin:10px 0}.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:10px}@media(max-width:800px){.grid,.two{grid-template-columns:1fr}.login{display:grid}}
+</style></head><body><header><div><h1>חיים יחד · מרכז ניהול</h1><div class="sub">V5 · תפעול, הובלות וסימולציות</div></div><div class="badge">SHADOW · ללא שליחה חיה</div></header><main>
+<section class="login"><label>טוקן ניהול<input id="token" type="password" autocomplete="off" placeholder="הדבק את HAIM_ADMIN_TOKEN"></label><button id="connect">התחבר</button><button class="secondary" id="refresh">רענן נתונים</button></section><div id="message" class="notice">הדף שומר את הטוקן בדפדפן שלך בלבד, עד לסגירת הלשונית.</div>
+<section class="grid" id="metrics"><div class="card metric"><span>תיבת כניסה ממתינה</span><b>—</b></div><div class="card metric"><span>הודעות יוצאות</span><b>—</b></div><div class="card metric"><span>תורי עבודה</span><b>—</b></div><div class="card metric"><span>קריאות AI</span><b>—</b></div></section>
+<section class="two"><div class="card"><h2>רשומות הובלות</h2><div class="hint">כל הובלה נשמרת במסד הנתונים ומופיעה כאן.</div><div class="table"><table><thead><tr><th>#</th><th>סטטוס</th><th>פריטים</th><th>מוסר ← מקבל</th><th>תאריך</th></tr></thead><tbody id="requests"><tr><td colspan="5">התחבר כדי לטעון נתונים</td></tr></tbody></table></div></div><div class="card"><h2>תור הודעות לא ודאיות</h2><div class="table"><table><thead><tr><th>טלפון</th><th>מצב</th><th>שגיאה</th></tr></thead><tbody id="outbox"><tr><td colspan="3">—</td></tr></tbody></table></div></div></section>
+<section class="two"><div class="card"><h2>סימולציית צ׳אט</h2><div class="hint">ההודעות רצות בסביבה נפרדת, ולא נשלחות ל־WhatsApp.</div><div id="chat" class="chat"><div class="hint">כתוב הודעה כדי לדבר עם הבוט.</div></div><form id="simulate" class="form"><input id="phone" inputmode="numeric" placeholder="טלפון לדוגמה, למשל 584152101" required><textarea id="text" rows="3" placeholder="כתוב הודעה לבוט…" required></textarea><button>שלח לבוט</button></form></div><div class="card"><h2>גישת בוט</h2><div class="radios"><label><input type="radio" name="access" value="open" checked> פתוח לכולם</label><label><input type="radio" name="access" value="allowlist"> פתוח רק למספרים שאגדיר</label></div><label>מספרים מורשים<textarea id="allowlist" rows="5" placeholder="מספר אחד בכל שורה או מופרד בפסיקים"></textarea></label><div class="hint">מספר חסום אינו מקבל תגובה מהבוט.</div><div class="actions"><button id="save-access" type="button">שמור הגדרת גישה</button></div><hr><h2>איפוס שיחה</h2><input id="reset-phone" inputmode="numeric" placeholder="מספר טלפון לאיפוס"><div class="actions"><button id="reset-one" class="secondary" type="button">אפס שיחה למספר</button><button id="reset-all" class="danger" type="button">אפס את כל זיכרון הבוט</button></div><div class="hint">הפעולה מתחילה שיחה חדשה; רשומות ההובלות וההיסטוריה נשמרות.</div></div></section>
+<section class="two"><div class="card"><h2>תורים שנכשלו</h2><div class="table"><table><thead><tr><th>תור</th><th>ניסיונות</th><th>מזהה</th></tr></thead><tbody id="failed"><tr><td colspan="3">—</td></tr></tbody></table></div></div></section></main>
 <script>
-const token=document.querySelector('#token'),msg=document.querySelector('#message');token.value=sessionStorage.getItem('haim-admin-token')||'';
-function say(text,kind){msg.textContent=text;msg.className='notice '+(kind||'')}
-function esc(value){const s=String(value??'');return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
-async function api(path,options){const t=token.value.trim();if(!t)throw new Error('יש להזין טוקן ניהול');const r=await fetch('/admin/'+path,Object.assign({headers:{'x-admin-token':t}},options||{}));const j=await r.json();if(!r.ok)throw new Error(j.error?.message||j.error?.code||'הפעולה נכשלה');return j}
-function rows(id,html,span){document.querySelector(id).innerHTML=html||'<tr><td colspan="'+span+'">אין נתונים</td></tr>'}
-async function refresh(){try{sessionStorage.setItem('haim-admin-token',token.value.trim());say('טוען נתונים…');const a=await Promise.all([api('metrics'),api('requests'),api('outbox?state=uncertain'),api('jobs/failed')]);const m=a[0],requests=a[1].requests||[],outbox=a[2].rows||[],failed=a[3].jobs||[];const outTotal=(m.outbox||[]).reduce((n,x)=>n+Number(x.count||0),0);const queueTotal=(m.queues||[]).reduce((n,x)=>n+Number(x.stats?.created||0),0);document.querySelector('#metrics').innerHTML='<div class="card metric"><span>תיבת כניסה ממתינה</span><b>'+esc(m.inbox?.pending)+'</b></div><div class="card metric"><span>הודעות יוצאות</span><b>'+outTotal+'</b></div><div class="card metric"><span>תורי עבודה</span><b>'+queueTotal+'</b></div><div class="card metric"><span>קריאות AI</span><b>'+esc(m.ai?.calls)+'</b></div>';rows('#requests',requests.map(x=>'<tr><td>'+esc(x.number)+'</td><td>'+esc(x.status)+'</td><td>'+esc(x.direction||x.kind||'—')+'</td><td>'+esc(x.run_date||'—')+'</td></tr>').join(''),4);rows('#outbox',outbox.map(x=>'<tr><td>'+esc(x.phone)+'</td><td>'+esc(x.state)+'</td><td>'+esc(x.error_code||'—')+'</td></tr>').join(''),3);rows('#failed',failed.map(x=>'<tr><td>'+esc(x.queue)+'</td><td>'+esc(x.retry_count)+'</td><td>'+esc(x.id).slice(0,8)+'</td></tr>').join(''),3);say('עודכן עכשיו','ok')}catch(e){say(e.message||'הטעינה נכשלה','error')}}
-document.querySelector('#connect').onclick=refresh;document.querySelector('#refresh').onclick=refresh;document.querySelector('#simulate').onsubmit=async e=>{e.preventDefault();try{const r=await api('simulate',{method:'POST',headers:{'content-type':'application/json','x-admin-token':token.value.trim()},body:JSON.stringify({phone:document.querySelector('#phone').value,text:document.querySelector('#text').value})});document.querySelector('#result').textContent=JSON.stringify(r,null,2);say('הסימולציה נשלחה לעיבוד','ok')}catch(e){say(e.message||'הסימולציה נכשלה','error')}};
+const token=document.querySelector('#token'),msg=document.querySelector('#message'),chat=document.querySelector('#chat');token.value=sessionStorage.getItem('haim-admin-token')||'';
+function say(text,kind){msg.textContent=text;msg.className='notice '+(kind||'')}function esc(value){const s=String(value??'');return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}function rows(id,html,span){document.querySelector(id).innerHTML=html||'<tr><td colspan="'+span+'">אין נתונים</td></tr>'}function header(extra){return Object.assign({'x-admin-token':token.value.trim()},extra||{})}async function api(path,options){if(!token.value.trim())throw new Error('יש להזין טוקן ניהול');const o=Object.assign({},options||{});o.headers=header(o.headers);const r=await fetch('/admin/'+path,o);const j=await r.json();if(!r.ok)throw new Error(j.error?.message||j.error?.code||'הפעולה נכשלה');return j}function bubble(text,kind){if(chat.querySelector('.hint'))chat.innerHTML='';const d=document.createElement('div');d.className='bubble '+kind;d.textContent=text;chat.appendChild(d);chat.scrollTop=chat.scrollHeight}function party(x,role){const p=(x.parties||[]).find(v=>v.role===role);return p?(p.name||p.phone||'—'):'—'}
+async function refresh(){try{sessionStorage.setItem('haim-admin-token',token.value.trim());say('טוען נתונים…');const a=await Promise.all([api('metrics'),api('requests'),api('outbox?state=uncertain'),api('jobs/failed'),api('access')]);const m=a[0],requests=a[1].requests||[],outbox=a[2].rows||[],failed=a[3].jobs||[],access=a[4];const outTotal=(m.outbox||[]).reduce((n,x)=>n+Number(x.count||0),0),queueTotal=(m.queues||[]).reduce((n,x)=>n+Number(x.stats?.created||0),0);document.querySelector('#metrics').innerHTML='<div class="card metric"><span>תיבת כניסה ממתינה</span><b>'+esc(m.inbox?.pending)+'</b></div><div class="card metric"><span>הודעות יוצאות</span><b>'+outTotal+'</b></div><div class="card metric"><span>תורי עבודה</span><b>'+queueTotal+'</b></div><div class="card metric"><span>קריאות AI</span><b>'+esc(m.ai?.calls)+'</b></div>';rows('#requests',requests.map(x=>'<tr><td>'+esc(x.number)+'</td><td>'+esc(x.status)+'</td><td>'+esc((x.items||[]).map(i=>i.description).join(', '))+'</td><td>'+esc(party(x,'donor'))+' ← '+esc(party(x,'receiver'))+'</td><td>'+esc(x.run_date||'—')+'</td></tr>').join(''),5);rows('#outbox',outbox.map(x=>'<tr><td>'+esc(x.phone)+'</td><td>'+esc(x.state)+'</td><td>'+esc(x.error_code||'—')+'</td></tr>').join(''),3);rows('#failed',failed.map(x=>'<tr><td>'+esc(x.queue)+'</td><td>'+esc(x.retry_count)+'</td><td>'+esc(x.id).slice(0,8)+'</td></tr>').join(''),3);document.querySelector('input[name="access"][value="'+access.mode+'"]').checked=true;document.querySelector('#allowlist').value=(access.phones||[]).join('\n');say('עודכן עכשיו','ok')}catch(e){say(e.message||'הטעינה נכשלה','error')}}
+async function waitForReply(url){for(let i=0;i<30;i++){await new Promise(resolve=>setTimeout(resolve,500));const r=await fetch(url,{headers:header()});const j=await r.json();if(!r.ok)throw new Error(j.error?.message||'הסימולציה נכשלה');if(j.message?.processed_at){const reply=j.message.reply||(j.outbox||[]).map(x=>x.text).filter(Boolean).join('\n');return reply||'הבוט עיבד את ההודעה ללא תשובה.'}}throw new Error('הסימולציה עדיין מעבדת. נסה שוב בעוד רגע.')}document.querySelector('#connect').onclick=refresh;document.querySelector('#refresh').onclick=refresh;
+document.querySelector('#simulate').onsubmit=async e=>{e.preventDefault();const phone=document.querySelector('#phone').value,text=document.querySelector('#text').value;try{bubble(text,'me');document.querySelector('#text').value='';say('הבוט חושב…');const r=await api('simulate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({phone,text})});const reply=await waitForReply(r.result_url);bubble(reply,'bot');say('הסימולציה הושלמה','ok');refresh()}catch(e){bubble('לא התקבלה תשובה: '+(e.message||'שגיאה'),'bot');say(e.message||'הסימולציה נכשלה','error')}};
+document.querySelector('#save-access').onclick=async()=>{try{const mode=document.querySelector('input[name="access"]:checked').value,phones=document.querySelector('#allowlist').value.split(/[\s,]+/).filter(Boolean);await api('access',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({mode,phones})});say('הגדרת הגישה נשמרה','ok')}catch(e){say(e.message||'השמירה נכשלה','error')}};document.querySelector('#reset-one').onclick=async()=>{const phone=document.querySelector('#reset-phone').value.trim();if(!phone)return say('יש להזין מספר טלפון','error');if(!confirm('לאפס את זיכרון השיחה עבור '+phone+'? רשומות ההובלה לא יימחקו.'))return;try{await api('conversations/'+encodeURIComponent(phone)+'/reset',{method:'POST'});say('השיחה אופסה','ok')}catch(e){say(e.message||'האיפוס נכשל','error')}};document.querySelector('#reset-all').onclick=async()=>{if(!confirm('לאפס את זיכרון הבוט לכל המשתמשים? רשומות ההובלה יישמרו.'))return;try{await api('conversations/reset-all',{method:'POST'});say('זיכרון הבוט אופס לכל המשתמשים','ok')}catch(e){say(e.message||'האיפוס נכשל','error')}};
 </script></body></html>`),
   );
   app.post(
@@ -202,6 +182,75 @@ document.querySelector('#connect').onclick=refresh;document.querySelector('#refr
         const requests = [];
         for (const id of ids.rows) requests.push(await s.request(id.id));
         return { ok: true, requests };
+      });
+      admin.get("/access", async () => {
+        return { ok: true, ...(await runtime.requireStore().botAccess()) };
+      });
+      admin.put("/access", async (req) => {
+        const body = z
+          .strictObject({
+            mode: z.enum(["open", "allowlist"]),
+            phones: z.array(z.string()).max(500),
+          })
+          .parse(req.body);
+        const phones = [...new Set(body.phones.map(canonicalPhone))].sort();
+        const access = { mode: body.mode, phones };
+        const s = runtime.requireStore();
+        await s.transaction(async (client) => {
+          await client.query(
+            "INSERT INTO app_settings(key,value,updated_at) VALUES('bot_access',$1,clock_timestamp()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=EXCLUDED.updated_at",
+            [JSON.stringify(access)],
+          );
+          await s.event(client, { trace_id: req.id }, "admin", "bot_access_changed", access);
+        });
+        return { ok: true, ...access };
+      });
+      admin.post("/conversations/:phone/reset", async (req) => {
+        const phone = canonicalPhone(
+            z.object({ phone: z.string() }).parse(req.params).phone,
+          ),
+          s = runtime.requireStore();
+        await s.transaction(async (client) => {
+          const conversations = await client.query<{ id: string }>(
+            "SELECT cv.id FROM conversations cv JOIN contacts co ON co.id=cv.contact_id WHERE co.phone=$1 FOR UPDATE",
+            [phone],
+          );
+          for (const conversation of conversations.rows) {
+            await client.query(
+              "INSERT INTO conversation_resets(conversation_id,reset_at) VALUES($1,clock_timestamp()) ON CONFLICT(conversation_id) DO UPDATE SET reset_at=EXCLUDED.reset_at",
+              [conversation.id],
+            );
+            await client.query(
+              "UPDATE conversations SET mode='bot',selected_request_id=NULL,version=version+1 WHERE id=$1",
+              [conversation.id],
+            );
+          }
+          await s.event(client, { trace_id: req.id }, "admin", "conversation_reset", {
+            phone,
+            conversations: conversations.rowCount,
+          });
+        });
+        return { ok: true, phone };
+      });
+      admin.post("/conversations/reset-all", async (req) => {
+        const s = runtime.requireStore();
+        await s.transaction(async (client) => {
+          const result = await client.query<{ id: string }>(
+            "SELECT id FROM conversations FOR UPDATE",
+          );
+          for (const conversation of result.rows)
+            await client.query(
+              "INSERT INTO conversation_resets(conversation_id,reset_at) VALUES($1,clock_timestamp()) ON CONFLICT(conversation_id) DO UPDATE SET reset_at=EXCLUDED.reset_at",
+              [conversation.id],
+            );
+          await client.query(
+            "UPDATE conversations SET mode='bot',selected_request_id=NULL,version=version+1",
+          );
+          await s.event(client, { trace_id: req.id }, "admin", "all_conversations_reset", {
+            conversations: result.rowCount,
+          });
+        });
+        return { ok: true };
       });
       admin.get("/messages/:id", async (req) => {
         const p = z.object({ id: uuid }).parse(req.params),
