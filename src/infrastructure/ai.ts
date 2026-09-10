@@ -301,7 +301,8 @@ export class OpenAIPlanner implements Planner {
       prompt: {
         id: this.c.OPENAI_PROMPT_ID,
         version: this.c.OPENAI_PROMPT_VERSION,
-        variables: {
+      },
+      input: [{ role: "user", content: JSON.stringify({
           customer_message: JSON.stringify({
             current_message: text,
             recent_history: ctx.history,
@@ -310,9 +311,7 @@ export class OpenAIPlanner implements Planner {
           }),
           sender_phone: ctx.conversation.phone,
           existing_record: JSON.stringify(existingRecord),
-        },
-      },
-      input: [],
+        }) }],
       reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },
     });
     let managed: ManagedResponse;
