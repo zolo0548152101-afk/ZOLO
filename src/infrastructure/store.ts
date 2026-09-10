@@ -275,6 +275,11 @@ export class Store {
     parties: Party[],
     origin: Request["origin"],
   ): Promise<Request> {
+    // The counter is seed data, but keeping this self-healing makes a clean
+    // test database safe as well.
+    await c.query(
+      "INSERT INTO request_counter(id,value) VALUES(true,0) ON CONFLICT(id) DO NOTHING",
+    );
     const n = await c.query<{ value: string }>(
       "UPDATE request_counter SET value=value+1 RETURNING value",
     );

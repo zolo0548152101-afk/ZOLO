@@ -137,6 +137,44 @@ export class Runtime {
           { id: "monitor" },
           { tz: "Asia/Jerusalem", key: "monitor" },
         );
+        // A deployment or a worker restart must never strand an accepted
+        // WhatsApp message or an outbound reply in the database. Rebuild the
+        // lightweight queue jobs from durable state before declaring ready.
+        const recover = await this.pool.query<{
+          id: string;
+          phone: string;
+        }>(
+          `SELECT m.id,co.phone
+             FROM messages m
+             JOIN contacts co ON co.id=m.contact_id
+            WHERE m.processed_at IS NULL
+            ORDER BY m.seq
+            LIMIT 500`,
+        );
+        for (const row of recover.rows) {
+          await store.transaction(async (c) => {
+            await queue.send(c, "conversation", { id: row.id }, row.phone);
+          });
+        }
+        const recoverOutbound = await this.pool.query<{
+          id: string;
+          phone: string;
+        }>(
+          `SELECT id,phone
+             FROM outbox
+            WHERE state='pending'
+            ORDER BY seq
+            LIMIT 500`,
+        );
+        for (const row of recoverOutbound.rows) {
+          await store.transaction(async (c) => {
+            const jobId = await queue.send(c, "send", { id: row.id }, row.phone);
+            await c.query("UPDATE outbox SET job_id=$2 WHERE id=$1", [
+              row.id,
+              jobId,
+            ]);
+          });
+        }
         await this.beat();
         this.heartbeat = setInterval(
           () =>
