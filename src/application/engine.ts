@@ -351,7 +351,8 @@ export class Engine {
       if (older.rowCount) throw new RetryableError("earlier_message_pending");
       let reply: string | null = null,
         request: Request | null = null,
-        reason: string | undefined = technicalReason;
+        reason: string | undefined = technicalReason,
+        protectedReply = false;
       const plan = ctx.message.ai_plan
         ? planSchema.parse(ctx.message.ai_plan)
         : proposed;
@@ -365,6 +366,7 @@ export class Engine {
         const requests: Request[] = [];
         for (const row of ids.rows) requests.push(await this.s.request(row.id, c));
         reply = statusText(requests);
+        protectedReply = true;
       } else if (isStatus(text)) reply = statusText(ctx.requests);
       else if (ctx.conversation.mode === "human") {
         await this.alert(c, ctx, "human_followup", null, null);
@@ -641,6 +643,7 @@ export class Engine {
         !reason &&
         reply &&
         managedReply &&
+        !protectedReply &&
         actionSource !== "deterministic_flow"
       )
         reply = managedReply;
