@@ -310,9 +310,22 @@ export class Engine {
       else if (ctx.conversation.mode === "human") {
         await this.alert(c, ctx, "human_followup", null, null);
       } else if (technicalReason || ctx.message.media_state === "failed") {
-        reply =
-          "לא הצלחנו להשלים את הטיפול בהודעה. העברתי לבדיקה אנושית. נעדכן.";
-        reason ??= "media_failure";
+        const selected =
+          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+          (ctx.requests.length === 1 ? ctx.requests[0] : undefined);
+        if (technicalReason === "openai_failure" || technicalReason === "voice_failure") {
+          reply = selected
+            ? `לא הצלחתי להבין את ההודעה. ${nextQuestion(selected, phone).text}`
+            : "לא הצלחתי להבין. אפשר לכתוב, למשל: אני רוצה למסור מיטה.";
+          reason = undefined;
+          await this.s.event(c, ctx.message, "system", "automatic_fallback", {
+            technical_reason: technicalReason,
+          }, selected?.id ?? null);
+        } else {
+          reply =
+            "לא הצלחנו להשלים את הטיפול בהודעה. העברתי לבדיקה אנושית. נעדכן.";
+          reason ??= "media_failure";
+        }
       } else if (quickReply(text) !== null) {
         const quick = quickReply(text)!;
         const selected =
