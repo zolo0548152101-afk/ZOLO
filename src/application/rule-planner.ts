@@ -64,6 +64,18 @@ function namedRecipientPhone(text: string): string | null {
   }
 }
 
+function standalonePhone(text: string): string | null {
+  const candidates = text.match(/(?:\+?972|0)?[\d][\d\s().-]{7,14}\d/g) ?? [];
+  for (const candidate of candidates) {
+    try {
+      return canonicalPhone(candidate);
+    } catch {
+      // Keep looking; a message can contain other numeric text.
+    }
+  }
+  return null;
+}
+
 /**
  * Handles the predictable parts of the conversation without an external model.
  * Returning null intentionally delegates only genuinely free-form language to AI.
@@ -101,6 +113,22 @@ export function rulePlan(ctx: Context): Plan | null {
   }
   const donor = party.role === "donor";
   const items = current.items;
+  // A direct handoff commonly arrives as two WhatsApp messages: first the
+  // item/name, then a phone number or contact card. Persist that second
+  // message deterministically before asking the AI to phrase anything.
+  if (current.origin === "direct") {
+    const supplied =
+      ctx.message.contacts[0]?.phone ?? standalonePhone(text);
+    if (supplied && !current.parties.some((p) => p.phone === supplied))
+      return plan(text, [
+        {
+          type: "counterparty",
+          request_number: current.number,
+          phone: supplied,
+          name: ctx.message.contacts[0]?.name ?? null,
+        },
+      ]);
+  }
   const askedVerification = /האם תרצה שנפנה ל(?:מקבל|מוסר) לצורך אימות/.test(
     ctx.history.at(-1)?.content ?? "",
   );

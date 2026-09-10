@@ -1,5 +1,6 @@
 import type pg from "pg";
 import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { Store, type Outbound } from "../infrastructure/store.js";
 import { Commands, type Outcome } from "./commands.js";
 import type { Planner } from "../infrastructure/ai.js";
@@ -138,6 +139,9 @@ export class Engine {
   async processNext(triggerId: string, lastAiAttempt = false): Promise<void> {
     const trigger = await this.s.message(triggerId);
     if (!trigger.phone) return;
+    // WhatsApp can deliver several short messages in one burst. Give the
+    // sender a small coalescing window so one reply covers the whole burst.
+    await delay(900);
     const next = await this.s.pool.query<{ id: string }>(
       "SELECT m.id FROM messages m JOIN contacts c ON c.id=m.contact_id WHERE c.phone=$1 AND m.processed_at IS NULL ORDER BY m.seq LIMIT 1",
       [trigger.phone],

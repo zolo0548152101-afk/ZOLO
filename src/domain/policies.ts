@@ -79,9 +79,15 @@ export function donationIntent(t: string): boolean {
   );
 }
 export function directHandoffIntent(t: string): boolean {
-  return /(?:להעביר(?:\s+.{1,80})?\s+ל(?:מישהו|מישהי|אדם)|למסור(?:\s+.{1,80})?\s+ל(?:מישהו|מישהי|אדם)|מקבל(?:ת)?\s+(?:מסוים|מוגדר))/.test(
-    norm(t),
-  );
+  const text = norm(t);
+  if (/(?:מקבל(?:ת)?\s+(?:מסוים|מוגדר)|למישהו|למישהי|לאדם)/.test(text))
+    return /(?:להעביר|למסור|מסירה|מסירה ישירה)/.test(text);
+  // A named recipient is often written naturally as "למסור מיטה לטל".
+  // Do not classify a normal open donation or a place name as direct.
+  if (!/(?:להעביר|למסור|מעביר|מעבירה|מוסר|מוסרת)/.test(text)) return false;
+  if (/(?:למסירה|לתרומה|לבית שאן|לעפולה|לתל אביב|לצמח|לקרקע)/.test(text))
+    return false;
+  return /(?:להעביר|למסור|מעביר|מעבירה|מוסר|מוסרת).{0,80}\sל[א-ת]{2,}(?:\s+[א-ת]{2,})?\s*$/.test(text);
 }
 export function grounded(plan: Plan, text: string): boolean {
   return (
