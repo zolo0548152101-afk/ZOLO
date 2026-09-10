@@ -172,7 +172,7 @@ export function nextQuestion(
       text: "אפשר להעביר רק ארון קטן שניתן להעביר שלם, ללא פירוק והרכבה. האם זה ארון כזה?",
       floorNote: false,
     };
-  if (donor && r.items.some((i) => i.free === null || i.working === null))
+  if (donor && r.items.some((i) => i.working === null))
     return {
       text: "האם הפריט נמסר בחינם והוא תקין ושמיש ב־100%?",
       floorNote: false,

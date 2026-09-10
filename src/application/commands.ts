@@ -135,7 +135,8 @@ export class Commands {
       const items = cmd.items.map(asItem);
       if (cmd.type === "donate")
         for (const i of items) {
-          i.free = cmd.free;
+          // "למסירה" is an explicit free-donation intent.
+          i.free = cmd.free === false ? false : true;
           i.working = cmd.working;
         }
       const error = itemError(items, false);
@@ -282,6 +283,14 @@ export class Commands {
       return output("הפנייה נשמרה להמשך. נמתין לאישור הצד השני ונעדכן.", r);
     }
     if (cmd.type === "next") {
+      const previous = ctx.history.at(-1)?.content ?? "";
+      if (
+        ownParty(r, phone).role === "donor" &&
+        !r.parties.some((p) => p.role === "receiver") &&
+        /מקבל מסוים/.test(previous) &&
+        /^(?:לא|אין(?: לי)?(?: מקבל)?|אין מקבל)/.test(text.trim())
+      )
+        return output("הפרטים נשמרו. ננסה למצוא מקבל מתאים ונעדכן.", r);
       const q = nextQuestion(r, phone);
       if (q.floorNote) {
         ownParty(r, phone).floor_note_shown = true;
