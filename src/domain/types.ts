@@ -68,7 +68,7 @@ export const commandSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("counterparty"),
     request_number: ref,
-    phone: z.string().min(3).max(40),
+    phone: z.string().min(3).max(40).nullable(),
     name: str,
   }),
   z.strictObject({ type: z.literal("approve_self"), request_number: ref }),
@@ -178,6 +178,7 @@ export interface Conversation {
   mode: "bot" | "human";
   selected_request_id: string | null;
   version: number;
+  pending_counterparty_name: string | null;
 }
 export interface Incoming {
   id: string;

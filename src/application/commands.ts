@@ -286,6 +286,15 @@ export class Commands {
       if (
         ownParty(r, phone).role === "donor" &&
         !r.parties.some((p) => p.role === "receiver") &&
+        ctx.conversation.pending_counterparty_name &&
+        /(?:אין לי מספר|אין מספר|אין מקבל|לא)/.test(text.trim())
+      ) {
+        await c.query("UPDATE conversations SET pending_counterparty_name=NULL,version=version+1 WHERE id=$1", [ctx.conversation.id]);
+        return output("אין בעיה. נמשיך את המסירה וננסה למצוא מקבל מתאים.", r);
+      }
+      if (
+        ownParty(r, phone).role === "donor" &&
+        !r.parties.some((p) => p.role === "receiver") &&
         /מקבל מסוים/.test(previous) &&
         /^(?:לא|אין(?: לי)?(?: מקבל)?|אין מקבל)/.test(text.trim())
       )
@@ -373,6 +382,12 @@ export class Commands {
     } else if (cmd.type === "counterparty") {
       const role = ownParty(r, phone).role === "donor" ? "receiver" : "donor";
       const other = r.parties.find((p) => p.role === role);
+      if (!cmd.phone) {
+        if (role !== "receiver" || !cmd.name)
+          throw new AppError("phone_not_supplied", 403, "נא לשלוח את מספר הצד השני או כרטיס איש קשר.");
+        await c.query("UPDATE conversations SET pending_counterparty_name=$2,version=version+1 WHERE id=$1", [ctx.conversation.id, cmd.name]);
+        return output(`רשמתי שהמקבל הוא ${cmd.name}. כדי שנוכל לתאם איתו ב־WhatsApp, נא לשלוח את מספר הטלפון שלו או כרטיס איש קשר. אם אין לך את המספר, כתוב "אין לי מספר" ונמשיך לחיפוש מקבל מתאים.`, r);
+      }
       const targetPhone = suppliedPhone(ctx, cmd.phone);
       if (other) {
         if (other.phone === targetPhone)
@@ -391,8 +406,9 @@ export class Commands {
       );
       // A contact card is identity data, never consent.
       p.name =
-        ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ?? null;
+        ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ?? ctx.conversation.pending_counterparty_name ?? cmd.name ?? null;
       r.parties.push(p);
+      await c.query("UPDATE conversations SET pending_counterparty_name=NULL,version=version+1 WHERE id=$1", [ctx.conversation.id]);
       r.origin = "direct";
       if (targetPhone !== phone)
         notices.push({

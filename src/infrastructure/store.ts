@@ -223,7 +223,7 @@ export class Store {
     const message = await this.message(id, c, lock);
     if (!message.phone) throw new AppError("identity_unresolved", 409);
     const conv = await c.query<Conversation>(
-      `SELECT cv.id,co.phone,cv.chat_id,cv.mode,cv.selected_request_id,cv.version FROM conversations cv JOIN contacts co ON co.id=cv.contact_id JOIN messages m ON m.conversation_id=cv.id WHERE m.id=$1 ${lock ? "FOR UPDATE OF cv" : ""}`,
+      `SELECT cv.id,co.phone,cv.chat_id,cv.mode,cv.selected_request_id,cv.version,cv.pending_counterparty_name FROM conversations cv JOIN contacts co ON co.id=cv.contact_id JOIN messages m ON m.conversation_id=cv.id WHERE m.id=$1 ${lock ? "FOR UPDATE OF cv" : ""}`,
       [id],
     );
     if (!conv.rows[0]) throw new AppError("conversation_missing", 409);
