@@ -1,4 +1,5 @@
 import { z } from "zod";
+import OpenAI from "openai";
 import type { Config } from "../config.js";
 import { canonicalPhone } from "../domain/policies.js";
 import { AppError, RetryableError } from "../domain/types.js";
@@ -119,9 +120,30 @@ export class WahaChannel implements Channel {
 export async function transcribe(
   bytes: Buffer,
   c: Config,
+  mime = "audio/ogg",
   fetcher: typeof fetch = fetch,
 ): Promise<string> {
-  if (!c.IVRIT_API_TOKEN) throw new AppError("voice_not_configured");
+  if (!c.IVRIT_API_TOKEN) {
+    if (!c.OPENAI_API_KEY) throw new AppError("voice_not_configured");
+    try {
+      const extension = mime === "audio/mpeg" ? "mp3" : mime === "audio/mp4" ? "m4a" : mime === "audio/wav" ? "wav" : "ogg";
+      const audio = new File([new Uint8Array(bytes)], `voice.${extension}`, { type: mime });
+      const client = new OpenAI({
+        apiKey: c.OPENAI_API_KEY,
+        timeout: c.IVRIT_TIMEOUT_MS,
+        maxRetries: 0,
+      });
+      const result = await client.audio.transcriptions.create({
+        file: audio,
+        model: c.OPENAI_TRANSCRIBE_MODEL,
+        language: "he",
+      });
+      return z.string().trim().min(1).max(16000).parse(result.text);
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new RetryableError("openai_transcription_failed");
+    }
+  }
   const r = await fetcher(c.IVRIT_URL, {
     method: "POST",
     headers: {

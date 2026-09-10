@@ -28,7 +28,9 @@ import {
   OUTSIDE,
   grounded,
   mutable,
+  nextQuestion,
 } from "../domain/policies.js";
+import { rulePlan } from "./rule-planner.js";
 
 export class Engine {
   private readonly commands: Commands;
@@ -167,13 +169,17 @@ export class Engine {
       !ctx.message.transcript
     ) {
       try {
-        const media = await this.s.pool.query<{ storage_key: string }>(
-          "SELECT storage_key FROM media WHERE id=$1",
+        const media = await this.s.pool.query<{
+          storage_key: string;
+          mime_type: string;
+        }>(
+          "SELECT storage_key,mime_type FROM media WHERE id=$1",
           [ctx.message.media_id],
         );
         const text = await transcribe(
           await this.storage.get(media.rows[0]!.storage_key),
           this.s.config,
+          media.rows[0]!.mime_type,
         );
         await this.s.pool.query(
           "UPDATE messages SET transcript=$2 WHERE id=$1 AND transcript IS NULL",
@@ -201,7 +207,10 @@ export class Engine {
     let plan = ctx.message.ai_plan;
     if (!plan) {
       try {
-        const response = await this.ai.plan(ctx);
+        const deterministic = rulePlan(ctx);
+        const response = deterministic
+          ? { plan: deterministic, metadata: { provider: "deterministic_flow" } }
+          : await this.ai.plan(ctx);
         plan = planSchema.parse(response.plan);
         if (!grounded(plan, text)) throw new AppError("ungrounded_tool");
         await this.s.pool.query(
@@ -304,7 +313,15 @@ export class Engine {
         reply =
           "לא הצלחנו להשלים את הטיפול בהודעה. העברתי לבדיקה אנושית. נעדכן.";
         reason ??= "media_failure";
-      } else if (quickReply(text) !== null) reply = quickReply(text);
+      } else if (quickReply(text) !== null) {
+        const quick = quickReply(text)!;
+        const selected =
+          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+          (ctx.requests.length === 1 ? ctx.requests[0] : undefined);
+        reply = selected && quick.startsWith("שלום וברוכים")
+          ? nextQuestion(selected, phone).text
+          : quick;
+      }
       else if (ctx.message.kind === "image") {
         const owned = ctx.requests.filter(
           (r) =>
@@ -352,18 +369,41 @@ export class Engine {
           await this.s.event(c, ctx.message, phone, "unassigned_photo", {
             media_id: ctx.message.media_id,
           });
-        reply = PHOTO_THANKS;
+        reply = request
+          ? `${PHOTO_THANKS}\n${nextQuestion(request, phone).text}`
+          : PHOTO_THANKS;
       } else if (ctx.message.kind === "location") {
+        const selected =
+          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+          (ctx.requests.length === 1 ? ctx.requests[0] : undefined);
+        if (selected) {
+          request = await this.s.request(selected.id, c, true);
+          const party = request.parties.find((p) => p.phone === phone);
+          if (party && ctx.message.location)
+            await c.query(
+              `INSERT INTO request_locations(request_id,role,latitude,longitude,message_id)
+               VALUES($1,$2,$3,$4,$5)
+               ON CONFLICT(request_id,role) DO UPDATE SET latitude=EXCLUDED.latitude,longitude=EXCLUDED.longitude,message_id=EXCLUDED.message_id,captured_at=clock_timestamp()`,
+              [
+                request.id,
+                party.role,
+                ctx.message.location.latitude,
+                ctx.message.location.longitude,
+                ctx.message.id,
+              ],
+            );
+        }
         await this.s.event(
           c,
           ctx.message,
           phone,
           "location_received",
           { location: ctx.message.location },
-          ctx.conversation.selected_request_id,
+          request?.id ?? ctx.conversation.selected_request_id,
         );
-        reply =
-          "נקודת המיקום התקבלה. נא לציין גם את שם היישוב אם עדיין לא נמסר.";
+        reply = request
+          ? `נקודת המיקום התקבלה. ${nextQuestion(request, phone).text}`
+          : "נקודת המיקום התקבלה. נא לציין גם את שם היישוב אם עדיין לא נמסר.";
       } else if (plan) {
         const stored = await c.query<{
           plan_versions: Record<string, number> | null;

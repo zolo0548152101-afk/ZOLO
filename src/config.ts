@@ -60,6 +60,7 @@ const envSchema = z.object({
     .min(1000)
     .max(120000)
     .default(45000),
+  OPENAI_TRANSCRIBE_MODEL: z.string().default("gpt-4o-mini-transcribe"),
   TRANSPORT_CAPACITY: z.coerce.number().int().min(1).max(100).default(10),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
   ENABLE_SIMULATE: flag.default(true),

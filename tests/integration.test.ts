@@ -479,6 +479,23 @@ test("two quick messages preserve receipt order even when processing is invoked 
   assert.equal((await outputs(a.id))[0]!.text, PHOTO_FIRST);
   assert.equal((await outputs(b.id))[0]!.text, PHOTO_THANKS);
 });
+test("core donation conversation completes without calling the AI planner", async () => {
+  const p = phone(),
+    calls = ai.calls;
+  let result = await message(p, "אני רוצה למסור מיטה");
+  assert.match(result.row.reply ?? "", /תקין ושמיש/);
+  result = await message(p, "כן");
+  assert.match(result.row.reply ?? "", /פירוק/);
+  result = await message(p, "לא");
+  assert.match(result.row.reply ?? "", /באיזה יישוב/);
+  result = await message(p, "בית שאן");
+  assert.match(result.row.reply ?? "", /שם וכתובת/);
+  result = await message(p, "ישראל");
+  assert.match(result.row.reply ?? "", /חסרה רק הכתובת/);
+  result = await message(p, "הרצל 12, קומה 2");
+  assert.match(result.row.reply ?? "", /מקבל מסוים/);
+  assert.equal(ai.calls, calls);
+});
 test("atomic business commit rolls back if enqueue fails, then retries without duplicate request", async () => {
   const p = phone(),
     m = await enqueue(p, "יש לי מיטה למסירה", [donate()]);

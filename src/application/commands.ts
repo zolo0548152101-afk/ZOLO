@@ -357,7 +357,7 @@ export class Commands {
           i.working = cmd.working;
         }
         if (/(?:לא תקין|לא עובד|מקולקל|שבור)/.test(text)) i.working = false;
-        if (i.kind === "wardrobe" && r.photo_ids.length) {
+        if (i.kind === "wardrobe") {
           if (cmd.wardrobe_small_whole !== null)
             i.wardrobe_small_whole = cmd.wardrobe_small_whole;
           if (cmd.needs_disassembly !== null)
