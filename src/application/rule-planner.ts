@@ -1,5 +1,12 @@
 import type { Command, Context, ItemKind, Plan, Request } from "../domain/types.js";
-import { appliance, donationIntent, explicitApproval, norm, ownParty } from "../domain/policies.js";
+import {
+  appliance,
+  canonicalPhone,
+  donationIntent,
+  explicitApproval,
+  norm,
+  ownParty,
+} from "../domain/policies.js";
 
 const activeRequest = (ctx: Context): Request | undefined =>
   ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
@@ -44,6 +51,18 @@ function beitShean(text: string): string | null {
   return /בית\s*[-־]?\s*שאן/.test(text) ? "בית שאן" : null;
 }
 
+function namedRecipientPhone(text: string): string | null {
+  const match = text.match(
+    /(?:למקבל(?:ת)?|מקבל(?:ת)?(?:\s+מספר)?|אל)\s*[:־-]?\s*([+\d\s().-]{8,})/,
+  );
+  if (!match?.[1]) return null;
+  try {
+    return canonicalPhone(match[1]);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Handles the predictable parts of the conversation without an external model.
  * Returning null intentionally delegates only genuinely free-form language to AI.
@@ -61,7 +80,7 @@ export function rulePlan(ctx: Context): Plan | null {
       {
         type: "donate",
         items: [{ ...item, quantity: 1 }],
-        counterparty_phone: null,
+        counterparty_phone: namedRecipientPhone(text),
         free: true,
         working: null,
       },
