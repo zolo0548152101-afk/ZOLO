@@ -174,7 +174,7 @@ export function nextQuestion(
     };
   if (donor && r.items.some((i) => i.working === null))
     return {
-      text: "האם הפריט נמסר בחינם והוא תקין ושמיש ב־100%?",
+      text: "האם הפריט תקין ושמיש ב־100%?",
       floorNote: false,
     };
   if (donor && r.items.some((i) => i.kind === "oven" && i.oven_type === null))
