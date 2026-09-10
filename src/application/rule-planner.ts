@@ -51,22 +51,24 @@ function beitShean(text: string): string | null {
 export function rulePlan(ctx: Context): Plan | null {
   const text = (ctx.message.transcript ?? ctx.message.text).trim();
   if (!text) return null;
-  const current = activeRequest(ctx);
 
-  if (!current) {
-    const item = kindAndDescription(text);
-    if (item && donationIntent(text))
-      return plan(text, [
-        {
-          type: "donate",
-          items: [{ ...item, quantity: 1 }],
-          counterparty_phone: null,
-          free: true,
-          working: null,
-        },
-      ]);
-    return null;
-  }
+  // A new, explicit donation always starts a new request.  Do this before
+  // looking at active requests: a contact may have older open requests, but
+  // "אני רוצה למסור מיטה" must never be interpreted as an answer to one.
+  const item = kindAndDescription(text);
+  if (item && donationIntent(text))
+    return plan(text, [
+      {
+        type: "donate",
+        items: [{ ...item, quantity: 1 }],
+        counterparty_phone: null,
+        free: true,
+        working: null,
+      },
+    ]);
+
+  const current = activeRequest(ctx);
+  if (!current) return null;
 
   let party;
   try {

@@ -109,6 +109,18 @@ test("deterministic flow turns a donation sentence into a request without AI", (
   assert.equal((result?.commands[0] as Extract<typeof result.commands[number], { type: "donate" }>).items[0]?.kind, "bed");
   assert.equal(r.items[0]?.kind, "fridge");
 });
+test("an explicit new donation is not confused with an older open request", () => {
+  const older = sampleRequest();
+  const context: Context = {
+    conversation: { id: "c", phone: "501111111", chat_id: "972501111111@c.us", mode: "bot", selected_request_id: older.id, version: 1, pending_counterparty_name: null },
+    requests: [older],
+    candidates: [],
+    message: { id: "m", seq: "1", external_id: "e", trace_id: "t", mode: "simulation", chat_id: "972501111111@c.us", phone: "501111111", kind: "text", text: "אני רוצה למסור מיטה", contacts: [], location: null, media_url: null, media_id: null, media_state: "none", transcript: null, processed_at: null, ai_plan: null },
+    history: [],
+  };
+  const result = rulePlan(context);
+  assert.equal(result?.commands[0]?.type, "donate");
+});
 test("wardrobe rejection occurs after photo; only small whole wardrobe allowed", () => {
   const r = sampleRequest(),
     i = r.items[0]!;
