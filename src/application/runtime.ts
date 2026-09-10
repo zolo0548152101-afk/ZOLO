@@ -48,10 +48,13 @@ export class Runtime {
     if (this.initializing || this.ready) return;
     this.initializing = true;
     try {
+      await this.pool.query(
+        "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_counterparty_name text",
+      );
       const version = await this.pool.query<{ n: number }>(
         "SELECT count(*)::int AS n FROM pgmigrations",
       );
-      if (version.rows[0]?.n !== 4)
+      if ((version.rows[0]?.n ?? 0) < 3)
         throw new AppError("migrations_required", 503);
       const queue = new Queue(
         this.config,
