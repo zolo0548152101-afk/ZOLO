@@ -205,10 +205,15 @@ export function nextQuestion(
       text: "האם הפריט תקין ושמיש ב־100%?",
       floorNote: false,
     };
-  if (donor && r.items.some((i) => i.kind === "oven" && i.oven_type === null))
+  if (
+    donor &&
+    r.origin !== "direct" &&
+    r.items.some((i) => i.kind === "oven" && i.oven_type === null)
+  )
     return { text: "האם זה תנור בילט־אין או תנור משולב?", floorNote: false };
   if (
     donor &&
+    r.origin !== "direct" &&
     r.items.some(
       (i) =>
         !appliance(i) && i.kind !== "wardrobe" && i.needs_disassembly === null,

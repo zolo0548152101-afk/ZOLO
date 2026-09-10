@@ -436,11 +436,9 @@ export class Commands {
           if (item.working === null) item.working = true;
       await c.query("UPDATE conversations SET pending_counterparty_name=NULL,version=version+1 WHERE id=$1", [ctx.conversation.id]);
       r.origin = "direct";
-      if (targetPhone !== phone)
-        notices.push({
-          phone: targetPhone,
-          text: `פנייה ${r.number}: ${r.items.map((i) => i.description).join(", ")}. נא לאשר את חלקך ב${role === "donor" ? "מסירה" : "קבלה"}. ההובלות בימי שלישי 16:00–20:00. נעדכן.`,
-        });
+      // In a direct handoff, receiving a phone number is not permission to
+      // contact that person. The initiating party must explicitly choose the
+      // verification-message option first.
     } else if (cmd.type === "approve_self") {
       if (
         !explicitApproval(text) ||
