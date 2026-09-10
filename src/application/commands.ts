@@ -152,7 +152,6 @@ export class Commands {
       }
       if (isDonor && !other)
         for (const i of items) {
-          i.free = null;
           i.working = null;
         }
       const r = await this.s.create(
