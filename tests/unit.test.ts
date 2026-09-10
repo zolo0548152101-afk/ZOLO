@@ -18,7 +18,7 @@ import {
   statusText,
 } from "../src/domain/policies.js";
 import { rulePlan } from "../src/application/rule-planner.js";
-import type { Context } from "../src/domain/types.js";
+import type { Command, Context } from "../src/domain/types.js";
 import { planSchema, commandSchema } from "../src/domain/types.js";
 import { parseWebhook, verifyHmac } from "../src/infrastructure/webhook.js";
 import {
