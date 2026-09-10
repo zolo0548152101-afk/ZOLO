@@ -417,6 +417,30 @@ test("donor and receiver approvals are separate and repeat approval preserves ti
     second.parties.find((p) => p.role === "receiver")!.approved_at,
   );
 });
+test("direct donation skips the generic condition question", async () => {
+  const donor = phone(),
+    receiver = phone(),
+    cmd = donate("מיטה", "bed");
+  if (cmd.type !== "donate") throw new Error();
+  cmd.counterparty_phone = receiver;
+  const result = await message(donor, `יש לי מיטה למסירה למקבל ${receiver}`, [cmd]);
+  assert.doesNotMatch(result.row.reply ?? "", /תקין ושמיש/);
+  assert.match(result.row.reply ?? "", /פירוק/);
+  const r = (await s.active(donor))[0]!;
+  assert.equal(r.items[0]!.working, true);
+});
+test("adding a named recipient later also skips the condition question", async () => {
+  const donor = phone(),
+    receiver = phone();
+  await message(donor, "יש לי מיטה למסירה", [donate()]);
+  const r = (await s.active(donor))[0]!;
+  const result = await message(donor, `המקבל הוא ${receiver}`, [
+    { type: "counterparty", request_number: r.number, phone: receiver, name: null },
+  ]);
+  assert.doesNotMatch(result.row.reply ?? "", /תקין ושמיש/);
+  assert.match(result.row.reply ?? "", /פירוק/);
+  assert.equal((await s.request(r.id)).items[0]!.working, true);
+});
 test("receiver cannot alter donor item facts; attempted forbidden change escalates durably", async () => {
   const r = await readyRequest(),
     receiver = r.parties[1]!.phone;

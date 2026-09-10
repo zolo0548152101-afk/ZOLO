@@ -133,16 +133,18 @@ export class Commands {
           "האם ברצונך למסור את הפריט בחינם?",
         );
       const items = cmd.items.map(asItem);
+      const isDonor = cmd.type === "donate",
+        other = isDonor ? cmd.counterparty_phone : cmd.donor_phone;
       if (cmd.type === "donate")
         for (const i of items) {
           // "למסירה" is an explicit free-donation intent.
           i.free = cmd.free === false ? false : true;
-          i.working = cmd.working;
+          // A donor who already named the recipient is in a direct handoff.
+          // Do not block that path with the generic condition question.
+          i.working = other ? true : cmd.working;
         }
       const error = itemError(items, false);
       if (error) return output(error);
-      const isDonor = cmd.type === "donate",
-        other = isDonor ? cmd.counterparty_phone : cmd.donor_phone;
       const parties = [party(isDonor ? "donor" : "receiver", phone, isDonor)];
       if (other) {
         const p = suppliedPhone(ctx, other);
@@ -408,6 +410,11 @@ export class Commands {
       p.name =
         ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ?? ctx.conversation.pending_counterparty_name ?? cmd.name ?? null;
       r.parties.push(p);
+      // Adding a named receiver converts an open donation into a direct
+      // handoff.  The generic condition question is not part of this flow.
+      if (role === "receiver")
+        for (const item of r.items)
+          if (item.working === null) item.working = true;
       await c.query("UPDATE conversations SET pending_counterparty_name=NULL,version=version+1 WHERE id=$1", [ctx.conversation.id]);
       r.origin = "direct";
       if (targetPhone !== phone)
