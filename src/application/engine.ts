@@ -632,10 +632,18 @@ export class Engine {
       const candidateReply = metadata.rows[0]?.ai_metadata?.managed_reply;
       const managedReply =
         typeof candidateReply === "string" ? candidateReply.trim() : "";
+      const actionSource = metadata.rows[0]?.ai_metadata?.action_source;
       // The prompt may never override an operational failure, a human handoff,
-      // or a missing reply. Those require fixed, auditable wording. For normal
-      // conversation, its reply is the exact text delivered to WhatsApp.
-      if (!reason && reply && managedReply) reply = managedReply;
+      // or a missing reply. A deterministic flow question is also protected:
+      // the prompt is consulted and logged, but cannot replace the next safe
+      // operational step with a contradictory question.
+      if (
+        !reason &&
+        reply &&
+        managedReply &&
+        actionSource !== "deterministic_flow"
+      )
+        reply = managedReply;
       if (reason) await this.alert(c, ctx, reason, reply, request);
       if (reply)
         await this.s.outbound(
