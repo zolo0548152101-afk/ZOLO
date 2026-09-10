@@ -435,16 +435,28 @@ export class Store {
       ],
     );
     if (row.rows[0]) {
-      const job = await this.queue.send(
-        c,
-        "send",
-        { id: row.rows[0].id },
-        phone,
+      // Schedule only the head of this recipient's queue. Scheduling every
+      // row at once races the FIFO worker and can permanently strand later
+      // WhatsApp replies behind a retried job.
+      const older = await c.query(
+        `SELECT 1 FROM outbox
+          WHERE phone=$1 AND seq<(SELECT seq FROM outbox WHERE id=$2)
+            AND state IN ('pending','sending','uncertain','failed')
+          LIMIT 1`,
+        [phone, row.rows[0].id],
       );
-      await c.query("UPDATE outbox SET job_id=$2 WHERE id=$1", [
-        row.rows[0].id,
-        job,
-      ]);
+      if (!older.rowCount) {
+        const job = await this.queue.send(
+          c,
+          "send",
+          { id: row.rows[0].id },
+          phone,
+        );
+        await c.query("UPDATE outbox SET job_id=$2 WHERE id=$1", [
+          row.rows[0].id,
+          job,
+        ]);
+      }
     }
   }
   async linkPhoto(c: pg.PoolClient, r: Request, m: Incoming): Promise<void> {

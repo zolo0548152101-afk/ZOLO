@@ -160,10 +160,10 @@ export class Runtime {
           id: string;
           phone: string;
         }>(
-          `SELECT id,phone
+          `SELECT DISTINCT ON (phone) id,phone
              FROM outbox
             WHERE state='pending'
-            ORDER BY seq
+            ORDER BY phone,seq
             LIMIT 500`,
         );
         for (const row of recoverOutbound.rows) {

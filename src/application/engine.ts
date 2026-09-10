@@ -696,6 +696,22 @@ export class Engine {
           "UPDATE matches SET state='presented',presented_at=clock_timestamp() WHERE id=$1 AND state='queued_photo'",
           [claimed.match_id],
         );
+      const next = await c.query<{ id: string }>(
+        "SELECT id FROM outbox WHERE phone=$1 AND state='pending' ORDER BY seq LIMIT 1",
+        [claimed.phone],
+      );
+      if (next.rows[0]) {
+        const job = await this.s.queue.send(
+          c,
+          "send",
+          { id: next.rows[0].id },
+          claimed.phone,
+        );
+        await c.query("UPDATE outbox SET job_id=$2 WHERE id=$1", [
+          next.rows[0].id,
+          job,
+        ]);
+      }
       this.log.info({
         stage: "sent",
         trace_id: claimed.trace_id,
