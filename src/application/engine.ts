@@ -302,20 +302,36 @@ export class Engine {
     dedupeKey: string,
   ): Promise<Notice> {
     if (!notice.text.trim()) return notice;
-    const formatted = await this.ai.phraseNotice(ctx, notice, request);
-    await this.s.event(
-      c,
-      ctx.message,
-      "system",
-      "managed_notice_formatted",
-      {
-        dedupe_key: dedupeKey,
-        phone: notice.phone,
-        prompt: formatted.metadata,
-      },
-      request?.id ?? null,
-    );
-    return { ...notice, text: formatted.text };
+    try {
+      const formatted = await this.ai.phraseNotice(ctx, notice, request);
+      await this.s.event(
+        c,
+        ctx.message,
+        "system",
+        "managed_notice_formatted",
+        {
+          dedupe_key: dedupeKey,
+          phone: notice.phone,
+          prompt: formatted.metadata,
+        },
+        request?.id ?? null,
+      );
+      return { ...notice, text: formatted.text };
+    } catch (e) {
+      await this.s.event(
+        c,
+        ctx.message,
+        "system",
+        "managed_notice_fallback",
+        {
+          dedupe_key: dedupeKey,
+          phone: notice.phone,
+          code: errorCode(e),
+        },
+        request?.id ?? null,
+      );
+      return notice;
+    }
   }
 
   private async finish(
