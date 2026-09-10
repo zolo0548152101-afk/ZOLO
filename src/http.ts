@@ -237,8 +237,9 @@ let dbRows={};async function loadDb(){try{const table=document.querySelector('#d
         };
         const parsed = schemas[p.table].parse(body.changes);
         if (!Object.keys(parsed).length) throw new AppError("database_empty_update", 400, "לא נבחרו שדות לעדכון.");
-        if (p.table === "contacts" && parsed.phone)
-          (parsed as { phone: string }).phone = canonicalPhone((parsed as { phone: string }).phone);
+        const contactChanges = parsed as { phone?: string };
+        if (p.table === "contacts" && contactChanges.phone)
+          contactChanges.phone = canonicalPhone(contactChanges.phone);
         const fields = Object.keys(parsed);
         const assignment = fields.map((field, i) => `${field}=$${i + 1}`).join(",");
         const values = fields.map((field) => (parsed as Record<string, unknown>)[field]);
