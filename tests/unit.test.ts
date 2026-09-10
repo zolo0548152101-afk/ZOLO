@@ -83,6 +83,16 @@ test("Beit Shean floor note shown at most once; never asks באיזו קומה",
   p.floor_note_shown = true;
   assert.doesNotMatch(nextQuestion(r, p.phone).text, /קומה|קומות/);
 });
+test("when a Beit Shean donor supplied a name, ask only for the missing address", () => {
+  const r = sampleRequest(),
+    p = r.parties[0]!;
+  p.settlement = "בית שאן";
+  p.name = "ישראל";
+  p.address = null;
+  const q = nextQuestion(r, p.phone);
+  assert.match(q.text, /חסרה רק הכתובת/);
+  assert.doesNotMatch(q.text, /שם וכתובת/);
+});
 test("wardrobe rejection occurs after photo; only small whole wardrobe allowed", () => {
   const r = sampleRequest(),
     i = r.items[0]!;
