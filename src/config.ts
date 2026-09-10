@@ -27,7 +27,7 @@ const envSchema = z.object({
     .int()
     .min(1000)
     .max(60000)
-    .default(20000),
+    .default(45000),
   AGENT_MAX_TURNS: z.coerce.number().int().min(1).max(10).default(4),
   AI_ENABLED: flag.default(true),
   OPENAI_TRACING: flag.default(false),
