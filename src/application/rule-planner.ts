@@ -53,7 +53,7 @@ function beitShean(text: string): string | null {
 
 function namedRecipientPhone(text: string): string | null {
   const match = text.match(
-    /(?:למקבל(?:ת)?|מקבל(?:ת)?(?:\s+מספר)?|אל)\s*[:־-]?\s*([+\d\s().-]{8,})/,
+    /(?:למקבל(?:ת)?|מקבל(?:ת)?(?:\s+מספר)?|אל|(?:^|[\s,])ל)\s*[:־-]?\s*([+\d\s().-]{8,})/,
   );
   if (!match?.[1]) return null;
   try {
