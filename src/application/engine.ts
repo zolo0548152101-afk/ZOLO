@@ -142,11 +142,56 @@ export class Engine {
     // WhatsApp can deliver several short messages in one burst. Give the
     // sender a small coalescing window so one reply covers the whole burst.
     await delay(900);
-    const next = await this.s.pool.query<{ id: string }>(
-      "SELECT m.id FROM messages m JOIN contacts c ON c.id=m.contact_id WHERE c.phone=$1 AND m.processed_at IS NULL ORDER BY m.seq LIMIT 1",
+    const pending = await this.s.pool.query<{
+      id: string;
+      text: string;
+      contacts: { phone: string; name: string | null }[];
+      kind: string;
+      media_state: string;
+    }>(
+      `SELECT m.id,m.text,m.contacts,m.kind,m.media_state
+         FROM messages m JOIN contacts c ON c.id=m.contact_id
+        WHERE c.phone=$1 AND m.processed_at IS NULL
+        ORDER BY m.seq`,
       [trigger.phone],
     );
-    if (next.rows[0]) await this.process(next.rows[0].id, lastAiAttempt);
+    if (!pending.rows[0]) return;
+    let next = pending.rows[0]!.id;
+    // Merge only a burst of plain text. Media remains separate so its durable
+    // capture and attachment semantics are never lost.
+    if (
+      pending.rows.length > 1 &&
+      pending.rows.every((m) => m.kind === "text" && m.media_state === "none")
+    ) {
+      const last = pending.rows.at(-1)!;
+      const mergedText = pending.rows.map((m) => m.text).filter(Boolean).join("\n");
+      const mergedContacts = pending.rows.flatMap((m) => m.contacts);
+      await this.s.transaction(async (c) => {
+        const current = await c.query<{ id: string }>(
+          `SELECT m.id FROM messages m JOIN contacts co ON co.id=m.contact_id
+            WHERE co.phone=$1 AND m.processed_at IS NULL ORDER BY m.seq FOR UPDATE`,
+          [trigger.phone],
+        );
+        // A newer arrival gets its own coalescing window instead of being
+        // silently swallowed into this answer.
+        if (
+          current.rows.length === pending.rows.length &&
+          current.rows.every((m, i) => m.id === pending.rows[i]!.id)
+        ) {
+          await c.query("UPDATE messages SET text=$2,contacts=$3 WHERE id=$1", [
+            last.id,
+            mergedText,
+            JSON.stringify(mergedContacts),
+          ]);
+          await c.query(
+            "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id = ANY($1::uuid[])",
+            [pending.rows.slice(0, -1).map((m) => m.id), `coalesced_into:${last.id}`],
+          );
+          next = last.id;
+        }
+      });
+    }
+    await this.process(next, lastAiAttempt);
   }
 
   async process(id: string, lastAiAttempt = false): Promise<void> {

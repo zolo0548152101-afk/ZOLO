@@ -235,6 +235,7 @@ export class Store {
       `SELECT m.text,m.transcript,m.reply FROM messages m
        LEFT JOIN conversation_resets cr ON cr.conversation_id=m.conversation_id
        WHERE m.conversation_id=$1 AND m.seq<$2 AND m.processed_at IS NOT NULL
+         AND coalesce(m.error_code,'') NOT LIKE 'coalesced_into:%'
          AND (cr.reset_at IS NULL OR m.received_at>cr.reset_at)
        ORDER BY m.seq DESC LIMIT 8`,
       [conv.rows[0].id, message.seq],
