@@ -6,6 +6,7 @@ import {
   type Command,
   type Context,
   type ItemKind,
+  type Notice,
   type Plan,
   type Request,
 } from "../domain/types.js";
@@ -20,6 +21,11 @@ export interface Planner {
   plan(
     context: Context,
   ): Promise<{ plan: Plan; metadata: Record<string, unknown> }>;
+  phraseNotice(
+    context: Context,
+    notice: Notice,
+    request: Request | null,
+  ): Promise<{ text: string; metadata: Record<string, unknown> }>;
   close(): Promise<void>;
 }
 
@@ -328,6 +334,62 @@ export class OpenAIPlanner implements Planner {
         prompt_version: this.c.OPENAI_PROMPT_VERSION,
         model: this.c.OPENAI_MODEL,
         managed_reply: managed.reply,
+        managed_intent: managed.intent,
+        managed_actions: managed.actions,
+        response_id: response.id,
+        elapsed_ms: Date.now() - started,
+        usage: response.usage,
+      },
+    };
+  }
+
+  async phraseNotice(
+    ctx: Context,
+    notice: Notice,
+    request: Request | null,
+  ): Promise<{ text: string; metadata: Record<string, unknown> }> {
+    if (!this.c.AI_ENABLED) throw new AppError("ai_disabled");
+    const started = Date.now();
+    const response = await this.client.responses.create({
+      model: this.c.OPENAI_MODEL,
+      prompt: {
+        id: this.c.OPENAI_PROMPT_ID,
+        version: this.c.OPENAI_PROMPT_VERSION,
+      },
+      input: [{ role: "user", content: JSON.stringify({
+          customer_message: JSON.stringify({
+            current_message:
+              `נסח הודעת WhatsApp קצרה ואנושית לצד השני לפי כללי הפרומפט. ` +
+              `זו טיוטת המערכת, אין לשנות את המשמעות: ${notice.text}`,
+            recent_history: ctx.history,
+            notice_recipient_phone: notice.phone,
+            notice_kind: "system_notice",
+            has_location: false,
+          }),
+          sender_phone: ctx.conversation.phone,
+          existing_record: JSON.stringify({
+            conversation: ctx.conversation,
+            request,
+            notice,
+          }),
+        }) }],
+      reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },
+    });
+    let managed: ManagedResponse;
+    try {
+      managed = managedResponseSchema.parse(JSON.parse(response.output_text));
+    } catch {
+      throw new AppError("invalid_managed_prompt_response");
+    }
+    const text = managed.reply.trim();
+    if (!text) throw new AppError("empty_managed_notice_response");
+    return {
+      text,
+      metadata: {
+        provider: "openai_responses_managed_prompt",
+        prompt_id: this.c.OPENAI_PROMPT_ID,
+        prompt_version: this.c.OPENAI_PROMPT_VERSION,
+        model: this.c.OPENAI_MODEL,
         managed_intent: managed.intent,
         managed_actions: managed.actions,
         response_id: response.id,

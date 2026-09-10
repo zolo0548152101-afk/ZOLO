@@ -18,6 +18,7 @@ import {
   type Request,
   type Context,
   type Log,
+  type Notice,
 } from "../domain/types.js";
 import {
   isStatus,
@@ -293,6 +294,30 @@ export class Engine {
     );
   }
 
+  private async managedNotice(
+    c: pg.PoolClient,
+    ctx: Context,
+    notice: Notice,
+    request: Request | null,
+    dedupeKey: string,
+  ): Promise<Notice> {
+    if (!notice.text.trim()) return notice;
+    const formatted = await this.ai.phraseNotice(ctx, notice, request);
+    await this.s.event(
+      c,
+      ctx.message,
+      "system",
+      "managed_notice_formatted",
+      {
+        dedupe_key: dedupeKey,
+        phone: notice.phone,
+        prompt: formatted.metadata,
+      },
+      request?.id ?? null,
+    );
+    return { ...notice, text: formatted.text };
+  }
+
   private async finish(
     id: string,
     proposed: Plan | null,
@@ -493,14 +518,22 @@ export class Engine {
                 { command },
                 result.request?.id ?? null,
               );
-              for (const [n, notice] of result.notices.entries())
+              for (const [n, notice] of result.notices.entries()) {
+                const dedupeKey = `notice:${id}:${index}:${n}`;
                 await this.s.outbound(
                   c,
                   ctx.message,
-                  notice,
-                  `notice:${id}:${index}:${n}`,
+                  await this.managedNotice(
+                    c,
+                    ctx,
+                    notice,
+                    result.request ?? null,
+                    dedupeKey,
+                  ),
+                  dedupeKey,
                   result.request?.id ?? null,
                 );
+              }
               index++;
               if (reason || request?.status === "rejected") break;
             }
@@ -534,7 +567,13 @@ export class Engine {
                     await this.s.outbound(
                       c,
                       ctx.message,
-                      { phone: p.phone, text: reply },
+                      await this.managedNotice(
+                        c,
+                        ctx,
+                        { phone: p.phone, text: reply },
+                        request,
+                        `coordination:${request.id}:${request.run_date}:${p.phone}`,
+                      ),
                       `coordination:${request.id}:${request.run_date}:${p.phone}`,
                       request.id,
                     );

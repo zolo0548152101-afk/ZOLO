@@ -8,6 +8,7 @@ import type {
   Request,
   Party,
   Item,
+  Notice,
 } from "../src/domain/types.js";
 import type { Planner } from "../src/infrastructure/ai.js";
 import type { Channel, Delivery } from "../src/infrastructure/waha.js";
@@ -39,6 +40,7 @@ export class FakePlanner implements Planner {
   readonly plans = new Map<string, Plan>();
   calls = 0;
   fail = false;
+  phraseNoticePrefix = "";
   async plan(
     ctx: Context,
   ): Promise<{ plan: Plan; metadata: Record<string, unknown> }> {
@@ -47,6 +49,18 @@ export class FakePlanner implements Planner {
     const plan = this.plans.get(ctx.message.id);
     if (!plan) throw new Error("missing_test_plan");
     return { plan, metadata: { test_double: true } };
+  }
+  async phraseNotice(
+    _ctx: Context,
+    notice: Notice,
+    _request: Request | null,
+  ): Promise<{ text: string; metadata: Record<string, unknown> }> {
+    this.calls++;
+    if (this.fail) throw new Error("simulated_openai_timeout");
+    return {
+      text: `${this.phraseNoticePrefix}${notice.text}`,
+      metadata: { test_double: true },
+    };
   }
   async close(): Promise<void> {}
 }
