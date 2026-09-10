@@ -194,8 +194,6 @@ export class Engine {
     }
     const text = ctx.message.transcript ?? ctx.message.text;
     if (
-      isStatus(text) ||
-      quickReply(text) !== null ||
       ctx.message.kind === "image" ||
       ctx.message.kind === "location" ||
       ctx.message.media_state === "failed" ||
@@ -208,9 +206,19 @@ export class Engine {
     if (!plan) {
       try {
         const deterministic = rulePlan(ctx);
+        // The managed prompt owns the user-facing wording for every text
+        // message.  Deterministic rules may still choose a safe state change,
+        // but never replace the prompt's reply with a hard-coded sentence.
+        const prompted = await this.ai.plan(ctx);
         const response = deterministic
-          ? { plan: deterministic, metadata: { provider: "deterministic_flow" } }
-          : await this.ai.plan(ctx);
+          ? {
+              plan: deterministic,
+              metadata: {
+                ...prompted.metadata,
+                action_source: "deterministic_flow",
+              },
+            }
+          : prompted;
         plan = planSchema.parse(response.plan);
         if (!grounded(plan, text)) throw new AppError("ungrounded_tool");
         await this.s.pool.query(
@@ -552,6 +560,14 @@ export class Engine {
         reply = HUMAN_REPLY;
         reason = "no_plan";
       }
+      const managedReply =
+        typeof ctx.message.ai_metadata?.managed_reply === "string"
+          ? ctx.message.ai_metadata.managed_reply.trim()
+          : "";
+      // The prompt may never override an operational failure, a human handoff,
+      // or a missing reply. Those require fixed, auditable wording. For normal
+      // conversation, its reply is the exact text delivered to WhatsApp.
+      if (!reason && reply && managedReply) reply = managedReply;
       if (reason) await this.alert(c, ctx, reason, reply, request);
       if (reply)
         await this.s.outbound(
