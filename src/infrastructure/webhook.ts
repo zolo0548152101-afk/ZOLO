@@ -44,7 +44,7 @@ export function parseWebhook(
   const p = parsed.data.payload;
   if (
     parsed.data.session !== session ||
-    parsed.data.event !== "message" ||
+    !["message", "message.any"].includes(parsed.data.event) ||
     p.fromMe === true
   )
     return null;

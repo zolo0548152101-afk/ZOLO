@@ -243,6 +243,27 @@ test("groups, status, newsletter, outbound and other sessions ignored; malformed
     ),
   );
 });
+
+test("message.any is accepted and fromMe remains ignored", () => {
+  const payload = {
+    event: "message.any",
+    session: "HAIM_YAHAD",
+    payload: {
+      id: "any-event-1",
+      from: "972584152101@c.us",
+      fromMe: false,
+      body: "בדיקת message.any",
+    },
+  };
+  assert.equal(parseWebhook(payload, "HAIM_YAHAD")?.text, "בדיקת message.any");
+  assert.equal(
+    parseWebhook(
+      { ...payload, payload: { ...payload.payload, fromMe: true } },
+      "HAIM_YAHAD",
+    ),
+    null,
+  );
+});
 test("contact card supplies name/phone; location is optional and bounded", () => {
   const m = parseWebhook(
     {
