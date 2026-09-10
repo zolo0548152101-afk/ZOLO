@@ -141,7 +141,7 @@ export class Store {
     const base = await c.query<
       Omit<Request, "parties" | "items" | "photo_ids">
     >(
-      `SELECT id,number::int,version,status,origin,run_date::text,earliest_run_date::text,human_reason,created_at::text FROM requests WHERE id=$1 ${lock ? "FOR UPDATE" : ""}`,
+      `SELECT id,number::int,version,status,origin,verification_contacted,run_date::text,earliest_run_date::text,human_reason,created_at::text FROM requests WHERE id=$1 ${lock ? "FOR UPDATE" : ""}`,
       [id],
     );
     if (!base.rows[0]) throw new AppError("request_not_found", 404);
@@ -289,6 +289,7 @@ export class Store {
       version: 0,
       status: "collecting",
       origin,
+      verification_contacted: false,
       items,
       parties,
       photo_ids: [],
@@ -306,7 +307,7 @@ export class Store {
   }
   async save(c: pg.PoolClient, r: Request): Promise<void> {
     const result = await c.query(
-      `UPDATE requests SET version=version+1,status=$2,origin=$3,run_date=$4,human_reason=$5,earliest_run_date=$7,updated_at=clock_timestamp() WHERE id=$1 AND version=$6`,
+      `UPDATE requests SET version=version+1,status=$2,origin=$3,run_date=$4,human_reason=$5,earliest_run_date=$7,verification_contacted=$8,updated_at=clock_timestamp() WHERE id=$1 AND version=$6`,
       [
         r.id,
         r.status,
@@ -315,6 +316,7 @@ export class Store {
         r.human_reason,
         r.version,
         r.earliest_run_date,
+        r.verification_contacted,
       ],
     );
     if (result.rowCount !== 1) throw new AppError("version_conflict", 409);

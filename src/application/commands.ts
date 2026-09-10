@@ -134,14 +134,15 @@ export class Commands {
         );
       const items = cmd.items.map(asItem);
       const isDonor = cmd.type === "donate",
-        other = isDonor ? cmd.counterparty_phone : cmd.donor_phone;
+        other = isDonor ? cmd.counterparty_phone : cmd.donor_phone,
+        direct = Boolean(other) || (cmd.type === "donate" && cmd.direct === true);
       if (cmd.type === "donate")
         for (const i of items) {
           // "למסירה" is an explicit free-donation intent.
           i.free = cmd.free === false ? false : true;
-          // A donor who already named the recipient is in a direct handoff.
-          // Do not block that path with the generic condition question.
-          i.working = other ? true : cmd.working;
+          // A direct handoff has a known recipient or an explicit named
+          // handoff intent. It never needs the generic condition question.
+          i.working = direct ? true : cmd.working;
         }
       const error = itemError(items, false);
       if (error) return output(error);
@@ -152,7 +153,7 @@ export class Commands {
           party(isDonor ? "receiver" : "donor", p, p === phone && isDonor),
         );
       }
-      if (isDonor && !other)
+      if (isDonor && !direct)
         for (const i of items) {
           i.working = null;
         }
@@ -160,14 +161,14 @@ export class Commands {
         c,
         items,
         parties,
-        isDonor && !other ? "donation" : "direct",
+        isDonor && !direct ? "donation" : "direct",
       );
       await c.query(
         "UPDATE conversations SET selected_request_id=$2 WHERE id=$1",
         [ctx.conversation.id, r.id],
       );
       for (const p of parties)
-        if (p.phone !== phone)
+        if (p.phone !== phone && !direct)
           notices.push({
             phone: p.phone,
             text: `נפתחה פנייה ${r.number} לגבי ${r.items.map((i) => i.description).join(", ")}. נא לאשר את חלקך ב${p.role === "donor" ? "מסירה" : "קבלה"}. ההובלות בימי שלישי 16:00–20:00. נעדכן.`,
@@ -228,6 +229,24 @@ export class Commands {
         [ctx.conversation.id, r.id],
       );
       return output(nextQuestion(r, phone).text);
+    }
+    if (cmd.type === "contact_counterparty") {
+      const other = r.parties.find((p) => p.phone !== phone);
+      if (r.origin !== "direct" || !other)
+        throw new AppError("counterparty_not_ready", 409, "נא לשלוח קודם את מספר הצד השני או כרטיס איש קשר.");
+      if (r.verification_contacted)
+        return output("הפנייה לצד השני כבר בוצעה.", r);
+      r.verification_contacted = true;
+      if (cmd.contact)
+        notices.push({
+          phone: other.phone,
+          text: `פנייה ${r.number}: ${r.items.map((i) => i.description).join(", ")}. ${phone === r.parties.find((p) => p.role === "donor")?.phone ? "המוסר" : "המקבל"} ביקש שנפנה אליך לאימות הפרטים. נא לאשר את חלקך ב${other.role === "donor" ? "מסירה" : "קבלה"}.`,
+        });
+      const q = nextQuestion(r, phone);
+      return output(
+        `${cmd.contact ? "נפנה לצד השני עכשיו לצורך אימות." : "בסדר, לא נפנה לצד השני כרגע."}\n${q.text}`,
+        r,
+      );
     }
     if (cmd.type === "escalate") {
       if (r.status !== "coordinated") {

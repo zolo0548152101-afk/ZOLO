@@ -12,6 +12,7 @@ import {
 } from "../domain/types.js";
 import {
   donationIntent,
+  directHandoffIntent,
   explicitApproval,
   grounded,
   nextQuestion,
@@ -175,6 +176,9 @@ function translate(
         },
       ],
       counterparty_phone: phoneFrom(textValue(updates, "נייד מקבל")),
+      direct:
+        directHandoffIntent(text) ||
+        Boolean(phoneFrom(textValue(updates, "נייד מקבל"))),
       free: true,
       working: boolValue(updates, "תקינות") ?? boolValue(updates, "תקין"),
     });

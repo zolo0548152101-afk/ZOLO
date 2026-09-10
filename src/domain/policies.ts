@@ -78,6 +78,11 @@ export function donationIntent(t: string): boolean {
     t,
   );
 }
+export function directHandoffIntent(t: string): boolean {
+  return /(?:להעביר(?:\s+.{1,80})?\s+ל(?:מישהו|מישהי|אדם)|למסור(?:\s+.{1,80})?\s+ל(?:מישהו|מישהי|אדם)|מקבל(?:ת)?\s+(?:מסוים|מוגדר))/.test(
+    norm(t),
+  );
+}
 export function grounded(plan: Plan, text: string): boolean {
   return (
     plan.commands.every((c) => c.type === "status" || c.type === "next") ||
@@ -86,6 +91,7 @@ export function grounded(plan: Plan, text: string): boolean {
 }
 export function photoGate(r: Request): boolean {
   return (
+    r.origin === "donation" &&
     r.parties.some((p) => p.role === "donor") &&
     !r.parties.some((p) => p.role === "receiver") &&
     r.photo_ids.length === 0
@@ -164,6 +170,20 @@ export function nextQuestion(
   if (r.status === "human") return { text: HUMAN_REPLY, floorNote: false };
   const p = ownParty(r, phone);
   const donor = p.role === "donor";
+  if (
+    r.origin === "direct" &&
+    !r.verification_contacted &&
+    r.parties.some((x) => x.role !== p.role)
+  )
+    return {
+      text: `האם תרצה שנפנה ל${donor ? "מקבל" : "מוסר"} לצורך אימות הפרטים?`,
+      floorNote: false,
+    };
+  if (r.origin === "direct" && !r.parties.some((x) => x.role !== p.role))
+    return {
+      text: `האם תרצה שנפנה ל${donor ? "מקבל" : "מוסר"} לצורך אימות הפרטים? אם כן, נא לשלוח מספר טלפון או כרטיס איש קשר.`,
+      floorNote: false,
+    };
   if (
     donor &&
     r.items.some(
@@ -298,6 +318,10 @@ export function statusText(requests: Request[]): string {
     available: "ממתינה למקבל",
     awaiting_approval: "ממתינה לאישורים",
     waiting_capacity: "ממתינה למקום בהובלה",
+    coordinated: "תואמה",
+    closed: "הושלמה",
+    cancelled: "בוטלה",
+    rejected: "לא מתאימה",
     human: "בטיפול אנושי",
     cancel_pending: "ממתינה להחלטה לאחר ביטול",
   };
@@ -306,9 +330,7 @@ export function statusText(requests: Request[]): string {
       const d = r.parties.find((p) => p.role === "donor"),
         v = r.parties.find((p) => p.role === "receiver");
       const line = `פנייה ${r.number}\nפריט: ${r.items.map((i) => i.description + (i.quantity > 1 ? ` ×${i.quantity}` : "")).join(", ")}`;
-      if (r.status !== "coordinated")
-        return `${line}\nמצב: ${labels[r.status] ?? r.status}\nנעדכן.`;
-      return `${line}\nמוסר: ${d?.name ?? "—"} · ${d?.phone ?? "—"}\nאיסוף: ${d?.settlement ?? "—"}, ${d?.address ?? "—"}\nמקבל: ${v?.name ?? "—"} · ${v?.phone ?? "—"}\nיעד: ${v?.settlement ?? "—"}, ${v?.address ?? "—"}\nתאריך: ${r.run_date}\n16:00–20:00\nביום ההובלה ניצור קשר טלפוני לפני ההגעה`;
+      return `${line}\nמצב: ${labels[r.status] ?? r.status}\nמוסר: ${d?.name ?? "—"} · ${d?.phone ?? "—"}\nאיסוף: ${d?.settlement ?? "—"}, ${d?.address ?? "—"}\nמקבל: ${v?.name ?? "—"} · ${v?.phone ?? "—"}\nיעד: ${v?.settlement ?? "—"}, ${v?.address ?? "—"}\nאימות צד שני: ${r.verification_contacted ? "נשלחה פנייה" : "טרם התבקש"}\nתאריך הובלה: ${r.run_date ?? "טרם נקבע"}\nחלון הובלה: 16:00–20:00${r.status === "coordinated" ? "\nביום ההובלה ניצור קשר טלפוני לפני ההגעה" : ""}${r.human_reason ? `\nסיבת טיפול: ${r.human_reason}` : ""}`;
     })
     .join("\n\n");
 }

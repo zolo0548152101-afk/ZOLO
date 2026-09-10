@@ -139,6 +139,24 @@ test("deterministic donation extracts a recipient written directly after ל", ()
     "529990002",
   );
 });
+test("direct handoff without a phone skips condition checks and asks before contact", () => {
+  const context: Context = {
+    conversation: { id: "c", phone: "501111111", chat_id: "972501111111@c.us", mode: "bot", selected_request_id: null, version: 1, pending_counterparty_name: null },
+    requests: [],
+    candidates: [],
+    message: { id: "m", seq: "1", external_id: "e", trace_id: "t", mode: "simulation", chat_id: "972501111111@c.us", phone: "501111111", kind: "text", text: "אני רוצה להעביר מיטה למישהו שרון", contacts: [], location: null, media_url: null, media_id: null, media_state: "none", transcript: null, processed_at: null, ai_plan: null },
+    history: [],
+  };
+  const command = rulePlan(context)?.commands[0] as Extract<Command, { type: "donate" }>;
+  assert.equal(command.direct, true);
+  assert.equal(command.working, true);
+  const r = sampleRequest();
+  r.parties = r.parties.slice(0, 1);
+  r.origin = "direct";
+  r.verification_contacted = false;
+  assert.match(nextQuestion(r, r.parties[0]!.phone).text, /נפנה למקבל לצורך אימות/);
+  assert.doesNotMatch(nextQuestion(r, r.parties[0]!.phone).text, /תקין ושמיש|תמונה/);
+});
 test("an explicit new donation is not confused with an older open request", () => {
   const older = sampleRequest();
   const context: Context = {

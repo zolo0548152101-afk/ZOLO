@@ -33,6 +33,7 @@ export const commandSchema = z.discriminatedUnion("type", [
     type: z.literal("donate"),
     items: z.array(itemInput).min(1).max(20),
     counterparty_phone: str,
+    direct: z.boolean().optional(),
     free: fact,
     working: fact,
   }),
@@ -95,6 +96,11 @@ export const commandSchema = z.discriminatedUnion("type", [
     ]),
   }),
   z.strictObject({ type: z.literal("status") }),
+  z.strictObject({
+    type: z.literal("contact_counterparty"),
+    request_number: ref,
+    contact: z.boolean(),
+  }),
   z.strictObject({ type: z.literal("next") }),
 ]);
 export const planSchema = z
@@ -159,6 +165,7 @@ export interface Request {
   version: number;
   status: RequestStatus;
   origin: "donation" | "direct";
+  verification_contacted: boolean;
   items: Item[];
   parties: Party[];
   photo_ids: string[];

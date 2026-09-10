@@ -3,6 +3,7 @@ import {
   appliance,
   canonicalPhone,
   donationIntent,
+  directHandoffIntent,
   explicitApproval,
   norm,
   ownParty,
@@ -75,16 +76,19 @@ export function rulePlan(ctx: Context): Plan | null {
   // looking at active requests: a contact may have older open requests, but
   // "אני רוצה למסור מיטה" must never be interpreted as an answer to one.
   const item = kindAndDescription(text);
-  if (item && donationIntent(text))
+  if (item && donationIntent(text)) {
+    const other = namedRecipientPhone(text);
     return plan(text, [
       {
         type: "donate",
         items: [{ ...item, quantity: 1 }],
-        counterparty_phone: namedRecipientPhone(text),
+        counterparty_phone: other,
+        direct: Boolean(other) || directHandoffIntent(text),
         free: true,
-        working: null,
+        working: Boolean(other) || directHandoffIntent(text) ? true : null,
       },
     ]);
+  }
 
   const current = activeRequest(ctx);
   if (!current) return null;
@@ -97,6 +101,22 @@ export function rulePlan(ctx: Context): Plan | null {
   }
   const donor = party.role === "donor";
   const items = current.items;
+  const askedVerification = /האם תרצה שנפנה ל(?:מקבל|מוסר) לצורך אימות/.test(
+    ctx.history.at(-1)?.content ?? "",
+  );
+  if (
+    askedVerification &&
+    current.origin === "direct" &&
+    current.parties.some((item) => item.role !== party.role) &&
+    (yes(text) || no(text))
+  )
+    return plan(text, [
+      {
+        type: "contact_counterparty",
+        request_number: current.number,
+        contact: yes(text),
+      },
+    ]);
 
   if (
     donor &&

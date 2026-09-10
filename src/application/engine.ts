@@ -355,7 +355,17 @@ export class Engine {
       const plan = ctx.message.ai_plan
         ? planSchema.parse(ctx.message.ai_plan)
         : proposed;
-      if (isStatus(text)) reply = statusText(ctx.requests);
+      if (
+        phone === this.s.config.ADMIN_PHONE &&
+        /^#פניות(?:\s+חיים\s+יחד)?\s*$/.test(text.trim())
+      ) {
+        const ids = await c.query<{ id: string }>(
+          "SELECT id FROM requests ORDER BY number",
+        );
+        const requests: Request[] = [];
+        for (const row of ids.rows) requests.push(await this.s.request(row.id, c));
+        reply = statusText(requests);
+      } else if (isStatus(text)) reply = statusText(ctx.requests);
       else if (ctx.conversation.mode === "human") {
         await this.alert(c, ctx, "human_followup", null, null);
       } else if (technicalReason || ctx.message.media_state === "failed") {

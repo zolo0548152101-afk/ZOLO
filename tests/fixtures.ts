@@ -86,6 +86,7 @@ export const donate = (
   type: "donate",
   items: [{ kind, description, quantity: 1 }],
   counterparty_phone: null,
+  direct: false,
   free: null,
   working: null,
 });
@@ -134,6 +135,7 @@ export function sampleRequest(): Request {
     version: 1,
     status: "collecting",
     origin: "direct",
+    verification_contacted: true,
     items: [
       {
         ...asItem({ kind: "fridge", description: "מקרר", quantity: 1 }),
