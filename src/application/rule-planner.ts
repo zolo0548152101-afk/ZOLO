@@ -100,6 +100,12 @@ export function rulePlan(ctx: Context): Plan | null {
   const text = (ctx.message.transcript ?? ctx.message.text).trim();
   if (!text) return null;
 
+  // Once a candidate photo has been presented, an affirmative reply is an
+  // acceptance of that candidate—not a new generic search request.
+  const presented = ctx.candidates?.find((candidate) => candidate.state === "presented");
+  if (presented && yes(text))
+    return plan(text, [{ type: "interest", request_number: presented.request.number }]);
+
   // A new, explicit donation always starts a new request.  Do this before
   // looking at active requests: a contact may have older open requests, but
   // "אני רוצה למסור מיטה" must never be interpreted as an answer to one.
