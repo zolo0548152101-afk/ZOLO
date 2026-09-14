@@ -88,7 +88,7 @@ function suppliedPhone(ctx: Context, input: string): string {
     text = (ctx.message.transcript ?? ctx.message.text).replace(/[^\d]/g, "");
   const samePerson =
     phone === ctx.conversation.phone &&
-    /(?:אני (?:שני הצדדים|גם המוסר וגם המקבל)|אני מעביר לעצמי)/.test(
+    /(?:לעצמי|אני\s+(?:שני הצדדים|גם המוסר וגם המקבל))/.test(
       ctx.message.transcript ?? ctx.message.text,
     );
   if (

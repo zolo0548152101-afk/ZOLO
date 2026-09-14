@@ -118,7 +118,12 @@ export function rulePlan(ctx: Context): Plan | null {
     // the phone ("ישירות לטל 058...").  Keep the named parser first, then
     // fall back to the standalone phone parser so the request is classified
     // as direct and never enters the open-donation photo gate.
-    const other = namedRecipientPhone(text) ?? standalonePhone(text);
+    const selfMove = /(?:להעביר|מעביר|מעבירה)\s+לעצמי|אני\s+(?:גם\s+)?(?:המוסר\s+וגם\s+המקבל|שני\s+הצדדים)/.test(
+      norm(text),
+    );
+    const other = selfMove
+      ? ctx.conversation.phone
+      : namedRecipientPhone(text) ?? standalonePhone(text);
     return plan(text, [
       {
         type: "donate",
