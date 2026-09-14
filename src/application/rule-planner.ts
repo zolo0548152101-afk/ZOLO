@@ -303,6 +303,24 @@ export function rulePlan(ctx: Context): Plan | null {
     }
   }
 
+  // A direct/self-transfer reply may contain settlement, street and name in
+  // one message even when the settlement was already captured on an earlier
+  // turn.  Re-parse the complete tuple before the single-field fallbacks so a
+  // comma-separated name is never appended to the address.
+  const combined = addressAndName(text);
+  if (party.settlement && combined)
+    return plan(text, [
+      {
+        type: "details",
+        request_number: current.number,
+        role: party.role,
+        name: combined.name,
+        settlement: null,
+        address: combined.address,
+        floor: floor(combined.address),
+      },
+    ]);
+
   if (party.settlement && !party.name) {
     const withoutSettlement = norm(text).replace(/בית\s*[-־]?\s*שאן/g, "").trim();
     if (withoutSettlement && !/\d|רחוב|שד[׳']|שדרות/.test(withoutSettlement))
