@@ -148,10 +148,12 @@ function activeRequest(ctx: Context): Request | undefined {
     (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
   );
   if (open.length === 1) return open[0];
-  return (
-    ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-    (ctx.requests.length === 1 ? ctx.requests[0] : undefined)
+  const selected = ctx.requests.find(
+    (r) =>
+      r.id === ctx.conversation.selected_request_id &&
+      !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
   );
+  return selected ?? (open.length === 1 ? open[0] : undefined);
 }
 
 function translate(
@@ -175,9 +177,8 @@ function translate(
     throw new AppError("unsupported_managed_action", 422, "פעולת AI לא מוכרת");
 
   if (action(actions, "interest")) {
-    if (!current)
-      throw new AppError("interest_without_request", 409, "לא נמצאה פנייה מתאימה להתעניינות.");
-    pushOnce({ type: "interest", request_number: current.number });
+    const presented = ctx.candidates.find((candidate) => candidate.state === "presented");
+    if (presented) pushOnce({ type: "interest", request_number: presented.request.number });
   }
   if (action(actions, "notify_receiver") || action(actions, "notify_donor")) {
     if (!current)
