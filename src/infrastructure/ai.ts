@@ -85,6 +85,21 @@ const boolValue = (
 const action = (actions: Record<string, unknown>, key: string): boolean =>
   actions[key] === true || actions[key] === "true" || actions[key] === "כן";
 
+// Keep the managed-prompt contract closed. A newly introduced action must be
+// deliberately mapped here (or rejected explicitly) before it can reach the
+// domain command layer.
+const managedActionKeys = new Set([
+  "search_for_match",
+  "check_donor_availability",
+  "notify_donor",
+  "notify_receiver",
+  "notify_other_party_of_cancellation",
+  "ready_for_coordination",
+  "needs_human",
+  "interest",
+  "self_move",
+]);
+
 function itemKind(value: string): ItemKind {
   const t = value.toLowerCase();
   if (/מיטה|bed/.test(t)) return "bed";
@@ -145,6 +160,37 @@ function translate(
   const current = activeRequest(ctx);
   const prior = ctx.history.at(-1)?.content ?? "";
   const commands: Command[] = [];
+  const pushOnce = (command: Command) => {
+    if (!commands.some((existing) => JSON.stringify(existing) === JSON.stringify(command)))
+      commands.push(command);
+  };
+  const unknownAction = Object.keys(actions).find(
+    (key) => action(actions, key) && !managedActionKeys.has(key),
+  );
+  if (unknownAction)
+    throw new AppError("unsupported_managed_action", 422, "פעולת AI לא מוכרת");
+
+  if (action(actions, "interest")) {
+    if (!current)
+      throw new AppError("interest_without_request", 409, "לא נמצאה פנייה מתאימה להתעניינות.");
+    pushOnce({ type: "interest", request_number: current.number });
+  }
+  if (action(actions, "notify_receiver") || action(actions, "notify_donor")) {
+    if (!current)
+      throw new AppError("verification_without_request", 409, "לא נמצאה פנייה מתאימה לאימות.");
+    pushOnce({ type: "contact_counterparty", request_number: current.number, contact: true });
+  }
+  if (managed.intent === "self_move" || action(actions, "self_move")) {
+    const description = descriptionFrom(updates, text);
+    pushOnce({
+      type: "donate",
+      items: [{ kind: itemKind(description), description, quantity: Math.max(1, Math.min(20, numberValue(updates, "כמות פריטים") ?? 1)) }],
+      counterparty_phone: ctx.conversation.phone,
+      direct: true,
+      free: true,
+      working: boolValue(updates, "תקינות") ?? boolValue(updates, "תקין") ?? true,
+    });
+  }
 
   if (managed.intent === "cancellation") {
     const choice = /(?:לגמרי|סופית|לא רלוונטי|לא צריך)/.test(text)

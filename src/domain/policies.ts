@@ -45,7 +45,7 @@ export function norm(s: string): string {
     .trim();
 }
 export function isStatus(s: string): boolean {
-  return /^(?:מה\s+(?:מצב\s+(?:התיאום|ההובלה)|(?:ה)?סטטוס)|מה קורה עם ההובלה|מתי (?:ההובלה|מגיעים))(?:\s+\d+)?[?？!\s]*$/.test(
+  return /^(?:מה\s+(?:מצב\s+(?:הפנייה|הפניה|התיאום|ההובלה)|(?:ה)?סטטוס)|מה קורה עם (?:הפנייה|הפניה|ההובלה)|זה כבר מתואם|מה מצב הפנייה|מתי (?:ההובלה|מגיעים))(?:\s+\d+)?[?？!\s]*$/.test(
     norm(s),
   );
 }
@@ -80,14 +80,23 @@ export function donationIntent(t: string): boolean {
 }
 export function directHandoffIntent(t: string): boolean {
   const text = norm(t);
+  // A common direct-handoff sentence names the recipient and explains their
+  // intent without a phone number: "למסור את זה לטל, היא רוצה לקבל אותו".
+  // It must bypass the open-donation photo gate while still requiring a
+  // separate consent step before contacting that recipient.
+  if (
+    /(?:להעביר|למסור|מעביר|מעבירה|מוסר|מוסרת)/.test(text) &&
+    /(?:הוא|היא)\s+רוצה\s+לקבל/.test(text)
+  )
+    return true;
   if (/(?:מקבל(?:ת)?\s+(?:מסוים|מוגדר)|למישהו|למישהי|לאדם)/.test(text))
     return /(?:להעביר|למסור|מסירה|מסירה ישירה)/.test(text);
   // A named recipient is often written naturally as "למסור מיטה לטל".
   // Do not classify a normal open donation or a place name as direct.
-  if (!/(?:להעביר|למסור|מעביר|מעבירה|מוסר|מוסרת)/.test(text)) return false;
+  if (!/(?:להעביר|למסור|מעביר|מעבירה|מוסר|מוסרת|ישירות)/.test(text)) return false;
   if (/(?:למסירה|לתרומה|לבית שאן|לעפולה|לתל אביב|לצמח|לקרקע)/.test(text))
     return false;
-  return /(?:להעביר|למסור|מעביר|מעבירה|מוסר|מוסרת).{0,80}\sל[א-ת]{2,}(?:\s+[א-ת]{2,})?\s*$/.test(text);
+  return /(?:להעביר|למסור|מעביר|מעבירה|מוסר|מוסרת).{0,80}\sל[א-ת]{2,}(?:\s+[א-ת]{2,})?(?:\s|$)/.test(text);
 }
 export function grounded(plan: Plan, text: string): boolean {
   return (
@@ -282,7 +291,8 @@ export function readyToCoordinate(r: Request): boolean {
         i.working === true &&
         (!["wardrobe"].includes(i.kind) || i.wardrobe_small_whole === true) &&
         (i.kind !== "oven" || i.oven_type !== null) &&
-        (appliance(i) ||
+        (r.origin === "direct" ||
+          appliance(i) ||
           i.kind === "wardrobe" ||
           i.needs_disassembly !== null) &&
         i.evacuation !== "different",
@@ -336,12 +346,41 @@ export function statusText(requests: Request[]): string {
     human: "בטיפול אנושי",
     cancel_pending: "ממתינה להחלטה לאחר ביטול",
   };
-  return requests
+  const details = requests
     .map((r) => {
       const d = r.parties.find((p) => p.role === "donor"),
         v = r.parties.find((p) => p.role === "receiver");
       const line = `פנייה ${r.number}\nפריט: ${r.items.map((i) => i.description + (i.quantity > 1 ? ` ×${i.quantity}` : "")).join(", ")}`;
-      return `${line}\nמצב: ${labels[r.status] ?? r.status}\nמוסר: ${d?.name ?? "—"} · ${d?.phone ?? "—"}\nאיסוף: ${d?.settlement ?? "—"}, ${d?.address ?? "—"}\nמקבל: ${v?.name ?? "—"} · ${v?.phone ?? "—"}\nיעד: ${v?.settlement ?? "—"}, ${v?.address ?? "—"}\nאימות צד שני: ${r.verification_contacted ? "נשלחה פנייה" : "טרם התבקש"}\nתאריך הובלה: ${r.run_date ?? "טרם נקבע"}\nחלון הובלה: 16:00–20:00${r.status === "coordinated" ? "\nביום ההובלה ניצור קשר טלפוני לפני ההגעה" : ""}${r.human_reason ? `\nסיבת טיפול: ${r.human_reason}` : ""}`;
+      const locations = (r.locations ?? []).map((l) =>
+        `${l.role === "donor" ? "מיקום איסוף" : "מיקום יעד"}: https://www.google.com/maps?q=${l.latitude},${l.longitude}`,
+      ).join("\n");
+      const photos = r.photo_ids.length ? `\nתמונות שמורות: ${r.photo_ids.length} (יישלחו בהודעות נפרדות)` : "\nתמונות שמורות: אין";
+      const verification = (r.verification_states ?? []).map((x) =>
+        `${x.role === "donor" ? "מוסר" : "מקבל"}: ${x.state}`,
+      ).join(" · ");
+      return `${line}\nמצב: ${labels[r.status] ?? r.status}\nמוסר: ${d?.name ?? "—"} · ${d?.phone ?? "—"}\nאיסוף: ${d?.settlement ?? "—"}, ${d?.address ?? "—"}\nמקבל: ${v?.name ?? "—"} · ${v?.phone ?? "—"}\nיעד: ${v?.settlement ?? "—"}, ${v?.address ?? "—"}\n${locations ? `${locations}\n` : ""}${photos}\nאימות צד שני: ${verification || (r.verification_contacted ? "מצב קודם לא ודאי" : "טרם התבקש")}\nתאריך הובלה: ${r.run_date ?? "טרם נקבע"}\nחלון הובלה: 16:00–20:00${r.status === "coordinated" ? "\nביום ההובלה ניצור קשר טלפוני לפני ההגעה" : ""}${r.human_reason ? `\nסיבת טיפול: ${r.human_reason}` : ""}`;
     })
     .join("\n\n");
+  const coordinated = requests
+    .filter((r) => r.status === "coordinated")
+    .map((r) => ({
+      r,
+      pickup: r.locations?.find((x) => x.role === "donor"),
+      target: r.locations?.find((x) => x.role === "receiver"),
+    }))
+    .filter((x) => x.pickup && x.target)
+    .sort((a, b) =>
+      `${a.r.run_date ?? "9999-99-99"}:${a.pickup!.latitude}:${a.pickup!.longitude}`
+        .localeCompare(
+          `${b.r.run_date ?? "9999-99-99"}:${b.pickup!.latitude}:${b.pickup!.longitude}`,
+        ),
+    );
+  if (!coordinated.length) return details;
+  const route = coordinated
+    .map(
+      ({ r, pickup, target }, i) =>
+        `${i + 1}. פנייה ${r.number} (${r.run_date}) — איסוף https://www.google.com/maps?q=${pickup!.latitude},${pickup!.longitude} → יעד https://www.google.com/maps?q=${target!.latitude},${target!.longitude}`,
+    )
+    .join("\n");
+  return `${details}\n\nהמלצת סדר הובלות לפי המפה:\n${route}`;
 }

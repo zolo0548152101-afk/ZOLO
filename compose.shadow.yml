@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: shadow-disposable
+      POSTGRES_DB: haim_shadow
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d haim_shadow"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  app:
+    build:
+      context: .
+      target: runtime
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgres://postgres:shadow-disposable@postgres:5432/haim_shadow
+      DB_SCHEMA: haim_core_shadow
+      BOT_MODE: shadow
+      AI_ENABLED: "false"
+      ENABLE_SIMULATE: "true"
+      HAIM_ADMIN_TOKEN: shadow-test-token
+      WAHA_WEBHOOK_HMAC_KEY: shadow-test-webhook-key-012345678901234567890
+      OPENAI_API_KEY: ""
+      MEDIA_ROOT: /data/haim-yahad-media
+      LIVE_ALLOWLIST: ""
+      LIVE_DEPENDENCIES_VERIFIED: "false"
+      MEDIA_VOLUME_CONFIRMED: "false"
+    ports:
+      - "3010:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy

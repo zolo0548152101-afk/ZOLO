@@ -23,9 +23,11 @@ import {
 } from "../domain/types.js";
 import {
   isStatus,
+  photoGate,
   quickReply,
   statusText,
   PHOTO_THANKS,
+  PHOTO_FIRST,
   HUMAN_REPLY,
   OUTSIDE,
   grounded,
@@ -148,14 +150,71 @@ export class Engine {
       contacts: { phone: string; name: string | null }[];
       kind: string;
       media_state: string;
+      conversation_id: string;
+      turn_id: string | null;
+      turn_generation: number | null;
     }>(
-      `SELECT m.id,m.text,m.contacts,m.kind,m.media_state
+      `SELECT m.id,m.text,m.contacts,m.kind,m.media_state,m.conversation_id,m.turn_id,m.turn_generation
          FROM messages m JOIN contacts c ON c.id=m.contact_id
         WHERE c.phone=$1 AND m.processed_at IS NULL
         ORDER BY m.seq`,
       [trigger.phone],
     );
     if (!pending.rows[0]) return;
+    // Admit the whole quiet-window candidate set durably before any text is
+    // merged. This preserves the exact message sequence across worker restarts
+    // and also records media/location messages that are intentionally processed
+    // separately by the domain handlers.
+    await this.s.transaction(async (c) => {
+      const locked = await c.query<{
+        id: string;
+        conversation_id: string;
+        turn_id: string | null;
+        turn_generation: number | null;
+      }>(
+        `SELECT id,conversation_id,turn_id,turn_generation
+           FROM messages
+          WHERE id=ANY($1::uuid[]) AND processed_at IS NULL
+          ORDER BY seq FOR UPDATE`,
+        [pending.rows.map((m) => m.id)],
+      );
+      if (!locked.rows.length) return;
+      const existing = locked.rows.find((m) => m.turn_id);
+      let turnId = existing?.turn_id ?? null;
+      let generation = existing?.turn_generation ?? null;
+      if (!turnId) {
+        const nextGeneration = await c.query<{ generation: number }>(
+          `SELECT COALESCE(max(generation)+1,0)::int AS generation
+             FROM conversation_turns WHERE conversation_id=$1`,
+          [locked.rows[0]!.conversation_id],
+        );
+        generation = nextGeneration.rows[0]!.generation;
+        const created = await c.query<{ id: string }>(
+          `INSERT INTO conversation_turns(conversation_id,generation,deadline_at)
+           VALUES($1,$2,clock_timestamp()+interval '900 milliseconds')
+           RETURNING id`,
+          [locked.rows[0]!.conversation_id, generation],
+        );
+        turnId = created.rows[0]!.id;
+      }
+      for (const [position, message] of locked.rows.entries()) {
+        await c.query(
+          `INSERT INTO turn_messages(turn_id,message_id,position)
+           VALUES($1,$2,$3) ON CONFLICT(turn_id,message_id) DO NOTHING`,
+          [turnId, message.id, position],
+        );
+        await c.query(
+          `UPDATE messages SET turn_id=$2,turn_generation=$3
+             WHERE id=$1 AND turn_id IS NULL`,
+          [message.id, turnId, generation],
+        );
+      }
+      await c.query(
+        `UPDATE conversation_turns SET status='processing'
+          WHERE id=$1 AND status='pending'`,
+        [turnId],
+      );
+    });
     let next = pending.rows[0]!.id;
     // Merge only a burst of plain text. Media remains separate so its durable
     // capture and attachment semantics are never lost.
@@ -253,22 +312,42 @@ export class Engine {
       return;
     }
     let plan = ctx.message.ai_plan;
+    if (plan) {
+      try {
+        plan = planSchema.parse(plan);
+      } catch {
+        // A persisted malformed/forged plan must become a durable human
+        // escalation, never an uncaught worker failure or partial execution.
+        await this.finish(id, null, "openai_failure");
+        return;
+      }
+    }
+    const deterministic = plan ? null : rulePlan(ctx);
+    let supersessionCheck = false;
+    // Resolve cheap deterministic messages outside the AI error/retry block;
+    // a transient DB ordering retry must not be mislabeled as an OpenAI error.
+    if (
+      !plan &&
+      !deterministic &&
+      (quickReply(text) !== null ||
+        isStatus(text) ||
+        (ctx.conversation.phone === this.s.config.ADMIN_PHONE &&
+          /^#פניות(?:\s+(?:ל)?חיים\s+יחד)?\s*$/.test(text.trim())))
+    ) {
+      await this.finish(id, null);
+      return;
+    }
     if (!plan) {
       try {
-        const deterministic = rulePlan(ctx);
-        // The managed prompt owns the user-facing wording for every text
-        // message.  Deterministic rules may still choose a safe state change,
-        // but never replace the prompt's reply with a hard-coded sentence.
-        const prompted = await this.ai.plan(ctx);
+        // Deterministic intents must not spend an AI call. Free-form text is
+        // delegated to the managed prompt; both paths persist one plan.
         const response = deterministic
           ? {
               plan: deterministic,
-              metadata: {
-                ...prompted.metadata,
-                action_source: "deterministic_flow",
-              },
+              metadata: { provider: "deterministic_rules", action_source: "deterministic_flow" },
             }
-          : prompted;
+          : await this.ai.plan(ctx);
+        if (!deterministic) supersessionCheck = true;
         plan = planSchema.parse(response.plan);
         if (!grounded(plan, text)) throw new AppError("ungrounded_tool");
         await this.s.pool.query(
@@ -288,7 +367,7 @@ export class Engine {
       }
     }
     try {
-      await this.finish(id, plan);
+      await this.finish(id, plan, undefined, supersessionCheck);
     } catch (e) {
       if (e instanceof RetryableError && e.code === "stale_plan")
         await this.s.pool.query(
@@ -343,51 +422,17 @@ export class Engine {
     );
   }
 
-  private async managedNotice(
-    c: pg.PoolClient,
-    ctx: Context,
-    notice: Notice,
-    request: Request | null,
-    dedupeKey: string,
-  ): Promise<Notice> {
-    if (!notice.text.trim()) return notice;
-    try {
-      const formatted = await this.ai.phraseNotice(ctx, notice, request);
-      await this.s.event(
-        c,
-        ctx.message,
-        "system",
-        "managed_notice_formatted",
-        {
-          dedupe_key: dedupeKey,
-          phone: notice.phone,
-          prompt: formatted.metadata,
-        },
-        request?.id ?? null,
-      );
-      return { ...notice, text: formatted.text };
-    } catch (e) {
-      await this.s.event(
-        c,
-        ctx.message,
-        "system",
-        "managed_notice_fallback",
-        {
-          dedupe_key: dedupeKey,
-          phone: notice.phone,
-          code: errorCode(e),
-        },
-        request?.id ?? null,
-      );
-      return notice;
-    }
-  }
-
   private async finish(
     id: string,
     proposed: Plan | null,
     technicalReason?: string,
+    supersessionCheck = false,
   ): Promise<void> {
+    const deferredNotices: {
+      outboxId: string;
+      notice: Notice;
+      requestId: string | null;
+    }[] = [];
     const committed = await this.s.transaction(async (c) => {
       let ctx = await this.s.context(id, c, true);
       if (ctx.message.processed_at) return;
@@ -398,6 +443,40 @@ export class Engine {
         [phone, ctx.message.seq],
       );
       if (older.rowCount) throw new RetryableError("earlier_message_pending");
+      // AI may have been evaluating while a newer message arrived. The old
+      // answer is no longer authoritative: close it without an outbox reply,
+      // leave a durable audit trail, and let the newer turn own the response.
+      const newer = supersessionCheck
+        ? await c.query<{ id: string }>(
+            `SELECT m.id FROM messages m
+              WHERE m.conversation_id=$1 AND m.seq>$2 AND m.processed_at IS NULL
+              ORDER BY m.seq LIMIT 1`,
+            [ctx.conversation.id, ctx.message.seq],
+          )
+        : { rows: [] as { id: string }[] };
+      if (newer.rows[0]) {
+        const successor = newer.rows[0].id;
+        await c.query(
+          "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id=$1 AND processed_at IS NULL",
+          [id, `superseded_by:${successor}`],
+        );
+        await c.query(
+          `UPDATE conversation_turns SET status='superseded',completed_at=clock_timestamp()
+             WHERE id=(SELECT turn_id FROM messages WHERE id=$1)`,
+          [id],
+        );
+        await this.s.event(c, ctx.message, "system", "turn_superseded", {
+          successor_message_id: successor,
+        });
+        return {
+          trace_id: ctx.message.trace_id,
+          message_id: id,
+          mode: ctx.message.mode,
+          stage: "superseded",
+          request_number: null,
+          code: "turn_superseded",
+        };
+      }
       let reply: string | null = null,
         request: Request | null = null,
         reason: string | undefined = technicalReason,
@@ -407,7 +486,7 @@ export class Engine {
         : proposed;
       if (
         phone === this.s.config.ADMIN_PHONE &&
-        /^#פניות(?:\s+חיים\s+יחד)?\s*$/.test(text.trim())
+        /^#פניות(?:\s+(?:ל)?חיים\s+יחד)?\s*$/.test(text.trim())
       ) {
         const ids = await c.query<{ id: string }>(
           "SELECT id FROM requests ORDER BY number",
@@ -416,6 +495,9 @@ export class Engine {
         for (const row of ids.rows) requests.push(await this.s.request(row.id, c));
         reply = statusText(requests);
         protectedReply = true;
+        for (const current of requests)
+          for (const mediaId of current.photo_ids)
+            await this.s.outbound(c, ctx.message, { phone, text: `תמונה שמורה מפנייה ${current.number}`, media_id: mediaId }, `admin-status-media:${id}:${current.id}:${mediaId}`, current.id);
       } else if (isStatus(text)) reply = statusText(ctx.requests);
       else if (ctx.conversation.mode === "human") {
         await this.alert(c, ctx, "human_followup", null, null);
@@ -427,7 +509,9 @@ export class Engine {
           reply = selected
             ? `לא הצלחתי להבין את ההודעה. ${nextQuestion(selected, phone).text}`
             : "לא הצלחתי להבין. אפשר לכתוב, למשל: אני רוצה למסור מיטה.";
-          reason = undefined;
+          // A final AI failure is a real human-handling event. Keep the safe
+          // fallback for the customer, but also create the durable admin alert.
+          reason = technicalReason;
           await this.s.event(c, ctx.message, "system", "automatic_fallback", {
             technical_reason: technicalReason,
           }, selected?.id ?? null);
@@ -575,6 +659,12 @@ export class Engine {
           } else {
             let index = 0;
             for (const command of plan.commands) {
+              // Once an open donation is created, PHOTO-FIRST blocks every
+              // later command in the same AI batch until an image arrives.
+              if (request && photoGate(request)) {
+                reply = PHOTO_FIRST;
+                break;
+              }
               ctx = await this.s.context(id, c);
               const result: Outcome = await this.commands.apply(
                 c,
@@ -595,21 +685,28 @@ export class Engine {
                 { command },
                 result.request?.id ?? null,
               );
+              // Open donations are PHOTO-FIRST. Do not let a multi-command
+              // prompt collect names/addresses before the required photo.
+              if (command.type === "donate" && result.request && photoGate(result.request)) {
+                reply = PHOTO_FIRST;
+                break;
+              }
               for (const [n, notice] of result.notices.entries()) {
                 const dedupeKey = `notice:${id}:${index}:${n}`;
-                await this.s.outbound(
+                const outboxId = await this.s.outbound(
                   c,
                   ctx.message,
-                  await this.managedNotice(
-                    c,
-                    ctx,
-                    notice,
-                    result.request ?? null,
-                    dedupeKey,
-                  ),
+                  notice,
                   dedupeKey,
                   result.request?.id ?? null,
+                  "pending",
                 );
+                if (outboxId)
+                  deferredNotices.push({
+                    outboxId,
+                    notice,
+                    requestId: result.request?.id ?? null,
+                  });
               }
               index++;
               if (reason || request?.status === "rejected") break;
@@ -641,19 +738,19 @@ export class Engine {
                 );
                 for (const p of request.parties)
                   if (p.phone !== phone)
-                    await this.s.outbound(
+                    {
+                    const notice = { phone: p.phone, text: reply };
+                    const outboxId = await this.s.outbound(
                       c,
                       ctx.message,
-                      await this.managedNotice(
-                        c,
-                        ctx,
-                        { phone: p.phone, text: reply },
-                        request,
-                        `coordination:${request.id}:${request.run_date}:${p.phone}`,
-                      ),
+                      notice,
                       `coordination:${request.id}:${request.run_date}:${p.phone}`,
                       request.id,
+                      "pending",
                     );
+                    if (outboxId)
+                      deferredNotices.push({ outboxId, notice, requestId: request.id });
+                    }
               }
             }
           }
@@ -684,6 +781,16 @@ export class Engine {
       const managedReply =
         typeof candidateReply === "string" ? candidateReply.trim() : "";
       const actionSource = metadata.rows[0]?.ai_metadata?.action_source;
+      const operationalClaim = /(?:שלחתי|נשלחה|נשלח|פניתי|פנינו|בוצע|בוצעה|תואם|תואמה|התיאום הושלם)/i.test(
+        managedReply,
+      );
+      const noticeEvidence = await c.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM outbox
+         WHERE message_id=$1 AND phone<>$2 AND state NOT IN ('cancelled','failed')`,
+        [id, phone],
+      );
+      const sideEffectProven =
+        noticeEvidence.rows[0]!.n > 0 || request?.status === "coordinated";
       // The prompt may never override an operational failure, a human handoff,
       // or a missing reply. A deterministic flow question is also protected:
       // the prompt is consulted and logged, but cannot replace the next safe
@@ -693,9 +800,14 @@ export class Engine {
         reply &&
         managedReply &&
         !protectedReply &&
-        actionSource !== "deterministic_flow"
+        actionSource !== "deterministic_flow" &&
+        (!operationalClaim || sideEffectProven)
       )
         reply = managedReply;
+      else if (managedReply && operationalClaim && !sideEffectProven)
+        await this.s.event(c, ctx.message, "system", "prompt_claim_rejected", {
+          claim: managedReply.slice(0, 500),
+        }, request?.id ?? null);
       if (reason) await this.alert(c, ctx, reason, reply, request);
       if (reply)
         await this.s.outbound(
@@ -721,6 +833,14 @@ export class Engine {
         "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1",
         [id, reply, reason ?? null],
       );
+      await c.query(
+        `UPDATE conversation_turns t SET status='completed',completed_at=clock_timestamp()
+           WHERE t.id=(SELECT turn_id FROM messages WHERE id=$1)
+             AND NOT EXISTS (
+               SELECT 1 FROM messages m WHERE m.turn_id=t.id AND m.processed_at IS NULL
+             )`,
+        [id],
+      );
       await c.query("UPDATE conversations SET version=version+1 WHERE id=$1", [
         ctx.conversation.id,
       ]);
@@ -734,6 +854,35 @@ export class Engine {
       };
     });
     if (committed) this.log.info(committed);
+    // Notice wording is AI-assisted, but it is never allowed to hold the
+    // business transaction open. Outbox rows wait in format_state=pending;
+    // send() refuses them until this post-commit formatting step completes.
+    if (deferredNotices.length) {
+      const ctx = await this.s.context(id);
+      for (const item of deferredNotices) {
+        let text = item.notice.text;
+        let state: "ready" | "failed" = "ready";
+        try {
+          const request = item.requestId
+            ? await this.s.request(item.requestId)
+            : null;
+          text = (await this.ai.phraseNotice(ctx, item.notice, request)).text;
+        } catch (e) {
+          state = "failed";
+          this.log.error({ code: errorCode(e), outbox_id: item.outboxId, stage: "notice_format" });
+        }
+        await this.s.transaction(async (c) => {
+          await c.query(
+            "UPDATE outbox SET text=$2,format_state=$3 WHERE id=$1 AND format_state='pending'",
+            [item.outboxId, text, state],
+          );
+          await this.s.event(c, ctx.message, "system", "managed_notice_formatted", {
+            outbox_id: item.outboxId,
+            format_state: state,
+          }, item.requestId);
+        });
+      }
+    }
   }
 
   async send(id: string): Promise<void> {
@@ -744,6 +893,8 @@ export class Engine {
       );
       const out = rows.rows[0];
       if (!out) return null;
+      if (out.format_state === "pending")
+        throw new RetryableError("notice_format_pending");
       if (["sent", "shadow", "simulation", "cancelled"].includes(out.state))
         return null;
       const older = await c.query(
@@ -818,8 +969,13 @@ export class Engine {
             : "unknown";
       const code = e instanceof DeliveryError ? e.code : errorCode(e);
       await this.s.pool.query(
-        "UPDATE outbox SET state=$2,error_code=$3 WHERE id=$1",
-        [id, certainty === "unknown" ? "uncertain" : "pending", code],
+        "UPDATE outbox SET state=$2,delivery_state=$3,error_code=$4 WHERE id=$1",
+        [
+          id,
+          certainty === "unknown" ? "uncertain" : "pending",
+          certainty === "unknown" ? "uncertain" : "failed",
+          code,
+        ],
       );
       this.log.error({
         code,
@@ -832,7 +988,7 @@ export class Engine {
     }
     await this.s.transaction(async (c) => {
       await c.query(
-        "UPDATE outbox SET state='sent',provider_id=$2,sent_at=clock_timestamp(),error_code=NULL WHERE id=$1",
+        "UPDATE outbox SET state='sent',delivery_state='accepted',provider_id=$2,sent_at=clock_timestamp(),provider_accepted_at=clock_timestamp(),error_code=NULL WHERE id=$1",
         [id, providerId],
       );
       if (claimed.match_id)

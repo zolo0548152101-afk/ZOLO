@@ -10,8 +10,8 @@ import {
 } from "../domain/policies.js";
 
 const activeRequest = (ctx: Context): Request | undefined =>
-  ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-  (ctx.requests.length === 1 ? ctx.requests[0] : undefined);
+  (ctx.requests ?? []).find((r) => r.id === ctx.conversation?.selected_request_id) ??
+  ((ctx.requests ?? []).length === 1 ? ctx.requests?.[0] : undefined);
 
 const yes = (text: string): boolean =>
   /^(?:כן|בטח|בוודאי|נכון|מאשר|מאשרת)(?:[\s,!.]|$)/.test(norm(text));
@@ -52,6 +52,13 @@ function beitShean(text: string): string | null {
   return /בית\s*[-־]?\s*שאן/.test(text) ? "בית שאן" : null;
 }
 
+function addressWithSettlement(text: string): string | null {
+  const match = norm(text).match(
+    /(?:[,;]\s*|בית\s*[-־]?\s*שאן\s+)((?:רחוב|שכונת|שכונה|שיכון|שדרות|שד[׳']?)\s+.+)$/,
+  );
+  return match?.[1]?.trim() ?? null;
+}
+
 function namedRecipientPhone(text: string): string | null {
   const match = text.match(
     /(?:למקבל(?:ת)?|מקבל(?:ת)?(?:\s+מספר)?|אל|(?:^|[\s,])ל)\s*[:־-]?\s*([+\d\s().-]{8,})/,
@@ -89,7 +96,20 @@ export function rulePlan(ctx: Context): Plan | null {
   // "אני רוצה למסור מיטה" must never be interpreted as an answer to one.
   const item = kindAndDescription(text);
   if (item && donationIntent(text)) {
-    const other = namedRecipientPhone(text);
+    const existing = activeRequest(ctx);
+    if (
+      existing &&
+      existing.items.some((candidate) => candidate.kind === item.kind) &&
+      !/(?:פנייה\s+חדשה|פריט\s+נוסף|עוד\s+פריט)/.test(text)
+    )
+      return plan(text, [
+        { type: "clarify_duplicate", request_number: existing.number },
+      ]);
+    // Natural direct-handoff wording often puts the recipient's name before
+    // the phone ("ישירות לטל 058...").  Keep the named parser first, then
+    // fall back to the standalone phone parser so the request is classified
+    // as direct and never enters the open-donation photo gate.
+    const other = namedRecipientPhone(text) ?? standalonePhone(text);
     return plan(text, [
       {
         type: "donate",
@@ -97,7 +117,12 @@ export function rulePlan(ctx: Context): Plan | null {
         counterparty_phone: other,
         direct: Boolean(other) || directHandoffIntent(text),
         free: true,
-        working: Boolean(other) || directHandoffIntent(text) ? true : null,
+        working:
+          Boolean(other) || directHandoffIntent(text)
+            ? /שבור|מקולקל|לא\s+(?:תקין|שמיש|עובד)/.test(text)
+              ? false
+              : true
+            : null,
       },
     ]);
   }
@@ -231,7 +256,7 @@ export function rulePlan(ctx: Context): Plan | null {
           role: party.role,
           name: null,
           settlement,
-          address: null,
+          address: addressWithSettlement(text),
           floor: null,
         },
       ]);
@@ -253,7 +278,7 @@ export function rulePlan(ctx: Context): Plan | null {
       ]);
   }
 
-  if (party.settlement && party.name && !party.address) {
+  if (party.settlement && !party.address) {
     const address = norm(text);
     if (address && !yes(address) && !no(address))
       return plan(text, [

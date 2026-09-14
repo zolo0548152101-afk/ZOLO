@@ -42,9 +42,28 @@ test("all required status phrasings are read only intents", () => {
     "מה הסטטוס?",
     "מה קורה עם ההובלה?",
     "מתי ההובלה?",
+    "מה מצב הפנייה?",
+    "זה כבר מתואם?",
   ])
     assert.equal(isStatus(s), true, s);
   assert.equal(isStatus("יש לי מיטה חדשה למסירה"), false);
+});
+test("direct handoff does not require disassembly and preserves explicit broken fact", () => {
+  const r = sampleRequest();
+  r.origin = "direct";
+  r.items[0]!.needs_disassembly = null;
+  assert.equal(readyToCoordinate(r), true);
+  const ctx = {
+    message: {
+      text: "אני רוצה למסור מיטה שבורה לטל",
+      transcript: null,
+      contacts: [],
+      location: null,
+    },
+  } as never;
+  const p = rulePlan(ctx);
+  assert.equal(p?.commands[0]?.type, "donate");
+  if (p?.commands[0]?.type === "donate") assert.equal(p.commands[0].working, false);
 });
 test("canonical phones reject LID and malformed identities", () => {
   for (const p of [
@@ -157,6 +176,19 @@ test("direct handoff without a phone skips condition checks and asks before cont
   assert.match(nextQuestion(r, r.parties[0]!.phone).text, /נפנה למקבל לצורך אימות/);
   assert.doesNotMatch(nextQuestion(r, r.parties[0]!.phone).text, /תקין ושמיש|תמונה/);
 });
+test("named recipient who wants the item bypasses the photo gate", () => {
+  const context: Context = {
+    conversation: { id: "c", phone: "501111111", chat_id: "972501111111@c.us", mode: "bot", selected_request_id: null, version: 1, pending_counterparty_name: null },
+    requests: [],
+    candidates: [],
+    message: { id: "m", seq: "1", external_id: "e", trace_id: "t", mode: "simulation", chat_id: "972501111111@c.us", phone: "501111111", kind: "text", text: "אני רוצה למסור מיטה לטל היא רוצה לקבל אותה", contacts: [], location: null, media_url: null, media_id: null, media_state: "none", transcript: null, processed_at: null, ai_plan: null },
+    history: [],
+  };
+  const command = rulePlan(context)?.commands[0] as Extract<Command, { type: "donate" }>;
+  assert.equal(command.type, "donate");
+  assert.equal(command.direct, true);
+  assert.equal(command.working, true);
+});
 test("an explicit new donation is not confused with an older open request", () => {
   const older = sampleRequest();
   const context: Context = {
@@ -248,6 +280,22 @@ test("coordinated status includes complete details and every active request", ()
     "לפני ההגעה",
   ])
     assert.ok(s.includes(value));
+});
+test("coordinated status adds a map-ordered transport recommendation", () => {
+  const a = sampleRequest();
+  a.status = "coordinated";
+  a.run_date = "2026-09-15";
+  a.locations = [
+    { role: "donor", latitude: 32.5, longitude: 35.5, captured_at: "" },
+    { role: "receiver", latitude: 32.6, longitude: 35.6, captured_at: "" },
+  ];
+  const b = { ...a, number: 2, locations: [
+    { role: "donor" as const, latitude: 32.4, longitude: 35.4, captured_at: "" },
+    { role: "receiver" as const, latitude: 32.7, longitude: 35.7, captured_at: "" },
+  ] };
+  const text = statusText([a, b]);
+  assert.match(text, /המלצת סדר הובלות לפי המפה/);
+  assert.ok(text.indexOf("1. פנייה 2") < text.indexOf("2. פנייה 1"));
 });
 test("tools cannot write status, SQL, actor identity, arbitrary fields or duplicate commands", () => {
   assert.equal(

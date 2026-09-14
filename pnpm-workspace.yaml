@@ -1,0 +1,4 @@
+minimumReleaseAgeExclude:
+  - '@types/node@22.20.2'
+  - openai@7.13.0
+  - zod@4.6.1

@@ -1,7 +1,7 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID, createHmac } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -237,12 +237,12 @@ test("donor bed without receiver PHOTO FIRST; prohibited early details never sto
   assert.equal(r.parties[0]!.approved_by, p);
   assert.equal(r.items[0]!.working, null);
 });
-test("donor image persists checksum and request link; neutral acknowledgement only", async () => {
+test("donor image persists checksum and request link; acknowledgement continues safely", async () => {
   const p = phone(),
     r = await donation(p),
     m = await message(p, "", undefined, true),
     after = await s.request(r.id);
-  assert.equal(m.row.reply, PHOTO_THANKS);
+  assert.ok(m.row.reply?.startsWith(PHOTO_THANKS));
   assert.equal(after.photo_ids.length, 1);
   const media = (
     await pool.query<{
@@ -255,6 +255,13 @@ test("donor image persists checksum and request link; neutral acknowledgement on
   ).rows[0]!;
   assert.equal(media.checksum.length, 64);
   assert.deepEqual(await storage.get(media.storage_key), JPEG);
+  const retrieved = await app.inject({
+    method: "GET",
+    url: `/admin/media/${after.photo_ids[0]}`,
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+  });
+  assert.equal(retrieved.statusCode, 200);
+  assert.deepEqual(retrieved.rawPayload, JPEG);
 });
 test("מחולה בכניסה accepted; supplied floor ignored and stored as ground", async () => {
   const p = phone(),
@@ -272,6 +279,62 @@ test("מחולה בכניסה accepted; supplied floor ignored and stored as gro
   assert.equal(updated.parties[0]!.address, "בכניסה");
   assert.equal(updated.parties[0]!.floor, 0);
   assert.doesNotMatch(m.row.reply ?? "", /קומה|קומות|רחוב/);
+});
+test("active location dataset resolves approved Beit Shean street aliases", async () => {
+  assert.deepEqual(await s.region(pool, "שיכון א"), {
+    name: "שיכון א",
+    decision: "allowed",
+  });
+  assert.deepEqual(await s.region(pool, "רחוב העליה"), {
+    name: "רחוב העלייה",
+    decision: "allowed",
+  });
+});
+test("settlement and street in one message persist both fields", async () => {
+  const p = phone();
+  const r = await donation(p, "bed", "מיטה");
+  const result = await message(p, "בית שאן, רחוב העליה", [
+    details({ request_number: r.number, role: "donor", settlement: "בית שאן", address: "רחוב העליה" }),
+  ]);
+  assert.doesNotMatch(result.row.reply ?? "", /נא לציין שם וכתובת/);
+  const saved = await s.request(r.id);
+  assert.equal(saved.parties.find((x) => x.role === "donor")?.settlement, "בית שאן");
+  assert.equal(saved.parties.find((x) => x.role === "donor")?.address, "רחוב העליה");
+});
+test("official Beit Shean snapshot stages and resolves a normalized street before rollback", async () => {
+  const csv = await readFile("tests/fixtures/beit-shean-streets-official.csv", "utf8");
+  const lines = csv.trim().split(/\r?\n/);
+  assert.equal(lines.shift(), "name,settlement,aliases");
+  const rows = lines.map((line) => {
+    const match = line.match(/^"((?:[^"]|"")*)","בית שאן","((?:[^"]|"")*)"$/);
+    assert.ok(match, `invalid staged street row: ${line}`);
+    return {
+      name: match![1]!.replaceAll('""', '"'),
+      aliases: match![2]!.replaceAll('""', '"').split("|").filter(Boolean),
+    };
+  });
+  assert.equal(rows.length, 244);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const id = randomUUID();
+    await client.query(
+      "INSERT INTO location_datasets(id,version,source,checksum,active) VALUES($1,$2,$3,$4,false)",
+      [id, `test-official-${id}`, "fixture:data.gov.il", "fixture-checksum"],
+    );
+    for (const row of rows)
+      await client.query(
+        "INSERT INTO streets(dataset_id,name,normalized,aliases) VALUES($1,$2,$3,$4)",
+        [id, row.name, row.name.normalize("NFKC").replace(/[־–—-]/g, " ").replace(/\s+/g, " ").trim(), row.aliases],
+      );
+    await client.query("UPDATE location_datasets SET active=false WHERE active=true");
+    await client.query("UPDATE location_datasets SET active=true WHERE id=$1", [id]);
+    assert.deepEqual(await s.region(client, "הרצל"), { name: "הרצל", decision: "allowed" });
+    assert.deepEqual(await s.region(client, "רחוב העליה"), { name: "רחוב העלייה", decision: "allowed" });
+    await client.query("ROLLBACK");
+  } finally {
+    client.release();
+  }
 });
 test("clear outside endpoint stops, including mixed AI escalation plan; no admin alert", async () => {
   const p = phone(),
@@ -425,9 +488,36 @@ test("direct donation skips the generic condition question", async () => {
   cmd.counterparty_phone = receiver;
   const result = await message(donor, `יש לי מיטה למסירה למקבל ${receiver}`, [cmd]);
   assert.doesNotMatch(result.row.reply ?? "", /תקין ושמיש/);
-  assert.match(result.row.reply ?? "", /פירוק/);
+  assert.match(result.row.reply ?? "", /אימות/);
   const r = (await s.active(donor))[0]!;
   assert.equal(r.items[0]!.working, true);
+});
+
+test("natural direct wording with a phone after the recipient skips photo and condition", async () => {
+  const donor = phone(),
+    receiver = phone(),
+    cmd = donate("מיטה", "bed");
+  if (cmd.type !== "donate") throw new Error();
+  cmd.counterparty_phone = receiver;
+  const result = await message(donor, `יש לי מיטה למסירה ישירות לטל ${receiver}`, [cmd]);
+  assert.doesNotMatch(result.row.reply ?? "", /תמונה|תקין ושמיש/);
+  const r = (await s.active(donor))[0]!;
+  assert.equal(r.origin, "direct");
+  assert.equal(r.parties.find((p) => p.role === "receiver")!.phone, receiver);
+});
+test("cancellation notifies the other party and supports final close", async () => {
+  const r = await readyRequest(),
+    donor = r.parties.find((p) => p.role === "donor")!.phone,
+    receiver = r.parties.find((p) => p.role === "receiver")!.phone;
+  const asked = await message(donor, "אני מבטל את התיאום", [
+    { type: "cancel", request_number: r.number, choice: "ask" },
+  ]);
+  assert.equal((await s.request(r.id)).status, "cancel_pending");
+  assert.ok((await outputs(asked.id)).some((o) => o.phone === receiver && /בוטל/.test(o.text)));
+  await message(donor, "ביטול סופי", [
+    { type: "cancel", request_number: r.number, choice: "final" },
+  ]);
+  assert.equal((await s.request(r.id)).status, "cancelled");
 });
 test("adding a named recipient later also skips the condition question", async () => {
   const donor = phone(),
@@ -438,8 +528,47 @@ test("adding a named recipient later also skips the condition question", async (
     { type: "counterparty", request_number: r.number, phone: receiver, name: null },
   ]);
   assert.doesNotMatch(result.row.reply ?? "", /תקין ושמיש/);
-  assert.match(result.row.reply ?? "", /פירוק/);
+  assert.match(result.row.reply ?? "", /אימות/);
   assert.equal((await s.request(r.id)).items[0]!.working, true);
+});
+test("counterparty notice is formatted after commit before it becomes sendable", async () => {
+  const donor = phone(),
+    receiver = phone(),
+    cmd = donate("מיטה", "bed");
+  if (cmd.type !== "donate") throw new Error();
+  cmd.counterparty_phone = receiver;
+  const oldPrefix = ai.phraseNoticePrefix;
+  ai.phraseNoticePrefix = "FORMATTED: ";
+  try {
+    await message(donor, `יש לי מיטה למסירה למקבל ${receiver}`, [cmd]);
+    const request = (await s.active(donor))[0]!;
+    const result = await message(donor, "כן, תפנו אליו לצורך אימות", [
+      { type: "contact_counterparty", request_number: request.number, contact: true },
+    ]);
+    const row = await pool.query<{ text: string; format_state: string; state: string }>(
+      "SELECT text,format_state,state FROM outbox WHERE message_id=$1 AND phone=$2 ORDER BY seq DESC LIMIT 1",
+      [result.id, receiver],
+    );
+    assert.equal(row.rows[0]!.format_state, "ready");
+    assert.equal(row.rows[0]!.state, "pending");
+    assert.match(row.rows[0]!.text, /^FORMATTED:/);
+  } finally {
+    ai.phraseNoticePrefix = oldPrefix;
+  }
+});
+test("five independent donation and receive route passes remain isolated", async () => {
+  for (let i = 0; i < 5; i++) {
+    const donor = phone();
+    const created = await donation(donor, "bed", `מיטה ${i + 1}`);
+    assert.equal(created.origin, "donation");
+    assert.equal(created.status, "collecting");
+    const receiver = phone();
+    const received = await message(receiver, "מחפש מקרר", [
+      { type: "seek", kind: "fridge" },
+    ]);
+    assert.equal((await s.active(receiver)).length, 0);
+    assert.ok(received.message.processed_at);
+  }
 });
 test("receiver cannot alter donor item facts; attempted forbidden change escalates durably", async () => {
   const r = await readyRequest(),
@@ -491,6 +620,65 @@ test("duplicate webhook has one durable inbox and one business effect; completio
   await engine.process(first.id);
   assert.equal((await outputs(first.id)).length, 1);
 });
+test("outbox receipt projection is monotonic and distinguishes acceptance from delivery", async () => {
+  const m = await message(phone(), "שלום"),
+    out = (await outputs(m.id))[0]!;
+  const headers = { "x-admin-token": cfg.HAIM_ADMIN_TOKEN };
+  const accepted = await app.inject({
+    method: "POST",
+    url: `/admin/outbox/${out.id}/receipt`,
+    headers,
+    payload: { state: "accepted", provider_id: "provider-1" },
+  });
+  assert.equal(accepted.statusCode, 200);
+  const delivered = await app.inject({
+    method: "POST",
+    url: `/admin/outbox/${out.id}/receipt`,
+    headers,
+    payload: { state: "delivered", provider_id: "provider-1" },
+  });
+  assert.equal(delivered.statusCode, 200);
+  const row = await pool.query<{ delivery_state: string; provider_id: string }>(
+    "SELECT delivery_state,provider_id FROM outbox WHERE id=$1",
+    [out.id],
+  );
+  assert.equal(row.rows[0]!.delivery_state, "delivered");
+  assert.equal(row.rows[0]!.provider_id, "provider-1");
+  const downgrade = await app.inject({
+    method: "POST",
+    url: `/admin/outbox/${out.id}/receipt`,
+    headers,
+    payload: { state: "accepted", provider_id: "provider-2" },
+  });
+  assert.equal(downgrade.statusCode, 200);
+  assert.equal(
+    (await pool.query<{ delivery_state: string; provider_id: string }>(
+      "SELECT delivery_state,provider_id FROM outbox WHERE id=$1",
+      [out.id],
+    )).rows[0]!.delivery_state,
+    "delivered",
+  );
+});
+test("integration events are enqueued durably with an idempotency row", async () => {
+  const name = `test-integration-${counter}`;
+  await pool.query("INSERT INTO integrations(name,enabled) VALUES($1,true)", [name]);
+  const trace = randomUUID();
+  await s.transaction(async (c) => {
+    await s.event(c, { trace_id: trace }, "test", "fixture_event", { ok: true });
+  });
+  const row = await pool.query<{ id: string; state: string }>(
+    "SELECT io.id,io.state FROM integration_outbox io JOIN request_events e ON e.id=io.event_id WHERE e.trace_id=$1 AND io.integration=$2",
+    [trace, name],
+  );
+  assert.equal(row.rows.length, 1);
+  assert.equal(row.rows[0]!.state, "pending");
+  const jobs = await q.boss.fetch("integration");
+  const job = jobs.find((x) => (x.data as { id: string }).id === row.rows[0]!.id);
+  assert.ok(job);
+  await q.boss.complete("integration", job.id);
+  await pool.query("DELETE FROM integration_outbox WHERE id=$1", [row.rows[0]!.id]);
+  await pool.query("DELETE FROM integrations WHERE name=$1", [name]);
+});
 test("two quick messages preserve receipt order even when processing is invoked backwards", async () => {
   const p = phone(),
     a = await enqueue(p, "יש לי מיטה למסירה", [donate()]),
@@ -501,24 +689,76 @@ test("two quick messages preserve receipt order even when processing is invoked 
   const r = (await s.active(p))[0]!;
   assert.equal(r.photo_ids.length, 1);
   assert.equal((await outputs(a.id))[0]!.text, PHOTO_FIRST);
-  assert.equal((await outputs(b.id))[0]!.text, PHOTO_THANKS);
+  assert.ok((await outputs(b.id))[0]!.text.startsWith(PHOTO_THANKS));
 });
-test("core donation conversation completes without calling the AI planner", async () => {
+test("quiet-window admission durably links every message in one turn", async () => {
+  const p = phone(),
+    a = await enqueue(p, "יש לי מקרר למסירה"),
+    b = await enqueue(p, "הוא עובד"),
+    c = await enqueue(p, "בבית שאן");
+  await engine.processNext(a.id);
+  const linked = await pool.query<{
+    turn_id: string;
+    message_id: string;
+    position: number;
+    turn_status: string;
+  }>(
+    `SELECT m.turn_id,m.id AS message_id,tm.position,t.status AS turn_status
+       FROM messages m
+       JOIN turn_messages tm ON tm.message_id=m.id
+       JOIN conversation_turns t ON t.id=tm.turn_id
+      WHERE m.id=ANY($1::uuid[]) ORDER BY tm.position`,
+    [[a.id, b.id, c.id]],
+  );
+  assert.equal(linked.rows.length, 3);
+  assert.deepEqual(linked.rows.map((r) => r.message_id), [a.id, b.id, c.id]);
+  assert.equal(new Set(linked.rows.map((r) => r.turn_id)).size, 1);
+  assert.equal(linked.rows[0]!.turn_status, "completed");
+  const remaining = await pool.query<{ n: number }>(
+    "SELECT count(*)::int AS n FROM messages WHERE id=ANY($1::uuid[]) AND processed_at IS NULL",
+    [[a.id, b.id, c.id]],
+  );
+  assert.equal(remaining.rows[0]!.n, 0);
+});
+test("a newer message supersedes an in-flight AI turn without an old reply", async () => {
+  const p = phone(),
+    first = await enqueue(p, "פריט מיוחד למסירה", [donate()]);
+  ai.planDelayMs = 80;
+  try {
+    const running = engine.process(first.id);
+    await delay(10);
+    const second = await enqueue(p, "פריט חדש למסירה", [donate("כיסא", "chairs")]);
+    await running;
+    const old = await pool.query<{ error_code: string | null }>(
+      "SELECT error_code FROM messages WHERE id=$1",
+      [first.id],
+    );
+    assert.match(old.rows[0]!.error_code ?? "", /^superseded_by:/);
+    assert.equal((await outputs(first.id)).length, 0);
+    const superseded = await pool.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM request_events WHERE message_id=$1 AND event_type='turn_superseded'",
+      [first.id],
+    );
+    assert.equal(superseded.rows[0]!.n, 1);
+    await engine.process(second.id);
+    assert.equal((await s.active(p)).length, 1);
+  } finally {
+    ai.planDelayMs = 0;
+  }
+});
+test("core donation starts with PHOTO-FIRST without calling the AI planner", async () => {
   const p = phone(),
     calls = ai.calls;
   let result = await message(p, "אני רוצה למסור מיטה");
-  assert.match(result.row.reply ?? "", /תקין ושמיש/);
-  result = await message(p, "כן");
-  assert.match(result.row.reply ?? "", /פירוק/);
-  result = await message(p, "לא");
-  assert.match(result.row.reply ?? "", /באיזה יישוב/);
-  result = await message(p, "בית שאן");
-  assert.match(result.row.reply ?? "", /שם וכתובת/);
-  result = await message(p, "ישראל");
-  assert.match(result.row.reply ?? "", /חסרה רק הכתובת/);
-  result = await message(p, "הרצל 12, קומה 2");
-  assert.match(result.row.reply ?? "", /מקבל מסוים/);
+  assert.equal(result.row.reply, PHOTO_FIRST);
   assert.equal(ai.calls, calls);
+});
+test("repeated donation does not silently open a duplicate request", async () => {
+  const p = phone();
+  await message(p, "יש לי מיטה למסירה");
+  const repeated = await message(p, "יש לי מיטה למסירה");
+  assert.match(repeated.row.reply ?? "", /כבר קיימת פנייה/);
+  assert.equal((await s.active(p)).length, 1);
 });
 test("atomic business commit rolls back if enqueue fails, then retries without duplicate request", async () => {
   const p = phone(),
@@ -639,6 +879,24 @@ test("status is read only; multiple active requests; coordinated request plus ne
     versions,
   );
 });
+test("admin #פניות לחיים יחד lists every request read-only without AI", async () => {
+  const first = await donation(phone(), "fridge", "מקרר");
+  const second = await donation(phone(), "bed", "מיטה");
+  const before = await pool.query<{ id: string; version: number; status: string }>(
+    "SELECT id,version,status FROM requests WHERE id=ANY($1::uuid[]) ORDER BY number",
+    [[first.id, second.id]],
+  );
+  const calls = ai.calls;
+  const result = await message(cfg.ADMIN_PHONE, "#פניות לחיים יחד");
+  assert.equal(ai.calls, calls);
+  assert.match(result.row.reply ?? "", new RegExp(`פנייה ${first.number}`));
+  assert.match(result.row.reply ?? "", new RegExp(`פנייה ${second.number}`));
+  const after = await pool.query<{ id: string; version: number; status: string }>(
+    "SELECT id,version,status FROM requests WHERE id=ANY($1::uuid[]) ORDER BY number",
+    [[first.id, second.id]],
+  );
+  assert.deepEqual(after.rows, before.rows);
+});
 test("Tuesday capacity is enforced and same-day requires explicit admin approval", async () => {
   const a = await readyRequest(),
     b = await readyRequest();
@@ -668,6 +926,50 @@ test("Tuesday capacity is enforced and same-day requires explicit admin approval
       s.coordinate(c, x, new Date("2026-09-29T08:00:00Z")),
     ),
     "same_day",
+  );
+});
+test("20 coordinated arrangements are split 10 per week and the 21st waits for capacity", async () => {
+  await pool.query(
+    "INSERT INTO transport_runs(date,capacity) VALUES ($1,10),($2,10) ON CONFLICT(date) DO UPDATE SET capacity=10",
+    ["2026-10-13", "2026-10-20"],
+  );
+  const traces: string[] = [];
+  for (let i = 0; i < 20; i++) {
+    const r = await readyRequest();
+    const runNow = new Date(i < 10 ? "2026-10-12T08:00:00Z" : "2026-10-19T08:00:00Z");
+    const result = await s.transaction(async (c) => {
+      const locked = await s.request(r.id, c, true);
+      const outcome = await s.coordinate(c, locked, runNow);
+      await s.save(c, locked);
+      await s.event(c, { trace_id: randomUUID() }, "test", "coordinated", { date: locked.run_date }, locked.id);
+      return outcome;
+    });
+    assert.equal(result, "coordinated");
+    const evidence = await pool.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM request_events WHERE request_id=$1 AND event_type='coordinated'",
+      [r.id],
+    );
+    assert.equal(evidence.rows[0]!.n, 1);
+    const state = await pool.query<{ status: string }>(
+      "SELECT status FROM requests WHERE id=$1",
+      [r.id],
+    );
+    assert.equal(state.rows[0]!.status, "coordinated");
+    traces.push(r.id);
+  }
+  assert.equal(new Set(traces).size, 20);
+  const counts = await pool.query<{ run_date: string; n: number }>(
+    "SELECT run_date::text, count(*)::int AS n FROM requests WHERE id=ANY($1::uuid[]) GROUP BY run_date ORDER BY run_date",
+    [traces],
+  );
+  assert.deepEqual(counts.rows, [
+    { run_date: "2026-10-13", n: 10 },
+    { run_date: "2026-10-20", n: 10 },
+  ]);
+  const waiting = await readyRequest();
+  assert.equal(
+    await s.transaction((c) => s.coordinate(c, waiting, new Date("2026-10-12T08:00:00Z"))),
+    "full",
   );
 });
 test("group, malformed webhook and admin authentication boundaries", async () => {
@@ -723,6 +1025,40 @@ test("group, malformed webhook and admin authentication boundaries", async () =>
     ).statusCode,
     200,
   );
+  const dbView = await app.inject({
+    method: "GET",
+    url: "/admin/database?table=requests&limit=1",
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+  });
+  assert.equal(dbView.statusCode, 200);
+  assert.deepEqual(
+    dbView.json<{ columns: string[] }>().columns.filter((x) =>
+      ["preferred_time", "represents_both_parties", "closed_at"].includes(x),
+    ),
+    ["preferred_time", "represents_both_parties", "closed_at"],
+  );
+});
+test("admin edits only the approved legacy request fields and persists them", async () => {
+  const r = await readyRequest();
+  const response = await app.inject({
+    method: "PATCH",
+    url: `/admin/database/requests/${r.id}`,
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+    payload: {
+      changes: { preferred_time: "אחר הצהריים", represents_both_parties: true },
+    },
+  });
+  assert.equal(response.statusCode, 200);
+  const updated = await s.request(r.id);
+  assert.equal(updated.preferred_time, "אחר הצהריים");
+  assert.equal(updated.represents_both_parties, true);
+  const forbidden = await app.inject({
+    method: "PATCH",
+    url: `/admin/database/requests/${r.id}`,
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+    payload: { changes: { closed_at: new Date().toISOString() } },
+  });
+  assert.equal(forbidden.statusCode, 400);
 });
 test("@lid and canonical chat resolve into one contact and ordered conversation", async () => {
   const p = phone();
@@ -765,7 +1101,7 @@ test("OpenAI timeout retries once then durable human escalation, never invented 
 });
 test("duplicate OpenAI/tool execution uses one persisted plan and one command result", async () => {
   const p = phone(),
-    m = await enqueue(p, "יש לי מיטה למסירה", [donate()]),
+    m = await enqueue(p, "אני רוצה למסור פריט מיוחד", [donate()]),
     before = ai.calls;
   await engine.process(m.id);
   await engine.process(m.id);
@@ -780,12 +1116,20 @@ test("duplicate OpenAI/tool execution uses one persisted plan and one command re
     commands: [donate(), donate()],
     evidence: "יש לי מיטה למסירה",
   };
-  const second = await enqueue(phone(), "יש לי מיטה למסירה");
+  const secondText = "אני רוצה למסור פריט מיוחד";
+  const second = await enqueue(phone(), secondText);
   ai.plans.set(second.id, forged);
   await engine.process(second.id, true);
   assert.equal(
     (await outputs(second.id)).some((o) => o.phone === cfg.ADMIN_PHONE),
     true,
+  );
+  assert.equal(
+    (await pool.query<{ n: number }>(
+      "SELECT count(*)::int n FROM command_results WHERE message_id=$1",
+      [second.id],
+    )).rows[0]!.n,
+    1,
   );
 });
 test(
@@ -847,3 +1191,29 @@ test(
     await q.boss.complete(name, first!);
   },
 );
+test("admin clear-all requires the exact destructive confirmation and resets test data only", async () => {
+  const m = await enqueue(phone(), "שלום");
+  assert.ok((await s.message(m.id)).id);
+  const before = Number((await pool.query("SELECT count(*) FROM messages")).rows[0].count);
+  assert.ok(before > 0);
+  const wrong = await app.inject({
+    method: "POST",
+    url: "/admin/database/clear-all",
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+    payload: { confirm: "מחק הכל עכשיו" },
+  });
+  assert.equal(wrong.statusCode, 400);
+  assert.equal(Number((await pool.query("SELECT count(*) FROM messages")).rows[0].count), before);
+  const cleared = await app.inject({
+    method: "POST",
+    url: "/admin/database/clear-all",
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+    payload: { confirm: "מחק הכל" },
+  });
+  assert.equal(cleared.statusCode, 200);
+  assert.ok(Number(cleared.json<{ deleted: { messages: number } }>().deleted.messages) >= before);
+  assert.equal((await pool.query("SELECT count(*) FROM messages")).rows[0].count, "0");
+  assert.equal((await pool.query("SELECT count(*) FROM contacts")).rows[0].count, "0");
+  assert.equal(Number((await pool.query("SELECT value FROM request_counter WHERE id=true")).rows[0].value), 0);
+  assert.equal((await pool.query("SELECT count(*) FROM location_datasets")).rows[0].count, "1");
+});

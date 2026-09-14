@@ -102,6 +102,10 @@ export const commandSchema = z.discriminatedUnion("type", [
     contact: z.boolean(),
   }),
   z.strictObject({ type: z.literal("next") }),
+  z.strictObject({
+    type: z.literal("clarify_duplicate"),
+    request_number: z.number().int().positive(),
+  }),
 ]);
 export const planSchema = z
   .strictObject({
@@ -159,6 +163,16 @@ export interface Party {
   approved_by: string | null;
   schedule_approved: boolean;
 }
+export interface RequestLocation {
+  role: Role;
+  latitude: number;
+  longitude: number;
+  captured_at: string;
+}
+export interface VerificationState {
+  role: Role;
+  state: string;
+}
 export interface Request {
   id: string;
   number: number;
@@ -169,8 +183,13 @@ export interface Request {
   items: Item[];
   parties: Party[];
   photo_ids: string[];
+  locations?: RequestLocation[];
+  verification_states?: VerificationState[];
   run_date: string | null;
   earliest_run_date: string | null;
+  preferred_time?: string | null;
+  represents_both_parties?: boolean;
+  closed_at?: string | null;
   human_reason: string | null;
   created_at: string;
 }

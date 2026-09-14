@@ -1,0 +1,56 @@
+[
+  {
+    "id": "direct-handoff-no-photo",
+    "origin": "direct",
+    "actor": "donor",
+    "input": ["אני רוצה למסור מיטה לטל", "טל 0584152101"],
+    "state_before": {
+      "request": "new",
+      "photo_required": false,
+      "condition_question_required": false,
+      "disassembly_question_required": false
+    },
+    "expected_actions": ["create_or_update_direct_request", "offer_verification"],
+    "expected_message_intent": "acknowledge_direct_handoff_and_ask_verification_consent"
+  },
+  {
+    "id": "open-donation-photo-first",
+    "origin": "open",
+    "actor": "donor",
+    "input": ["יש לי מקרר למסירה בבית שאן"],
+    "state_before": {
+      "request": "new",
+      "photo_required": true,
+      "condition_question_required": true,
+      "disassembly_question_required": true
+    },
+    "expected_actions": ["request_photo_before_details"],
+    "expected_message_intent": "ask_for_item_photo"
+  },
+  {
+    "id": "rapid-multimodal-burst",
+    "origin": "open",
+    "actor": "donor",
+    "input": ["יש לי שולחן", "BEGIN:VCARD", "מיקום: בית שאן"],
+    "state_before": {
+      "request": "new",
+      "turn": "quiet_window_open",
+      "photo_required": true
+    },
+    "expected_actions": ["coalesce_turn", "extract_contact", "extract_location"],
+    "expected_message_intent": "one_response_after_burst"
+  },
+  {
+    "id": "verification-two-party-consent",
+    "origin": "direct",
+    "actor": "donor",
+    "input": ["כן, תפנו לטל לצורך אימות"],
+    "state_before": {
+      "request": "ready_for_verification",
+      "donor_verification": "consented",
+      "receiver_verification": "not_offered"
+    },
+    "expected_actions": ["enqueue_verification_notice", "record_verification_state"],
+    "expected_message_intent": "confirm_verification_notice_only_after_outbox"
+  }
+]

@@ -1,0 +1,10 @@
+[
+  { "id": "donate-open", "input": "יש לי מיטה למסירה", "expected_intent": "donate", "expected_actions": ["request_photo_before_details"] },
+  { "id": "seek-fridge", "input": "אני מחפש מקרר", "expected_intent": "request", "expected_actions": ["seek"] },
+  { "id": "direct-no-photo", "input": "אני רוצה למסור מיטה לטל 0584152101", "expected_intent": "direct", "expected_actions": ["offer_verification"], "forbidden": ["require_photo", "ask_condition"] },
+  { "id": "rapid-burst", "input": ["יש לי שולחן", "טל 0584152101", "בבית שאן"], "expected_intent": "donate", "expected_actions": ["coalesce_turn", "extract_phone", "extract_location"] },
+  { "id": "status", "input": "#פניות לחיים יחד", "expected_intent": "status", "expected_actions": ["read_only"], "forbidden": ["write_state", "call_ai"] },
+  { "id": "verification-consent", "input": "כן, תפנו לטל לצורך אימות", "expected_intent": "verification", "expected_actions": ["enqueue_notice", "record_state"], "forbidden": ["claim_sent_before_outbox"] },
+  { "id": "outside-area", "input": "יש לי ספה באילת", "expected_intent": "outside", "expected_actions": ["stop_and_escalate"], "forbidden": ["coordinate"] },
+  { "id": "human", "input": "אני רוצה לדבר עם אדם", "expected_intent": "escalate", "expected_actions": ["human_callback"] }
+]

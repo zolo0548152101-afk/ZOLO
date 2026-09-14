@@ -1,19 +1,18 @@
 # Verification — V5 Foundation
 
-תאריך: 2026-09-10. זהו רישום של מה שבוצע בפועל, ולא רשימת בדיקות שמסומנות כעברו רק משום שנכתב קוד עבורן.
+תאריך: 2026-09-11. זהו רישום של מה שבוצע בפועל, ולא רשימת בדיקות שמסומנות כעברו רק משום שנכתב קוד עבורן.
 
 | בדיקה | תוצאה |
 |---|---|
 | npm install, lockfile וקימפול TypeScript strict | עבר |
-| Unit suite | 22/22 עברו |
-| Integration suite על PostgreSQL 18.3 WASM / PGlite 0.5.8 | 27 עברו, 2 דולגו, 0 נכשלו |
-| SQL migrations על PostgreSQL 17.5 WASM / PGlite 0.3.15 | עבר smoke נפרד |
-| הרצת כל ה־suite על PGlite 17 דרך socket adapter | לא הושלמה: אי־תאימות/ניתוק adapter; אינה תוצאת אישור PG17 מלא |
-| תחרות על capacity בשרת PostgreSQL 17 רגיל | נכתב מבחן, טרם הורץ |
-| הריגת worker עם SIGKILL ו־lease recovery בשרת PostgreSQL רגיל | נכתב מבחן, טרם הורץ |
-| Docker build/run | לא הורץ כאן: Docker אינו זמין |
+| Unit suite בתוך Docker | 32/32 עברו |
+| Integration suite על PostgreSQL 17 רגיל בתוך Docker | 44/44 עברו |
+| SQL migrations פעמיים על PostgreSQL 17 | עברו והיו idempotent |
+| תחרות על capacity בשרת PostgreSQL 17 רגיל | עבר מבחן concurrency |
+| הריגת worker עם SIGKILL ו־lease recovery בשרת PostgreSQL רגיל | עבר מבחן recovery |
+| Docker build/run + teardown | עבר; volume זמני נמחק |
 | OpenAI, WAHA, IVRIT ו־EasyPanel אמיתיים | לא נבדקו ולא שונו |
-| Hebrew model eval, prompt injection ו־caching מול API | דורשים המשך |
+| Hebrew model eval, prompt injection ו־caching מול API | offline contract עבר; remote paid eval עדיין דורש אישור |
 
 הלוגים המצליחים נמצאים בתיקיית verification. סביבת PGlite שימשה רק לבדיקה מקומית ואינה dependency של המוצר. מבחני PGlite אינם הוכחה ל־concurrency בין backend connections או התאוששות process אמיתית.
 

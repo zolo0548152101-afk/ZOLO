@@ -59,11 +59,16 @@ export function asItem(
   };
 }
 function target(ctx: Context, number: number | null): Request {
-  const r = number
+  const explicit = number
     ? ctx.requests.find((r) => r.number === number)
-    : (ctx.requests.find(
-        (r) => r.id === ctx.conversation.selected_request_id,
-      ) ?? (ctx.requests.length === 1 ? ctx.requests[0] : undefined));
+    : undefined;
+  const text = (ctx.message.transcript ?? ctx.message.text).trim();
+  const byItem = !number && ctx.requests.length > 1
+    ? ctx.requests.filter((r) => r.items.some((i) => text.includes(i.description) || text.includes(i.kind)))
+    : [];
+  const r = explicit ?? (byItem.length === 1 ? byItem[0] : undefined) ??
+    (ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+      (ctx.requests.length === 1 ? ctx.requests[0] : undefined));
   if (!r)
     throw new AppError(
       "choose_request",
@@ -142,7 +147,7 @@ export class Commands {
           i.free = cmd.free === false ? false : true;
           // A direct handoff has a known recipient or an explicit named
           // handoff intent. It never needs the generic condition question.
-          i.working = direct ? true : cmd.working;
+          i.working = direct ? (cmd.working ?? true) : cmd.working;
         }
       const error = itemError(items, false);
       if (error) return output(error);
@@ -157,6 +162,33 @@ export class Commands {
         for (const i of items) {
           i.working = null;
         }
+      let sameOpenRequest = ctx.requests.find(
+        (existing) =>
+          existing.status !== "coordinated" &&
+          !["closed", "cancelled", "rejected", "cancel_pending"].includes(existing.status) &&
+          existing.parties.some((p) => p.role === "donor" && p.phone === phone) &&
+          existing.items.length === items.length &&
+          existing.items.every((item, index) => item.kind === items[index]?.kind),
+      );
+      if (!sameOpenRequest) {
+        const duplicate = await c.query<{ id: string }>(
+          `SELECT r.id FROM requests r
+           JOIN request_parties p ON p.request_id=r.id
+           JOIN contacts co ON co.id=p.contact_id
+           JOIN request_items i ON i.request_id=r.id
+           WHERE co.phone=$1 AND p.role='donor'
+             AND r.status NOT IN ('coordinated','closed','cancelled','rejected','cancel_pending')
+             AND i.kind=ANY($2::text[])
+           ORDER BY r.number LIMIT 1`,
+          [phone, items.map((item) => item.kind)],
+        );
+        if (duplicate.rows[0]) sameOpenRequest = await this.s.request(duplicate.rows[0].id, c);
+      }
+      if (sameOpenRequest && !/(?:פנייה\s+חדשה|פריט\s+נוסף|עוד\s+פריט)/.test(text))
+        return output(
+          `כבר קיימת פנייה ${sameOpenRequest.number} עבור פריט דומה. אם זו פנייה חדשה או פריט נוסף, כתוב זאת במפורש.`,
+          sameOpenRequest,
+        );
       const r = await this.s.create(
         c,
         items,
@@ -219,6 +251,14 @@ export class Commands {
       return { ...output(HUMAN_REPLY), humanReason: cmd.reason };
     if (cmd.type === "next" && !ctx.requests.length)
       return output("איך אפשר לעזור — למסור פריט, לקבל פריט או לתאם הובלה?");
+    if (cmd.type === "clarify_duplicate") {
+      const existing = target(ctx, cmd.request_number);
+      ownParty(existing, phone);
+      return output(
+        `כבר קיימת פנייה ${existing.number} עבור פריט דומה. אם זו פנייה חדשה או פריט נוסף, כתוב זאת במפורש.`,
+        existing,
+      );
+    }
     const n = "request_number" in cmd ? cmd.request_number : null;
     const initial = target(ctx, n),
       r = await this.s.request(initial.id, c, true);
@@ -234,9 +274,30 @@ export class Commands {
       const other = r.parties.find((p) => p.phone !== phone);
       if (r.origin !== "direct" || !other)
         throw new AppError("counterparty_not_ready", 409, "נא לשלוח קודם את מספר הצד השני או כרטיס איש קשר.");
-      if (r.verification_contacted)
+      const verification = await c.query<{ state: string }>(
+        "SELECT state FROM request_verifications WHERE request_id=$1 AND role=$2",
+        [r.id, other.role],
+      );
+      if (
+        r.verification_contacted ||
+        ["consented", "queued", "provider_accepted", "delivered", "approved"].includes(
+          verification.rows[0]?.state ?? "",
+        )
+      )
         return output("הפנייה לצד השני כבר בוצעה.", r);
       r.verification_contacted = true;
+      await c.query(
+        `INSERT INTO request_verifications(request_id,role,state,consented_at,updated_at,last_error)
+         VALUES($1,$2,$3,$4,clock_timestamp(),$5)
+         ON CONFLICT(request_id,role) DO UPDATE SET state=EXCLUDED.state,consented_at=EXCLUDED.consented_at,updated_at=clock_timestamp(),last_error=EXCLUDED.last_error`,
+        [
+          r.id,
+          other.role,
+          cmd.contact ? "consented" : "declined",
+          cmd.contact ? new Date() : null,
+          cmd.contact ? null : "user_declined_contact",
+        ],
+      );
       if (cmd.contact)
         notices.push({
           phone: other.phone,
@@ -344,10 +405,22 @@ export class Commands {
         p.settlement = reg.name;
       }
       if (cmd.name) p.name = cmd.name;
-      if (cmd.address) p.address = cmd.address;
+      if (cmd.address) {
+        const address = cmd.address.trim();
+        const looksLikeStreet = /^(?:רחוב|שכונת|שכונה|שדרות|שד[׳']?)\b/.test(address);
+        const known = looksLikeStreet ? await this.s.region(c, address) : null;
+        p.address = address;
+        if (known?.decision === "review")
+          p.address = address;
+      }
       if (p.settlement && p.settlement !== "בית שאן") p.floor = 0;
       else if (p.settlement === "בית שאן" && cmd.floor !== null)
         p.floor = cmd.floor;
+      if (cmd.address && /^(?:רחוב|שכונת|שכונה|שדרות|שד[׳']?)\b/.test(cmd.address.trim())) {
+        const known = await this.s.region(c, cmd.address.trim());
+        if (known.decision === "review")
+          return output(`לא מצאתי את "${cmd.address.trim()}" במאגר הרחובות. אם זה שם מקומי או כינוי, אשר שזה נכון; אחרת כתוב את הרחוב/השכונה מחדש.`, r);
+      }
     } else if (cmd.type === "item_facts") {
       ownParty(r, phone, "donor");
       const oldItems = structuredClone(r.items);

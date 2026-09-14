@@ -1,0 +1,14 @@
+[
+  {"id":"P01","title":"direct handoff does not require disassembly and preserves explicit broken fact","file":"tests/unit.test.ts"},
+  {"id":"P02","title":"when a Beit Shean donor supplied a name, ask only for the missing address","file":"tests/unit.test.ts"},
+  {"id":"P03","title":"active location dataset resolves approved Beit Shean street aliases","file":"tests/integration.test.ts"},
+  {"id":"P04","title":"repeated donation does not silently open a duplicate request","file":"tests/integration.test.ts"},
+  {"id":"P05","title":"all required status phrasings are read only intents","file":"tests/unit.test.ts"},
+  {"id":"P06","title":"direct handoff without a phone skips condition checks and asks before contact","file":"tests/unit.test.ts"},
+  {"id":"P07","title":"counterparty notice is formatted after commit before it becomes sendable","file":"tests/integration.test.ts"},
+  {"id":"P08","title":"counterparty notice is formatted after commit before it becomes sendable","file":"tests/integration.test.ts"},
+  {"id":"P09","title":"provider: \\\"openai_responses_managed_prompt\\\"","file":"scripts/validate-prompt-wiring.mjs"},
+  {"id":"P10","title":"match with image: image delivered before interest/receiver details and exclusive claim","file":"tests/integration.test.ts"},
+  {"id":"P11","title":"self_move","file":"src/infrastructure/ai.ts"},
+  {"id":"P12","title":"contact card supplies name/phone; location is optional and bounded","file":"tests/unit.test.ts"}
+]

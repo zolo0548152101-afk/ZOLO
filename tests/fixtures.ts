@@ -13,6 +13,7 @@ import type {
 import type { Planner } from "../src/infrastructure/ai.js";
 import type { Channel, Delivery } from "../src/infrastructure/waha.js";
 import { asItem } from "../src/application/commands.js";
+import { setTimeout as delay } from "node:timers/promises";
 export const log = { info: () => {}, warn: () => {}, error: () => {} };
 export const JPEG = Buffer.from([
   255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 255, 217,
@@ -40,12 +41,14 @@ export class FakePlanner implements Planner {
   readonly plans = new Map<string, Plan>();
   calls = 0;
   fail = false;
+  planDelayMs = 0;
   phraseNoticePrefix = "";
   async plan(
     ctx: Context,
   ): Promise<{ plan: Plan; metadata: Record<string, unknown> }> {
     this.calls++;
     if (this.fail) throw new Error("simulated_openai_timeout");
+    if (this.planDelayMs) await delay(this.planDelayMs);
     const plan = this.plans.get(ctx.message.id);
     if (!plan) throw new Error("missing_test_plan");
     return { plan, metadata: { test_double: true } };

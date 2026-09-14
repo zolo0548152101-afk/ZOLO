@@ -7,6 +7,7 @@ export const QUEUES = [
   "capture",
   "conversation",
   "send",
+  "integration",
   "ops",
 ] as const;
 export type QueueName = (typeof QUEUES)[number];

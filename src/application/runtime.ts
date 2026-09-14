@@ -15,10 +15,12 @@ import { Engine } from "./engine.js";
 import {
   AppError,
   errorCode,
+  RetryableError,
   type Log,
   type Request,
 } from "../domain/types.js";
 import { localDate, statusText } from "../domain/policies.js";
+import { integrationAdapters } from "./integration-port.js";
 export interface RuntimeOverrides {
   pool?: pg.Pool;
   planner?: Planner;
@@ -119,6 +121,13 @@ export class Runtime {
           },
         );
         await queue.boss.work<JobData, void, typeof settings>(
+          "integration",
+          { ...settings, localConcurrency: 1 },
+          async (jobs) => {
+            for (const j of jobs) await this.deliverIntegration(j.data.id);
+          },
+        );
+        await queue.boss.work<JobData, void, typeof settings>(
           "ops",
           { ...settings, localConcurrency: 1 },
           async (jobs) => {
@@ -140,6 +149,16 @@ export class Runtime {
         // A deployment or a worker restart must never strand an accepted
         // WhatsApp message or an outbound reply in the database. Rebuild the
         // lightweight queue jobs from durable state before declaring ready.
+        const recoverIdentity = await this.pool.query<{ id: string }>(
+          `SELECT id FROM messages
+            WHERE contact_id IS NULL AND processed_at IS NULL
+            ORDER BY seq LIMIT 500`,
+        );
+        for (const row of recoverIdentity.rows) {
+          await store.transaction(async (c) => {
+            await queue.send(c, "ingest", { id: row.id }, this.config.WAHA_SESSION);
+          });
+        }
         const recover = await this.pool.query<{
           id: string;
           phone: string;
@@ -175,6 +194,14 @@ export class Runtime {
             ]);
           });
         }
+        const recoverIntegrations = await this.pool.query<{ id: string; integration: string }>(
+          "SELECT id,integration FROM integration_outbox WHERE state='pending' ORDER BY id LIMIT 500",
+        );
+        for (const row of recoverIntegrations.rows) {
+          await store.transaction(async (c) => {
+            await queue.send(c, "integration", { id: row.id }, row.integration);
+          });
+        }
         await this.beat();
         this.heartbeat = setInterval(
           () =>
@@ -194,6 +221,57 @@ export class Runtime {
       throw e;
     } finally {
       this.initializing = false;
+    }
+  }
+
+  private async deliverIntegration(id: string): Promise<void> {
+    const row = await this.pool.query<{
+      integration: string;
+      state: "pending" | "delivered" | "failed";
+      event_id: string;
+      event_type: string;
+      request_id: string | null;
+      occurred_at: string;
+      data: unknown;
+    }>(
+      `SELECT io.integration,io.state,io.event_id::text,ev.event_type,
+              ev.request_id,ev.created_at::text AS occurred_at,ev.data
+         FROM integration_outbox io JOIN request_events ev ON ev.id=io.event_id
+        WHERE io.id=$1`,
+      [id],
+    );
+    const item = row.rows[0];
+    if (!item || item.state !== "pending") return;
+    const adapter = integrationAdapters.get(item.integration);
+    if (!adapter) {
+      await this.pool.query(
+        "UPDATE integration_outbox SET state='failed',attempts=attempts+1,last_error='adapter_not_registered' WHERE id=$1 AND state='pending'",
+        [id],
+      );
+      this.log.error({ code: "integration_adapter_missing", integration: item.integration, outbox_id: id });
+      return;
+    }
+    try {
+      await adapter.deliver(
+        {
+          id: item.event_id,
+          type: item.event_type,
+          requestId: item.request_id,
+          occurredAt: item.occurred_at,
+          data: item.data,
+        },
+        { idempotencyKey: id, signal: AbortSignal.timeout(30000) },
+      );
+      await this.pool.query(
+        "UPDATE integration_outbox SET state='delivered',attempts=attempts+1,delivered_at=clock_timestamp(),last_error=NULL WHERE id=$1 AND state='pending'",
+        [id],
+      );
+    } catch (e) {
+      await this.pool.query(
+        "UPDATE integration_outbox SET state='failed',attempts=attempts+1,last_error=$2 WHERE id=$1 AND state='pending'",
+        [id, errorCode(e)],
+      );
+      throw new RetryableError(errorCode(e));
     }
   }
   private async beat(): Promise<void> {
@@ -245,18 +323,23 @@ export class Runtime {
     const uncertain = await this.pool.query<{ n: number }>(
       "SELECT count(*)::int n FROM outbox WHERE state='uncertain'",
     );
+    const formatting = await this.pool.query<{ n: number }>(
+      "SELECT count(*)::int n FROM outbox WHERE format_state='pending' AND created_at<clock_timestamp()-interval '30 seconds'",
+    );
     const failedMedia = await this.pool.query<{ n: number }>(
       "SELECT count(*)::int n FROM messages WHERE media_state='pending' AND received_at<clock_timestamp()-interval '60 seconds'",
     );
     if (
       Object.values(blocked).some((v) => v > 0) ||
       uncertain.rows[0]!.n > 0 ||
+      formatting.rows[0]!.n > 0 ||
       failedMedia.rows[0]!.n > 0
     ) {
       this.log.error({
         code: "operations_attention",
         blocked,
         uncertain: uncertain.rows[0]!.n,
+        notice_formatting_overdue: formatting.rows[0]!.n,
         media_overdue: failedMedia.rows[0]!.n,
       });
       await store.transaction((c) =>
@@ -265,7 +348,7 @@ export class Runtime {
           { trace_id: randomUUID(), mode: this.config.BOT_MODE },
           {
             phone: this.config.ADMIN_PHONE,
-            text: `נדרשת בדיקת מערכת חיים יחד.\nתורים חסומים: ${JSON.stringify(blocked)}\nשליחות לא ודאיות: ${uncertain.rows[0]!.n}\nקבצים בהמתנה מעל דקה: ${failedMedia.rows[0]!.n}\nיש לבדוק במסך הניהול. אם WhatsApp אינו זמין, ההתראה נשמרת בלוג וב־admin API.`,
+          text: `נדרשת בדיקת מערכת חיים יחד.\nתורים חסומים: ${JSON.stringify(blocked)}\nשליחות לא ודאיות: ${uncertain.rows[0]!.n}\nניסוח הודעות תקוע: ${formatting.rows[0]!.n}\nקבצים בהמתנה מעל דקה: ${failedMedia.rows[0]!.n}\nיש לבדוק במסך הניהול. אם WhatsApp אינו זמין, ההתראה נשמרת בלוג וב־admin API.`,
           },
           `ops:${now.toISOString().slice(0, 13)}`,
         ),

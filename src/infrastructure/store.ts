@@ -11,6 +11,8 @@ import {
   type Candidate,
   type Notice,
   type Mode,
+  type RequestLocation,
+  type VerificationState,
 } from "../domain/types.js";
 import {
   ACTIVE,
@@ -37,6 +39,7 @@ export interface Outbound {
   mode: Mode;
   trace_id: string;
   job_id: string | null;
+  format_state: "ready" | "pending" | "failed";
 }
 export interface BotAccess {
   mode: "open" | "allowlist";
@@ -141,7 +144,7 @@ export class Store {
     const base = await c.query<
       Omit<Request, "parties" | "items" | "photo_ids">
     >(
-      `SELECT id,number::int,version,status,origin,verification_contacted,run_date::text,earliest_run_date::text,human_reason,created_at::text FROM requests WHERE id=$1 ${lock ? "FOR UPDATE" : ""}`,
+      `SELECT id,number::int,version,status,origin,verification_contacted,run_date::text,earliest_run_date::text,preferred_time,represents_both_parties,closed_at::text,human_reason,created_at::text FROM requests WHERE id=$1 ${lock ? "FOR UPDATE" : ""}`,
       [id],
     );
     if (!base.rows[0]) throw new AppError("request_not_found", 404);
@@ -157,11 +160,21 @@ export class Store {
       "SELECT rm.media_id FROM request_media rm JOIN media m ON m.id=rm.media_id WHERE rm.request_id=$1 AND m.mime_type LIKE $2 ORDER BY m.created_at",
       [id, "image/%"],
     );
+    const locations = await c.query<RequestLocation>(
+      "SELECT role,latitude::float,longitude::float,captured_at::text FROM request_locations WHERE request_id=$1 ORDER BY role",
+      [id],
+    );
+    const verification = await c.query<VerificationState>(
+      "SELECT role,state FROM request_verifications WHERE request_id=$1 ORDER BY role",
+      [id],
+    );
     return {
       ...base.rows[0],
       parties: parties.rows,
       items: items.rows,
       photo_ids: media.rows.map((r) => r.media_id),
+      locations: locations.rows,
+      verification_states: verification.rows,
     };
   }
   async active(phone: string, c: DB = this.pool): Promise<Request[]> {
@@ -296,6 +309,9 @@ export class Store {
       photo_ids: [],
       run_date: null,
       earliest_run_date: null,
+      preferred_time: null,
+      represents_both_parties: false,
+      closed_at: null,
       human_reason: null,
       created_at: new Date().toISOString(),
     };
@@ -308,7 +324,7 @@ export class Store {
   }
   async save(c: pg.PoolClient, r: Request): Promise<void> {
     const result = await c.query(
-      `UPDATE requests SET version=version+1,status=$2,origin=$3,run_date=$4,human_reason=$5,earliest_run_date=$7,verification_contacted=$8,updated_at=clock_timestamp() WHERE id=$1 AND version=$6`,
+      `UPDATE requests SET version=version+1,status=$2,origin=$3,run_date=$4,human_reason=$5,preferred_time=$7,earliest_run_date=$8,verification_contacted=$9,represents_both_parties=$10,closed_at=$11,updated_at=clock_timestamp() WHERE id=$1 AND version=$6`,
       [
         r.id,
         r.status,
@@ -316,8 +332,11 @@ export class Store {
         r.run_date,
         r.human_reason,
         r.version,
+        r.preferred_time ?? null,
         r.earliest_run_date,
         r.verification_contacted,
+        r.represents_both_parties ?? false,
+        r.closed_at,
       ],
     );
     if (result.rowCount !== 1) throw new AppError("version_conflict", 409);
@@ -365,13 +384,24 @@ export class Store {
     c: DB,
     value: string,
   ): Promise<{ name: string; decision: "allowed" | "outside" | "review" }> {
-    const s = norm(value);
+    const s = norm(value),
+      lookup = s.replace(/^(?:רחוב|שכונת|שכונה|שדרות|שד[׳']?)\s+/, "").trim();
+    const candidates = [lookup, lookup.replace(/\s+\d+[א-ת]?\s*$/, "").trim()].filter(
+      (value, index, all) => value && all.indexOf(value) === index,
+    );
     const r = await c.query<{
       name: string;
       decision: "allowed" | "outside" | "review";
     }>(
-      "SELECT name,decision FROM service_locations WHERE $1=ANY(aliases) ORDER BY name LIMIT 1",
-      [s],
+      `SELECT name,decision FROM service_locations
+       WHERE EXISTS (SELECT 1 FROM unnest($1::text[]) AS candidate WHERE candidate=ANY(aliases))
+       UNION ALL
+       SELECT st.name,'allowed'::text FROM streets st
+       JOIN location_datasets ds ON ds.id=st.dataset_id AND ds.active=true
+       WHERE EXISTS (SELECT 1 FROM unnest($1::text[]) AS candidate
+                     WHERE candidate=st.normalized OR candidate=ANY(st.aliases))
+       ORDER BY name LIMIT 1`,
+      [candidates],
     );
     return r.rows[0] ?? { name: s, decision: "review" };
   }
@@ -394,10 +424,14 @@ export class Store {
         JSON.stringify(data),
       ],
     );
-    await c.query(
-      `INSERT INTO integration_outbox(event_id,integration) SELECT $1,name FROM integrations WHERE enabled=true ON CONFLICT DO NOTHING`,
+    const integrations = await c.query<{ id: string; integration: string }>(
+      `INSERT INTO integration_outbox(event_id,integration)
+       SELECT $1,name FROM integrations WHERE enabled=true
+       ON CONFLICT DO NOTHING RETURNING id,integration`,
       [e.rows[0]!.id],
     );
+    for (const row of integrations.rows)
+      await this.queue.send(c, "integration", { id: row.id }, row.integration);
   }
   async outbound(
     c: pg.PoolClient,
@@ -411,7 +445,8 @@ export class Store {
     notice: Notice,
     key: string,
     requestId: string | null = null,
-  ): Promise<void> {
+    formatState: "ready" | "pending" = "ready",
+  ): Promise<string | null> {
     const phone = canonicalPhone(notice.phone);
     const chat =
       ctx.phone === phone && ctx.chat_id
@@ -455,12 +490,16 @@ export class Store {
           { id: row.rows[0].id },
           phone,
         );
-        await c.query("UPDATE outbox SET job_id=$2 WHERE id=$1", [
+      await c.query("UPDATE outbox SET job_id=$2 WHERE id=$1", [
           row.rows[0].id,
           job,
         ]);
       }
     }
+    if (!row.rows[0]) return null;
+    if (formatState === "pending")
+      await c.query("UPDATE outbox SET format_state='pending' WHERE id=$1", [row.rows[0].id]);
+    return row.rows[0].id;
   }
   async linkPhoto(c: pg.PoolClient, r: Request, m: Incoming): Promise<void> {
     if (
