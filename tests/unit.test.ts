@@ -305,6 +305,8 @@ test("coordinated status adds a map-ordered transport recommendation", () => {
   ] };
   const text = statusText([a, b]);
   assert.match(text, /המלצת סדר הובלות לפי המפה/);
+  assert.match(text, /https:\/\/www\.waze\.com\/ul\?ll=/);
+  assert.doesNotMatch(text, /google\.com\/maps/);
   assert.ok(text.indexOf("1. פנייה 2") < text.indexOf("2. פנייה 1"));
 });
 test("tools cannot write status, SQL, actor identity, arbitrary fields or duplicate commands", () => {

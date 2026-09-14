@@ -362,7 +362,7 @@ export function statusText(requests: Request[]): string {
         v = r.parties.find((p) => p.role === "receiver");
       const line = `פנייה ${r.number}\nפריט: ${r.items.map((i) => i.description + (i.quantity > 1 ? ` ×${i.quantity}` : "")).join(", ")}`;
       const locations = (r.locations ?? []).map((l) =>
-        `${l.role === "donor" ? "מיקום איסוף" : "מיקום יעד"}: https://www.google.com/maps?q=${l.latitude},${l.longitude}`,
+        `${l.role === "donor" ? "מיקום איסוף" : "מיקום יעד"}: https://www.waze.com/ul?ll=${l.latitude}%2C${l.longitude}&navigate=yes`,
       ).join("\n");
       const photos = r.photo_ids.length ? `\nתמונות שמורות: ${r.photo_ids.length} (יישלחו בהודעות נפרדות)` : "\nתמונות שמורות: אין";
       const verification = (r.verification_states ?? []).map((x) =>
@@ -389,7 +389,7 @@ export function statusText(requests: Request[]): string {
   const route = coordinated
     .map(
       ({ r, pickup, target }, i) =>
-        `${i + 1}. פנייה ${r.number} (${r.run_date}) — איסוף https://www.google.com/maps?q=${pickup!.latitude},${pickup!.longitude} → יעד https://www.google.com/maps?q=${target!.latitude},${target!.longitude}`,
+        `${i + 1}. פנייה ${r.number} (${r.run_date}) — איסוף https://www.waze.com/ul?ll=${pickup!.latitude}%2C${pickup!.longitude}&navigate=yes → יעד https://www.waze.com/ul?ll=${target!.latitude}%2C${target!.longitude}&navigate=yes`,
     )
     .join("\n");
   return `${details}\n\nהמלצת סדר הובלות לפי המפה:\n${route}`;
