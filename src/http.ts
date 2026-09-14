@@ -304,7 +304,7 @@ window.dbEdit=async id=>{
           requests: z.strictObject({
             status: z.enum(["collecting","available","awaiting_approval","waiting_capacity","coordinated","human","cancel_pending","cancelled","closed","rejected"]).optional(),
             run_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
-            preferred_time: z.string().max(80).nullable().optional(),
+            preferred_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "יש להזין שעה בפורמט HH:MM").nullable().optional(),
             represents_both_parties: z.boolean().optional(),
             human_reason: z.string().max(1000).nullable().optional(),
           }),
