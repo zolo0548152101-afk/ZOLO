@@ -570,6 +570,54 @@ test("five independent donation and receive route passes remain isolated", async
     assert.ok(received.message.processed_at);
   }
 });
+test("four canonical flows pass five isolated simulations each", async () => {
+  for (let i = 0; i < 5; i++) {
+    const directDonor = phone(),
+      directReceiver = phone(),
+      direct = await message(
+        directDonor,
+        `מוסר מיטה ישירות למקבל ${directReceiver}`,
+        [{
+          type: "donate",
+          items: [{ kind: "bed", description: `מיטה ישירה ${i + 1}`, quantity: 1 }],
+          counterparty_phone: directReceiver,
+          direct: true,
+          free: true,
+          working: null,
+        }],
+      );
+    assert.match(direct.row.reply ?? "", /אימות/);
+    assert.doesNotMatch(direct.row.reply ?? "", /תמונה|תקין ושמיש/);
+    assert.equal((await s.active(directDonor))[0]!.origin, "direct");
+
+    const open = await message(phone(), `מוסר שולחן ${i + 1}`, [donate(`שולחן ${i + 1}`, "table")]);
+    assert.equal(open.row.reply, PHOTO_FIRST);
+
+    const self = phone(),
+      selfResult = await message(self, `מעביר לעצמי ארון ${i + 1}`, [
+        {
+          type: "donate",
+          items: [{ kind: "wardrobe", description: `ארון עצמי ${i + 1}`, quantity: 1 }],
+          counterparty_phone: self,
+          direct: true,
+          free: true,
+          working: true,
+        },
+    ]);
+    assert.doesNotMatch(selfResult.row.reply ?? "", /תמונה|תקין ושמיש/);
+    const selfRequest = (await s.active(self))[0]!;
+    assert.equal(selfRequest.origin, "direct");
+    assert.ok(selfRequest.parties.some((party) => party.phone === self));
+
+    const requester = phone(),
+      requestResult = await message(requester, `מבקש כיסא ${i + 1}`, [
+        { type: "seek", kind: "chairs" },
+      ]);
+    assert.ok(requestResult.message.processed_at);
+    assert.equal((await s.active(requester)).length, 0);
+    assert.doesNotMatch(requestResult.row.reply ?? "", /תמונה|תקין ושמיש/);
+  }
+});
 test("receiver cannot alter donor item facts; attempted forbidden change escalates durably", async () => {
   const r = await readyRequest(),
     receiver = r.parties[1]!.phone;
