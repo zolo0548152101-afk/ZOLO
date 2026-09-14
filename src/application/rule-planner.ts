@@ -74,7 +74,10 @@ function addressAndName(text: string): { address: string; name: string | null } 
     .split(/[,;]/)
     .map((part) => part.trim())
     .filter(Boolean);
-  if (parts.length < 1 || !/^(?:רחוב|שכונת|שכונה|שיכון|שדרות|שד[׳']?)\b/.test(parts[0]!))
+  if (
+    parts.length < 1 ||
+    !/^(?:רחוב|שכונת|שכונה|שיכון|שדרות|שד[׳']?)(?:\s|$)/.test(parts[0]!)
+  )
     return null;
   const address = parts[0]!;
   const name = parts.slice(1).join(" ").trim() || null;
