@@ -68,6 +68,19 @@ function addressWithSettlement(text: string): string | null {
   return match?.[1]?.trim() ?? null;
 }
 
+function addressAndName(text: string): { address: string; name: string | null } | null {
+  const parts = norm(text)
+    .replace(/בית\s*[-־]?\s*שאן/g, "")
+    .split(/[,;]/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length < 1 || !/^(?:רחוב|שכונת|שכונה|שיכון|שדרות|שד[׳']?)\b/.test(parts[0]!))
+    return null;
+  const address = parts[0]!;
+  const name = parts.slice(1).join(" ").trim() || null;
+  return { address, name };
+}
+
 function namedRecipientPhone(text: string): string | null {
   const match = text.match(
     /(?:למקבל(?:ת)?|מקבל(?:ת)?(?:\s+מספר)?|אל|(?:^|[\s,])ל)\s*[:־-]?\s*([+\d\s().-]{8,})/,
@@ -274,18 +287,20 @@ export function rulePlan(ctx: Context): Plan | null {
 
   if (!party.settlement) {
     const settlement = beitShean(text);
-    if (settlement)
+    if (settlement) {
+      const parsed = addressAndName(text);
       return plan(text, [
         {
           type: "details",
           request_number: current.number,
           role: party.role,
-          name: null,
+          name: parsed?.name ?? null,
           settlement,
-          address: addressWithSettlement(text),
+          address: parsed?.address ?? addressWithSettlement(text),
           floor: null,
         },
       ]);
+    }
   }
 
   if (party.settlement && !party.name) {
