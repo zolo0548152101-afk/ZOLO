@@ -194,6 +194,7 @@ export function nextQuestion(
   const donor = p.role === "donor";
   if (
     r.origin === "direct" &&
+    !r.represents_both_parties &&
     !r.verification_contacted &&
     r.parties.some((x) => x.role !== p.role)
   )

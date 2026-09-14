@@ -199,6 +199,10 @@ export class Commands {
         parties,
         isDonor && !direct ? "donation" : "direct",
       );
+      if (parties.length === 2 && parties[0]!.phone === parties[1]!.phone) {
+        r.represents_both_parties = true;
+        await this.s.save(c, r);
+      }
       await c.query(
         "UPDATE conversations SET selected_request_id=$2 WHERE id=$1",
         [ctx.conversation.id, r.id],
