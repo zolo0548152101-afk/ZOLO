@@ -147,6 +147,12 @@ export function rulePlan(ctx: Context): Plan | null {
   }
   const donor = party.role === "donor";
   const items = current.items;
+  // A recipient can introduce themself and explicitly consent in one
+  // message. Consent must win over profile extraction, otherwise it is
+  // misclassified as a name and the approval is lost.
+  if (!party.approved_at && explicitApproval(text))
+    return plan(text, [{ type: "approve_self", request_number: current.number }]);
+
   // A direct handoff commonly arrives as two WhatsApp messages: first the
   // item/name, then a phone number or contact card. Persist that second
   // message deterministically before asking the AI to phrase anything.
@@ -302,9 +308,6 @@ export function rulePlan(ctx: Context): Plan | null {
         },
       ]);
   }
-
-  if (!party.approved_at && explicitApproval(text))
-    return plan(text, [{ type: "approve_self", request_number: current.number }]);
 
   if (
     donor &&
