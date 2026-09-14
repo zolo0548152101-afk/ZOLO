@@ -69,8 +69,13 @@ export function quickReply(s: string): string | null {
   return null;
 }
 export function explicitApproval(t: string): boolean {
-  return /^(?:כן|מאשר|מאשרת|אני מאשר|אני מאשרת|מאושר|מסכים|מסכימה|אני\s+[א-ת]{2,}[,\s]+(?:מ|ומ)?אשר(?:ת)?)(?:[\s.,!]|$)/.test(
-    norm(t),
+  const text = norm(t);
+  // Consent often arrives after a short self-introduction, for example:
+  // "אני טל, המקבלת. מאשרת את הפרטים."  Approval commands are only
+  // accepted in an approval state, so recognise the explicit consent phrase
+  // after a sentence boundary as well as at the start of the message.
+  return /(?:^|[.!,;]\s*)(?:כן|מאשר|מאשרת|אני מאשר|אני מאשרת|מאושר|מסכים|מסכימה|אני\s+[א-ת]{2,}[,\s]+(?:מ|ומ)?אשר(?:ת)?)(?:[\s.,!]|$)/.test(
+    text,
   );
 }
 export function donationIntent(t: string): boolean {
