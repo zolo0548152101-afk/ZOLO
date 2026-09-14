@@ -144,6 +144,10 @@ function floorFrom(value: string | null): number | null {
 }
 
 function activeRequest(ctx: Context): Request | undefined {
+  const open = ctx.requests.filter(
+    (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
+  );
+  if (open.length === 1) return open[0];
   return (
     ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
     (ctx.requests.length === 1 ? ctx.requests[0] : undefined)

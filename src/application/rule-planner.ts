@@ -9,9 +9,18 @@ import {
   ownParty,
 } from "../domain/policies.js";
 
-const activeRequest = (ctx: Context): Request | undefined =>
-  (ctx.requests ?? []).find((r) => r.id === ctx.conversation?.selected_request_id) ??
-  ((ctx.requests ?? []).length === 1 ? ctx.requests?.[0] : undefined);
+const activeRequest = (ctx: Context): Request | undefined => {
+  const requests = ctx.requests ?? [];
+  const open = requests.filter(
+    (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
+  );
+  const selected = requests.find((r) => r.id === ctx.conversation?.selected_request_id);
+  // A recipient can receive a new verification message before a conversation
+  // row exists for that chat. On their first reply prefer the sole open
+  // request over an older coordinated request that happens to be selected.
+  if (open.length === 1) return open[0];
+  return selected ?? (requests.length === 1 ? requests[0] : undefined);
+};
 
 const yes = (text: string): boolean =>
   /^(?:כן|בטח|בוודאי|נכון|מאשר|מאשרת)(?:[\s,!.]|$)/.test(norm(text));

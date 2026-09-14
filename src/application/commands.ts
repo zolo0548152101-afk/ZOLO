@@ -66,7 +66,11 @@ function target(ctx: Context, number: number | null): Request {
   const byItem = !number && ctx.requests.length > 1
     ? ctx.requests.filter((r) => r.items.some((i) => text.includes(i.description) || text.includes(i.kind)))
     : [];
+  const open = ctx.requests.filter(
+    (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
+  );
   const r = explicit ?? (byItem.length === 1 ? byItem[0] : undefined) ??
+    (open.length === 1 ? open[0] : undefined) ??
     (ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
       (ctx.requests.length === 1 ? ctx.requests[0] : undefined));
   if (!r)
@@ -307,6 +311,12 @@ export class Commands {
           phone: other.phone,
           text: `פנייה ${r.number}: ${r.items.map((i) => i.description).join(", ")}. ${phone === r.parties.find((p) => p.role === "donor")?.phone ? "המוסר" : "המקבל"} ביקש שנפנה אליך לאימות הפרטים. נא לאשר את חלקך ב${other.role === "donor" ? "מסירה" : "קבלה"}.`,
         });
+      if (cmd.contact)
+        await c.query(
+          `UPDATE conversations SET selected_request_id=$2,version=version+1
+             WHERE contact_id=(SELECT id FROM contacts WHERE phone=$1)`,
+          [other.phone, r.id],
+        );
       const q = nextQuestion(r, phone);
       return output(
         `${cmd.contact ? "נפנה לצד השני עכשיו לצורך אימות." : "בסדר, לא נפנה לצד השני כרגע."}\n${q.text}`,
