@@ -19,6 +19,18 @@ const databaseTable = z.enum([
   "messages",
   "outbox",
 ]);
+const adminStatusLabel: Record<string, string> = {
+  collecting: "בהשלמת פרטים",
+  available: "ממתינה למקבל",
+  awaiting_approval: "ממתינה לאישור",
+  waiting_capacity: "ממתינה למקום בהובלה",
+  coordinated: "תואמה",
+  human: "בטיפול אנושי",
+  cancel_pending: "ממתינה להחלטה לאחר ביטול",
+  cancelled: "בוטלה",
+  closed: "הושלמה",
+  rejected: "לא מתאימה",
+};
 function authorized(req: FastifyRequest, c: Config): boolean {
   const input = req.headers["x-admin-token"];
   if (typeof input !== "string") return false;
@@ -190,7 +202,13 @@ let dbRows={},dbEditable=[];async function loadDb(){try{const table=document.que
         );
         const requests = [];
         for (const id of ids.rows) requests.push(await s.request(id.id));
-        return { ok: true, requests };
+        return {
+          ok: true,
+          requests: requests.map((request) => ({
+            ...request,
+            status: adminStatusLabel[request.status] ?? request.status,
+          })),
+        };
       });
       admin.get("/database", async (req) => {
         const q = z
