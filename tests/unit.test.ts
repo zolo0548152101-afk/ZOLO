@@ -17,6 +17,7 @@ import {
   readyToCoordinate,
   statusText,
   explicitApproval,
+  directHandoffIntent,
 } from "../src/domain/policies.js";
 import { rulePlan } from "../src/application/rule-planner.js";
 import type { Command, Context } from "../src/domain/types.js";
@@ -52,6 +53,10 @@ test("all required status phrasings are read only intents", () => {
 test("approval accepts a clear consent after a self-introduction", () => {
   assert.equal(explicitApproval("אני טל, המקבלת. מאשרת את הפרטים."), true);
   assert.equal(explicitApproval("אני טל, המקבלת."), false);
+});
+test("an open donation that may help someone is not a direct handoff", () => {
+  assert.equal(directHandoffIntent("יש לי כיסא למסירה, אולי יעזור למישהו."), false);
+  assert.equal(directHandoffIntent("יש לי כיסא למסור למישהו ספציפי."), true);
 });
 test("direct handoff does not require disassembly and preserves explicit broken fact", () => {
   const r = sampleRequest();

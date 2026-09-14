@@ -94,7 +94,9 @@ export function directHandoffIntent(t: string): boolean {
     /(?:הוא|היא)\s+רוצה\s+לקבל/.test(text)
   )
     return true;
-  if (/(?:מקבל(?:ת)?\s+(?:מסוים|מוגדר)|למישהו|למישהי|לאדם)/.test(text))
+  // "אולי יעזור למישהו" is an open donation, not a named/direct handoff.
+  // Require an explicit qualifier when no real recipient name/phone exists.
+  if (/(?:מקבל(?:ת)?\s+(?:מסוים|מוגדר)|ל(?:מישהו|מישהי|אדם)\s+(?:מסוים|מסוימת|ספציפי(?:ת)?|מוגדר(?:ת)?))/ .test(text))
     return /(?:להעביר|למסור|מסירה|מסירה ישירה)/.test(text);
   // A named recipient is often written naturally as "למסור מיטה לטל".
   // Do not classify a normal open donation or a place name as direct.
