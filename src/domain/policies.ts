@@ -251,7 +251,9 @@ export function nextQuestion(
       text:
         p.settlement === "בית שאן"
           ? (!p.name
-              ? "נא לציין שם וכתובת."
+              ? p.address
+                ? "תודה. חסר רק השם."
+                : "נא לציין שם וכתובת."
               : "תודה. חסרה רק הכתובת המדויקת.") +
             (!p.floor_note_shown ? " בבניין עם קומות — לציין קומה." : "")
           : !p.name
