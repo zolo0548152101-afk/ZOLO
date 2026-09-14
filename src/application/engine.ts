@@ -23,6 +23,7 @@ import {
 } from "../domain/types.js";
 import {
   isStatus,
+  donationIntent,
   photoGate,
   quickReply,
   statusText,
@@ -438,6 +439,42 @@ export class Engine {
       if (ctx.message.processed_at) return;
       const text = ctx.message.transcript ?? ctx.message.text,
         phone = ctx.conversation.phone;
+      // Reject an explicitly named out-of-area endpoint before the donation
+      // photo gate.  Asking for a photo first creates a dead-end and hides the
+      // actual reason the request cannot be served.
+      if (donationIntent(text)) {
+        const outsideNames = [
+          "אילת",
+          "עפולה",
+          "ירושלים",
+          "תל אביב",
+          "חיפה",
+          "באר שבע",
+          "אשדוד",
+          "אשקלון",
+          "נתניה",
+          "ראשון לציון",
+        ];
+        const outsideName = outsideNames.find((name) => text.includes(name));
+        if (outsideName && (await this.s.region(c, outsideName)).decision === "outside") {
+          await this.s.event(c, ctx.message, phone, "outside_area_rejected", {
+            settlement: outsideName,
+          });
+          await c.query(
+            "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
+            [id, OUTSIDE],
+          );
+          await this.s.outbound(c, ctx.message, { phone, text: OUTSIDE }, `reply:${id}`, null);
+          return {
+            trace_id: ctx.message.trace_id,
+            message_id: id,
+            mode: ctx.message.mode,
+            stage: "processed",
+            request_number: null,
+            code: "outside_area_rejected",
+          };
+        }
+      }
       const older = await c.query(
         "SELECT 1 FROM messages m JOIN contacts co ON co.id=m.contact_id WHERE co.phone=$1 AND m.seq<$2 AND m.processed_at IS NULL LIMIT 1",
         [phone, ctx.message.seq],
