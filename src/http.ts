@@ -148,6 +148,43 @@ function dbInput(key,value){
 }
 window.dbEdit=async id=>{const table=document.querySelector('#db-table').value,row=dbRows[id];if(!dbEditable.length)return say('אין שדות עריכה לטבלה הזו','error');const wrap=document.createElement('div');wrap.style='display:grid;gap:10px;max-height:70vh;overflow:auto;padding:4px';for(const key of dbEditable){const label=document.createElement('label');label.textContent=dbLabels[key]||key;label.appendChild(document.createElement('br'));label.insertAdjacentHTML('beforeend',dbInput(key,row[key]));wrap.appendChild(label)}const modal=document.createElement('div');modal.style='position:fixed;inset:0;background:#000b;display:grid;place-items:center;padding:20px;z-index:10';const card=document.createElement('div');card.className='card';card.style='width:min(620px,100%)';const title=document.createElement('h2');title.textContent='עריכת רשומה — כל שדה בנפרד';card.append(title,wrap);const actions=document.createElement('div');actions.className='actions';const save=document.createElement('button');save.textContent='שמור שינויים';const cancel=document.createElement('button');cancel.className='secondary';cancel.textContent='ביטול';actions.append(save,cancel);card.append(actions);modal.append(card);document.body.append(modal);cancel.onclick=()=>modal.remove();save.onclick=async()=>{const changes={};for(const input of wrap.querySelectorAll('[data-key]')){const key=input.dataset.key;let value=input.value;if(['needs_disassembly','represents_both_parties'].includes(key))value=value===''?null:value==='true';if(key==='status'&&!(value in dbStatusLabels))return say('סטטוס לא תקין','error');if(key==='phone'&&!/^[0-9+() -]{9,20}$/.test(value))return say('מספר הטלפון אינו תקין','error');if(['run_date','requested_date'].includes(key)&&value&&!/^\\d{4}-\\d{2}-\\d{2}$/.test(value))return say('התאריך אינו תקין','error');if(JSON.stringify(value)!==JSON.stringify(row[key]??null))changes[key]=value||null}if(!Object.keys(changes).length){modal.remove();return}if(!confirm('לשמור את השינויים שבחרת?'))return;try{await api('database/'+table+'/'+encodeURIComponent(id),{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({changes})});modal.remove();await window.loadDb();say('הרשומה עודכנה','ok')}catch(e){say(e.message||'העדכון נכשל','error')}}};
 window.loadDb=async()=>{try{const table=document.querySelector('#db-table').value,r=await api('database?table='+encodeURIComponent(table));dbEditable=r.editable_fields||[];dbRows=Object.fromEntries(r.rows.map(x=>[x.id,x]));document.querySelector('#db-head').innerHTML='<tr>'+r.columns.map(x=>'<th>'+dbSafe(dbLabels[x]||x)+'</th>').join('')+'<th>פעולות</th></tr>';document.querySelector('#db-rows').innerHTML=r.rows.map(x=>'<tr>'+r.columns.map(k=>'<td>'+dbSafe(dbDisplay(k,x[k]))+'</td>').join('')+'<td><button class="secondary" onclick="dbEdit(\''+x.id+'\')">עריכת שדות</button> <button class="danger" onclick="dbDelete(\''+x.id+'\')">מחק</button></td></tr>').join('')||'<tr><td>אין רשומות</td></tr>';say('רשומות המסד נטענו','ok')}catch(e){say(e.message||'טעינת המסד נכשלה','error')}};document.querySelector('#db-load').onclick=window.loadDb;
+</script><script>
+window.dbEdit=async id=>{
+  const table=document.querySelector('#db-table').value,row=dbRows[id];
+  if(!row)return say('הרשומה לא נמצאה','error');
+  const wrap=document.createElement('div');
+  wrap.style='display:grid;gap:10px;max-height:70vh;overflow:auto;padding:4px';
+  for(const key of Object.keys(row).filter(k=>k!=='id')){
+    const label=document.createElement('label');
+    label.textContent=(dbLabels[key]||key)+(dbEditable.includes(key)?'':' · לקריאה בלבד');
+    label.appendChild(document.createElement('br'));
+    if(dbEditable.includes(key)) label.insertAdjacentHTML('beforeend',dbInput(key,row[key]));
+    else {const value=document.createElement('div');value.textContent=dbDisplay(key,row[key]);value.style='padding:10px;border:1px solid #38546a;border-radius:8px;color:#9bb1c2;white-space:pre-wrap;word-break:break-word';label.append(value)}
+    wrap.append(label);
+  }
+  const modal=document.createElement('div');modal.style='position:fixed;inset:0;background:#000b;display:grid;place-items:center;padding:20px;z-index:10';
+  const card=document.createElement('div');card.className='card';card.style='width:min(700px,100%)';
+  const title=document.createElement('h2');title.textContent='עריכת רשומה — כל השדות';card.append(title,wrap);
+  const actions=document.createElement('div');actions.className='actions';
+  const save=document.createElement('button');save.textContent='שמור שינויים';
+  const cancel=document.createElement('button');cancel.className='secondary';cancel.textContent='ביטול';
+  actions.append(save,cancel);card.append(actions);modal.append(card);document.body.append(modal);
+  cancel.onclick=()=>modal.remove();
+  save.onclick=async()=>{
+    const changes={};
+    for(const input of wrap.querySelectorAll('[data-key]')){
+      const key=input.dataset.key;let value=input.value;
+      if(['needs_disassembly','represents_both_parties'].includes(key))value=value===''?null:value==='true';
+      if(key==='status'&&!(value in dbStatusLabels))return say('סטטוס לא תקין','error');
+      if(key==='phone'&&!/^[0-9+() -]{9,20}$/.test(value))return say('מספר הטלפון אינו תקין','error');
+      if(['run_date','requested_date'].includes(key)&&value&&!/^\\d{4}-\\d{2}-\\d{2}$/.test(value))return say('התאריך אינו תקין','error');
+      if(JSON.stringify(value)!==JSON.stringify(row[key]??null))changes[key]=value||null;
+    }
+    if(!Object.keys(changes).length){modal.remove();return}
+    if(!confirm('לשמור את השינויים שבחרת?'))return;
+    try{await api('database/'+table+'/'+encodeURIComponent(id),{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({changes})});modal.remove();await window.loadDb();say('הרשומה עודכנה','ok')}catch(e){say(e.message||'העדכון נכשל','error')}
+  };
+};
 </script></body></html>`),
   );
   app.post(
