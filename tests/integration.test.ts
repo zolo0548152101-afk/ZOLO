@@ -808,6 +808,21 @@ test("repeated donation does not silently open a duplicate request", async () =>
   assert.match(repeated.row.reply ?? "", /כבר קיימת פנייה/);
   assert.equal((await s.active(p)).length, 1);
 });
+test("duplicate clarification reloads the latest request and preserves the other party approval", async () => {
+  const donor = phone(), receiver = phone(), r = await readyRequest(donor, receiver);
+  await pool.query(
+    "UPDATE request_parties SET approved_at=clock_timestamp(), approved_by=contact_id, schedule_approved=true WHERE request_id=$1 AND role='receiver'",
+    [r.id],
+  );
+  await message(donor, "יש לי שוב את אותו מקרר", [
+    { type: "clarify_duplicate", request_number: r.number },
+  ]);
+  const row = await pool.query<{ approved_at: string | null }>(
+    "SELECT approved_at FROM request_parties WHERE request_id=$1 AND role='receiver'",
+    [r.id],
+  );
+  assert.ok(row.rows[0]!.approved_at);
+});
 test("atomic business commit rolls back if enqueue fails, then retries without duplicate request", async () => {
   const p = phone(),
     m = await enqueue(p, "יש לי מיטה למסירה", [donate()]);

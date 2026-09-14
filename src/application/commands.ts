@@ -252,7 +252,11 @@ export class Commands {
     if (cmd.type === "next" && !ctx.requests.length)
       return output("איך אפשר לעזור — למסור פריט, לקבל פריט או לתאם הובלה?");
     if (cmd.type === "clarify_duplicate") {
-      const existing = target(ctx, cmd.request_number);
+      // A duplicate message can arrive after the other party has approved.
+      // Reload under the transaction lock so returning this read-only reply
+      // can never overwrite a newer approval with a stale context snapshot.
+      const stale = target(ctx, cmd.request_number);
+      const existing = await this.s.request(stale.id, c, true);
       ownParty(existing, phone);
       return output(
         `כבר קיימת פנייה ${existing.number} עבור פריט דומה. אם זו פנייה חדשה או פריט נוסף, כתוב זאת במפורש.`,

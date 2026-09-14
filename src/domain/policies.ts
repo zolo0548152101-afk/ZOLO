@@ -69,7 +69,7 @@ export function quickReply(s: string): string | null {
   return null;
 }
 export function explicitApproval(t: string): boolean {
-  return /^(?:כן|מאשר|מאשרת|אני מאשר|אני מאשרת|מאושר|מסכים|מסכימה)(?:[\s.,!]|$)/.test(
+  return /^(?:כן|מאשר|מאשרת|אני מאשר|אני מאשרת|מאושר|מסכים|מסכימה|אני\s+[א-ת]{2,}[,\s]+(?:מ|ומ)?אשר(?:ת)?)(?:[\s.,!]|$)/.test(
     norm(t),
   );
 }
