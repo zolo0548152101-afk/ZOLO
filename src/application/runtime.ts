@@ -306,6 +306,7 @@ export class Runtime {
         [date, ["coordinated", "closed"]],
       );
       const requests: Request[] = [];
+      if (!ids.rows.length) return;
       for (const x of ids.rows) requests.push(await store.request(x.id));
       await store.transaction((c) =>
         store.outbound(

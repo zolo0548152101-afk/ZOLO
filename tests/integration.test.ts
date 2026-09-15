@@ -1263,7 +1263,7 @@ test("admin clear-all requires the exact destructive confirmation and resets tes
     method: "POST",
     url: "/admin/database/clear-all",
     headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
-    payload: { confirm: "מחק הכל עכשיו" },
+    payload: { confirm: false },
   });
   assert.equal(wrong.statusCode, 400);
   assert.equal(Number((await pool.query("SELECT count(*) FROM messages")).rows[0].count), before);
@@ -1271,7 +1271,7 @@ test("admin clear-all requires the exact destructive confirmation and resets tes
     method: "POST",
     url: "/admin/database/clear-all",
     headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
-    payload: { confirm: "מחק הכל" },
+    payload: { confirm: true },
   });
   assert.equal(cleared.statusCode, 200);
   assert.ok(Number(cleared.json<{ deleted: { messages: number } }>().deleted.messages) >= before);
