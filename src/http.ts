@@ -133,6 +133,7 @@ document.querySelector('#simulate').onsubmit=async e=>{e.preventDefault();const 
 document.querySelector('#save-access').onclick=async()=>{try{const mode=document.querySelector('input[name="access"]:checked').value,phones=document.querySelector('#allowlist').value.split(/[\s,]+/).filter(Boolean);await api('access',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({mode,phones})});say('הגדרת הגישה נשמרה','ok')}catch(e){say(e.message||'השמירה נכשלה','error')}};document.querySelector('#reset-one').onclick=async()=>{const phone=document.querySelector('#reset-phone').value.trim();if(!phone)return say('יש להזין מספר טלפון','error');if(!confirm('לאפס את זיכרון השיחה עבור '+phone+'? רשומות ההובלה לא יימחקו.'))return;try{await api('conversations/'+encodeURIComponent(phone)+'/reset',{method:'POST'});say('השיחה אופסה','ok')}catch(e){say(e.message||'האיפוס נכשל','error')}};document.querySelector('#reset-all').onclick=async()=>{if(!confirm('לאפס את זיכרון הבוט לכל המשתמשים? רשומות ההובלה יישמרו.'))return;try{await api('conversations/reset-all',{method:'POST'});say('זיכרון הבוט אופס לכל המשתמשים','ok')}catch(e){say(e.message||'האיפוס נכשל','error')}};
 let dbRows={},dbEditable=[];async function loadDb(){try{const table=document.querySelector('#db-table').value,r=await api('database?table='+encodeURIComponent(table));dbEditable=r.editable_fields||[];dbRows=Object.fromEntries(r.rows.map(x=>[x.id,x]));document.querySelector('#db-head').innerHTML='<tr>'+r.columns.map(x=>'<th>'+esc(x)+'</th>').join('')+'<th>פעולות</th></tr>';document.querySelector('#db-rows').innerHTML=r.rows.map(x=>'<tr>'+r.columns.map(k=>'<td>'+esc(x[k])+'</td>').join('')+'<td><button class="secondary" onclick="dbEdit(\''+x.id+'\')">ערוך</button> <button class="danger" onclick="dbDelete(\''+x.id+'\')">מחק</button></td></tr>').join('')||'<tr><td>אין רשומות</td></tr>';say('רשומות המסד נטענו','ok')}catch(e){say(e.message||'טעינת המסד נכשלה','error')}}window.dbEdit=async id=>{const table=document.querySelector('#db-table').value,row=dbRows[id],editable=Object.fromEntries(dbEditable.map(k=>[k,row[k]??null]));if(!dbEditable.length)return say('אין שדות עריכה לטבלה הזו','error');const raw=prompt('ערוך רק את השדות האלו בפורמט JSON',JSON.stringify(editable,null,2));if(raw===null)return;try{const parsed=JSON.parse(raw),changes={};for(const k of dbEditable)if(JSON.stringify(parsed[k]??null)!==JSON.stringify(editable[k]??null))changes[k]=parsed[k]??null;await api('database/'+table+'/'+encodeURIComponent(id),{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({changes})});await loadDb();say('הרשומה עודכנה','ok')}catch(e){say(e.message||'העדכון נכשל','error')}};window.dbDelete=async id=>{const table=document.querySelector('#db-table').value;if(!confirm('למחוק את הרשומה? פעולה זו אינה ניתנת לביטול.'))return;try{await api('database/'+table+'/'+encodeURIComponent(id),{method:'DELETE'});await loadDb();say('הרשומה נמחקה','ok')}catch(e){say(e.message||'המחיקה נכשלה','error')}};document.querySelector('#db-load').onclick=loadDb;const clearAll=document.querySelector('#db-clear-all');if(clearAll)clearAll.onclick=async()=>{const phrase=prompt('פעולה בלתי הפיכה. להקליד בדיוק: מחק הכל');if(phrase!=='מחק הכל')return say('המחיקה בוטלה','error');try{const r=await api('database/clear-all',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirm:phrase})});await refresh();await loadDb();say('נמחקו כל רשומות הבדיקות ('+Object.values(r.deleted||{}).reduce((n,v)=>n+Number(v||0),0)+')','ok')}catch(e){say(e.message||'הניקוי נכשל','error')}};
 </script><script>
+const dbDangerBar=document.createElement('div');dbDangerBar.className='actions';dbDangerBar.style='margin-top:12px';const clearPhoneButton=document.createElement('button');clearPhoneButton.className='danger';clearPhoneButton.type='button';clearPhoneButton.textContent='מחק נתוני מספר';const clearSystemButton=document.createElement('button');clearSystemButton.className='danger';clearSystemButton.type='button';clearSystemButton.textContent='מחק את כל הרשומות';dbDangerBar.append(clearPhoneButton,clearSystemButton);document.querySelector('#db-table')?.parentElement?.parentElement?.append(dbDangerBar);clearPhoneButton.onclick=async()=>{const phone=prompt('הזן מספר למחיקת כל הנתונים הקשורים אליו');if(phone===null||!phone.trim())return;if(!confirm('למחוק לצמיתות את כל נתוני המספר '+phone+'?'))return;try{const r=await api('database/clear-phone',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({phone:phone.trim(),confirm:true})});await refresh();await window.loadDb();say('נתוני המספר נמחקו','ok')}catch(e){say(e.message||'מחיקת נתוני המספר נכשלה','error')}};clearSystemButton.onclick=async()=>{if(!confirm('למחוק לצמיתות את כל הרשומות במערכת?\n\nהגדרות המערכת ורשימות היישובים לא יימחקו.'))return;try{const r=await api('database/clear-all',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirm:true})});await refresh();await window.loadDb();say('כל הרשומות נמחקו','ok')}catch(e){say(e.message||'מחיקת כל הרשומות נכשלה','error')}};
 const clearAllButton=document.querySelector('#db-clear-all');if(clearAllButton)clearAllButton.onclick=async()=>{if(!confirm('למחוק לצמיתות את כל הרשומות בסביבת הבדיקות?'))return;try{const r=await api('database/clear-all',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirm:true})});await refresh();await loadDb();say('נמחקו כל רשומות הבדיקות ('+Object.values(r.deleted||{}).reduce((n,v)=>n+Number(v||0),0)+')','ok')}catch(e){say(e.message||'הניקוי נכשל','error')}};
 const dbLabels={number:'מספר פנייה',status:'סטטוס',donor_phone:'טלפון מוסר',donor_name:'שם מוסר',pickup_city:'יישוב איסוף',pickup_address:'כתובת איסוף',pickup_floor:'קומת איסוף',receiver_phone:'טלפון מקבל',receiver_name:'שם מקבל',destination_city:'יישוב יעד',destination_address:'כתובת יעד',destination_floor:'קומת יעד',items:'פריטים',item_description:'תיאור פריט',quantity:'כמות',needs_disassembly:'נדרש פירוק',requested_date:'תאריך מבוקש',preferred_time:'שעה מועדפת',run_date:'תאריך הובלה',represents_both_parties:'אותו אדם משני הצדדים',closed_at:'נסגר בתאריך',human_reason:'סיבת טיפול אנושי',donor_approved:'המוסר אישר',receiver_approved:'המקבל אישר',photos:'מספר תמונות',media_ids:'תמונות להורדה',locations:'מיקומים שנשלחו',created_at:'נוצר בתאריך',updated_at:'עודכן בתאריך',phone:'טלפון',kind:'סוג הודעה',text:'תוכן',reply:'תשובת הבוט',error_code:'קוד שגיאה',received_at:'התקבל בתאריך',mode:'מצב שיחה',session:'סשן',chat_id:'מזהה צ׳אט',selected_request_id:'פנייה נבחרת',version:'גרסה',state:'מצב שליחה'};
 const dbStatusLabels={collecting:'בהשלמת פרטים',available:'ממתינה למקבל',awaiting_approval:'ממתינה לאישור',waiting_capacity:'ממתינה למקום בהובלה',coordinated:'תואמה',human:'בטיפול אנושי',cancel_pending:'ממתינה להחלטה לאחר ביטול',cancelled:'בוטלה',closed:'הושלמה',rejected:'לא מתאימה'};
@@ -437,8 +438,6 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
         return { ok: true };
       });
       admin.post("/database/clear-all", async (req) => {
-        if (c.BOT_MODE === "live")
-          throw new AppError("clear_all_live_disabled", 403, "ניקוי מלא זמין רק בסביבת בדיקות.");
         z.strictObject({ confirm: z.literal(true) }).parse(req.body);
         const s = runtime.requireStore();
         const deleted: Record<string, number> = {};
@@ -473,6 +472,71 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
         });
         runtime.log.warn({ trace_id: req.id, deleted }, "admin_database_cleared");
         return { ok: true, deleted };
+      });
+      admin.post("/database/clear-phone", async (req) => {
+        const body = z
+          .strictObject({ phone: z.string().min(3).max(40), confirm: z.literal(true) })
+          .parse(req.body);
+        const phone = canonicalPhone(body.phone);
+        const s = runtime.requireStore();
+        const deleted: Record<string, number> = {};
+        await s.transaction(async (client) => {
+          const contactIds = await client.query<{ id: string }>(
+            "SELECT id FROM contacts WHERE phone=$1 FOR UPDATE",
+            [phone],
+          );
+          if (!contactIds.rows.length) return;
+          const ids = contactIds.rows.map((row) => row.id);
+          const requests = await client.query<{ id: string }>(
+            "SELECT DISTINCT request_id AS id FROM request_parties WHERE contact_id=ANY($1::uuid[])",
+            [ids],
+          );
+          const conversations = await client.query<{ id: string }>(
+            "SELECT id FROM conversations WHERE contact_id=ANY($1::uuid[])",
+            [ids],
+          );
+          const messages = await client.query<{ id: string }>(
+            "SELECT id FROM messages WHERE contact_id=ANY($1::uuid[])",
+            [ids],
+          );
+          const requestIds = requests.rows.map((row) => row.id);
+          const conversationIds = conversations.rows.map((row) => row.id);
+          const messageIds = messages.rows.map((row) => row.id);
+          const remove = async (name: string, sql: string, values: unknown[] = []) => {
+            deleted[name] = (await client.query(sql, values)).rowCount ?? 0;
+          };
+          if (requestIds.length) {
+            await remove("integration_outbox", "DELETE FROM integration_outbox WHERE event_id IN (SELECT id FROM request_events WHERE request_id=ANY($1::uuid[]))", [requestIds]);
+            await remove("request_events", "DELETE FROM request_events WHERE request_id=ANY($1::uuid[])", [requestIds]);
+            await remove("request_verifications", "DELETE FROM request_verifications WHERE request_id=ANY($1::uuid[])", [requestIds]);
+            await remove("media", "DELETE FROM media WHERE id IN (SELECT media_id FROM request_media WHERE request_id=ANY($1::uuid[]))", [requestIds]);
+            await remove("request_media", "DELETE FROM request_media WHERE request_id=ANY($1::uuid[])", [requestIds]);
+            await remove("request_locations", "DELETE FROM request_locations WHERE request_id=ANY($1::uuid[])", [requestIds]);
+            await remove("matches", "DELETE FROM matches WHERE request_id=ANY($1::uuid[])", [requestIds]);
+            await remove("request_parties", "DELETE FROM request_parties WHERE request_id=ANY($1::uuid[])", [requestIds]);
+            await remove("request_items", "DELETE FROM request_items WHERE request_id=ANY($1::uuid[])", [requestIds]);
+            await remove("requests", "DELETE FROM requests WHERE id=ANY($1::uuid[])", [requestIds]);
+          }
+          if (messageIds.length) {
+            await remove("command_results", "DELETE FROM command_results WHERE message_id=ANY($1::uuid[])", [messageIds]);
+            await remove("outbox", "DELETE FROM outbox WHERE message_id=ANY($1::uuid[]) OR phone=$2", [messageIds, phone]);
+            await remove("media", "DELETE FROM media WHERE message_id=ANY($1::uuid[])", [messageIds]);
+            await remove("messages", "DELETE FROM messages WHERE id=ANY($1::uuid[])", [messageIds]);
+          } else {
+            await remove("outbox", "DELETE FROM outbox WHERE phone=$1", [phone]);
+          }
+          if (conversationIds.length) {
+            await remove("conversation_resets", "DELETE FROM conversation_resets WHERE conversation_id=ANY($1::uuid[])", [conversationIds]);
+            await remove("turn_messages", "DELETE FROM turn_messages WHERE turn_id IN (SELECT id FROM conversation_turns WHERE conversation_id=ANY($1::uuid[]))", [conversationIds]);
+            await remove("conversation_turns", "DELETE FROM conversation_turns WHERE conversation_id=ANY($1::uuid[])", [conversationIds]);
+            await remove("conversations", "DELETE FROM conversations WHERE id=ANY($1::uuid[])", [conversationIds]);
+          }
+          await remove("contact_identities", "DELETE FROM contact_identities WHERE contact_id=ANY($1::uuid[])", [ids]);
+          await remove("searches", "DELETE FROM searches WHERE contact_id=ANY($1::uuid[])", [ids]);
+          await remove("contacts", "DELETE FROM contacts WHERE id=ANY($1::uuid[])", [ids]);
+        });
+        runtime.log.warn({ trace_id: req.id, phone, deleted }, "admin_phone_data_cleared");
+        return { ok: true, phone, deleted };
       });
       admin.get("/access", async () => {
         return { ok: true, ...(await runtime.requireStore().botAccess()) };
