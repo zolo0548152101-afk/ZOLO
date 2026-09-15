@@ -33,6 +33,11 @@ import { config, JPEG, sampleRequest, donate } from "./fixtures.js";
 
 test("שלום bypasses AI, information and donation only on request", () => {
   assert.equal(quickReply("שלום"), GREETING);
+  assert.match(GREETING, /ימי שלישי בין השעות 16:00–21:00/);
+  assert.match(GREETING, /שם מלא/);
+  assert.match(GREETING, /תמונה ושם של החפץ/);
+  assert.match(GREETING, /עד 2 רהיטים/);
+  assert.match(GREETING, /בית שאן ובעמק הקרוב/);
   assert.equal(quickReply("יש לי מיטה למסירה"), null);
   assert.match(quickReply("אשמח לעזרה בסוכה") ?? "", /docs.google.com\/forms/);
   assert.match(quickReply("איך אפשר לתרום כסף?") ?? "", /pe4ch/);
