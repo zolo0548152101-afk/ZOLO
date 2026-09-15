@@ -101,6 +101,17 @@ export const commandSchema = z.discriminatedUnion("type", [
     request_number: ref,
     contact: z.boolean(),
   }),
+  z.strictObject({
+    type: z.literal("counterparty_candidate"),
+    request_number: ref,
+    phone: z.string().min(3).max(40),
+    name: str,
+  }),
+  z.strictObject({
+    type: z.literal("confirm_counterparty"),
+    request_number: ref,
+    accept: z.boolean(),
+  }),
   z.strictObject({ type: z.literal("next") }),
   z.strictObject({
     type: z.literal("clarify_duplicate"),
@@ -206,6 +217,7 @@ export interface Conversation {
   selected_request_id: string | null;
   version: number;
   pending_counterparty_name: string | null;
+  pending_counterparty_phone?: string | null;
 }
 export interface Incoming {
   id: string;

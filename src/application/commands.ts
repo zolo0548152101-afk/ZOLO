@@ -282,6 +282,46 @@ export class Commands {
       );
       return output(nextQuestion(r, phone).text);
     }
+    if (cmd.type === "counterparty_candidate") {
+      if (r.parties.some((entry) => entry.role === "receiver"))
+        throw new AppError("party_already_linked", 409, "כבר קיים מקבל בפנייה הזו.");
+      const candidatePhone = suppliedPhone(ctx, cmd.phone);
+      await c.query(
+        `UPDATE conversations
+            SET pending_counterparty_name=$2,pending_counterparty_phone=$3,version=version+1
+          WHERE id=$1`,
+        [ctx.conversation.id, cmd.name, candidatePhone],
+      );
+      const display = cmd.name ? `${cmd.name} (${candidatePhone})` : candidatePhone;
+      return output(
+        `קיבלתי את איש הקשר של ${display}. האם התכוונת למסור לו/לה את ${r.items.map((item) => item.description).join(", ")}? כתוב כן או לא.`,
+        r,
+      );
+    }
+    if (cmd.type === "confirm_counterparty") {
+      const candidatePhone = ctx.conversation.pending_counterparty_phone;
+      const candidateName = ctx.conversation.pending_counterparty_name;
+      if (!candidatePhone)
+        throw new AppError("counterparty_candidate_missing", 409, "אין איש קשר שממתין לאישור.");
+      await c.query(
+        `UPDATE conversations
+            SET pending_counterparty_name=NULL,pending_counterparty_phone=NULL,version=version+1
+          WHERE id=$1`,
+        [ctx.conversation.id],
+      );
+      if (!cmd.accept)
+        return output("בסדר, לא קישרתי את איש הקשר לפנייה. נמשיך במסירה הכללית.", r);
+      if (r.parties.some((entry) => entry.role === "receiver"))
+        throw new AppError("party_already_linked", 409, "כבר קיים מקבל בפנייה הזו.");
+      const receiver = party("receiver", candidatePhone, false);
+      receiver.name = candidateName;
+      r.parties.push(receiver);
+      r.origin = "direct";
+      for (const item of r.items)
+        if (item.working === null) item.working = true;
+      const q = nextQuestion(r, phone);
+      return output(`מעולה, קישרתי את ${candidateName ?? candidatePhone} כמקבל/ת.\n${q.text}`, r);
+    }
     if (cmd.type === "contact_counterparty") {
       const other = r.parties.find((p) => p.phone !== phone);
       if (r.origin !== "direct" || !other)

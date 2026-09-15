@@ -108,6 +108,19 @@ function standalonePhone(text: string): string | null {
   return null;
 }
 
+function contactCardName(text: string): string | null {
+  return text.match(/(?:^|[\r\n])FN:([^\r\n]+)/i)?.[1]?.trim() || null;
+}
+
+function hasPartialNamedHandoff(ctx: Context): boolean {
+  const recent = ctx.history
+    .filter((entry) => entry.role === "user")
+    .slice(-3)
+    .map((entry) => entry.content)
+    .join("\n");
+  return /(?:למסור|להעביר|מוסר|מוסרת|מעביר|מעבירה)\s+(?:את\s+)?(?:הפריט|הרהיט|רהיט|מיטה|שולחן|ספה|כיסא|ארון)?\s*ל[א-ת]{1,}(?:\s|$)/.test(norm(recent));
+}
+
 /**
  * Handles the predictable parts of the conversation without an external model.
  * Returning null intentionally delegates only genuinely free-form language to AI.
@@ -174,6 +187,28 @@ export function rulePlan(ctx: Context): Plan | null {
   }
   const donor = party.role === "donor";
   const items = current.items;
+  const suppliedContact = ctx.message.contacts[0]?.phone ?? standalonePhone(text);
+  // A contact card after "למסור לט" is a candidate direct handoff. Ask one
+  // confirmation question before connecting or contacting the person.
+  if (
+    current.origin === "donation" &&
+    donor &&
+    !current.parties.some((entry) => entry.role === "receiver") &&
+    suppliedContact &&
+    hasPartialNamedHandoff(ctx)
+  )
+    return plan(text, [{
+      type: "counterparty_candidate",
+      request_number: current.number,
+      phone: suppliedContact,
+      name: ctx.message.contacts[0]?.name ?? contactCardName(text),
+    }]);
+  if (ctx.conversation.pending_counterparty_phone && (yes(text) || no(text)))
+    return plan(text, [{
+      type: "confirm_counterparty",
+      request_number: current.number,
+      accept: yes(text),
+    }]);
   // A recipient can introduce themself and explicitly consent in one
   // message. Consent must win over profile extraction, otherwise it is
   // misclassified as a name and the approval is lost.

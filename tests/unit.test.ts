@@ -199,6 +199,27 @@ test("named recipient who wants the item bypasses the photo gate", () => {
   assert.equal(command.direct, true);
   assert.equal(command.working, true);
 });
+test("partial recipient name followed by a VCard asks one confirmation question", () => {
+  const request = sampleRequest();
+  request.origin = "donation";
+  request.photo_ids = [];
+  request.parties = request.parties.slice(0, 1);
+  const context: Context = {
+    conversation: { id: "c", phone: "501111111", chat_id: "972501111111@c.us", mode: "bot", selected_request_id: request.id, version: 1, pending_counterparty_name: null, pending_counterparty_phone: null },
+    requests: [request], candidates: [],
+    message: { id: "m", seq: "2", external_id: "e", trace_id: "t", mode: "simulation", chat_id: "972501111111@c.us", phone: "501111111", kind: "text", text: "BEGIN:VCARD\nFN:טל זולו\nTEL;waid=972536662043:+972 53-666-2043\nEND:VCARD", contacts: [], location: null, media_url: null, media_id: null, media_state: "none", transcript: null, processed_at: null, ai_plan: null },
+    history: [{ role: "user", content: "למסור לט" }],
+  };
+  const candidate = rulePlan(context)?.commands[0];
+  assert.equal(candidate?.type, "counterparty_candidate");
+  assert.equal((candidate as Extract<Command, { type: "counterparty_candidate" }>).phone, "536662043");
+  assert.equal((candidate as Extract<Command, { type: "counterparty_candidate" }>).name, "טל זולו");
+  context.message.text = "כן";
+  context.conversation.pending_counterparty_phone = "536662043";
+  context.conversation.pending_counterparty_name = "טל זולו";
+  const confirmation = rulePlan(context)?.commands[0];
+  assert.deepEqual(confirmation, { type: "confirm_counterparty", request_number: request.number, accept: true });
+});
 test("an explicit new donation is not confused with an older open request", () => {
   const older = sampleRequest();
   const context: Context = {

@@ -53,6 +53,9 @@ export class Runtime {
       await this.pool.query(
         "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_counterparty_name text",
       );
+      await this.pool.query(
+        "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_counterparty_phone text",
+      );
       const version = await this.pool.query<{ n: number }>(
         "SELECT count(*)::int AS n FROM pgmigrations",
       );
