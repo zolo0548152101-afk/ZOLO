@@ -113,15 +113,16 @@
 
 Phase 3 is closed. Phase 4 has not started and must not be started without the separate authorization and release-candidate decision required by the Master Plan.
 
-### Phase 3.1 — Golden Harness Hardening (correction in progress)
+### Phase 3.1 — Golden Harness Hardening (review-ready)
 
-- verdict: correction required by independent review; Phase 4 not started.
+- verdict: correction required by independent review is complete; Phase 4 not started.
 - authorized scope: strict exact reply-intent matching, executable forbidden detectors for `ask_photo`/`ask_address`/`ask_name`, stronger stale-plan/wrong-party/uncertain-send checks, business/DB assertions, bounded scenario and step timeouts, and real `processNext()` burst/coalescing coverage.
 - gates from the disposable run: unit 63/63, integration 69/69, regressions 26/26, Golden 52/52. The Golden catalog remains 52 scenarios (26 clean, 26 challenging) and the resume state remains compatible.
 - important contract correction: donor-only/open-donation scenarios require a donor fact; direct handoff and self-transfer require donor and receiver facts. The harness does not reintroduce the previous `ask_details` wildcard.
 - environment safety: disposable PostgreSQL and `FakeChannel` only; no live WAHA, live DB reset, deployment, or Phase 4 work.
 - evidence: `artifacts/qa/phase-3.1-verification-20260928.json`, `artifacts/qa/golden-report.json`, `artifacts/qa/golden-run-state.json`, and `artifacts/qa/regression-report.json`.
 - correction: track `tests/fixtures/qa-synthetic-bed-20260928.png` so the Golden suite is self-contained in GitHub Actions; remove the duplicate dead `schedule_without_both_approvals` switch case. CI must pass on the new pushed SHA before Phase 3.1 is resubmitted.
+- correction verification: commit `46c39cd01b11ddc0120bde6e6d31ad4bb5e102a4` passed GitHub verification workflow run `36460098253`; fixture SHA-256 is `A3111C75088F63E9B329B7EF37402AB992C958602BE4702BFA1B60FFE4CF3C4A`.
 - coordination: `scripts/qa-review-watcher.ps1` and `docs/qa/COORDINATION_LOOP_V2.md` implement the reusable reviewer-wait protocol without live-system access.
 
 ### Persistent GitHub checkpoint rule

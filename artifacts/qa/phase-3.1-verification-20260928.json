@@ -2,7 +2,8 @@
   "phase": "3.1",
   "title": "Golden Harness Hardening",
   "timestamp": "2026-09-28T20:24:26+03:00",
-  "git_sha": "9626373",
+  "git_sha": "46c39cd01b11ddc0120bde6e6d31ad4bb5e102a4",
+  "source_sha_verified": "46c39cd01b11ddc0120bde6e6d31ad4bb5e102a4",
   "verdict": "PASS",
   "authorized_scope": [
     "strict exact reply-intent matching; no ask_details wildcard",
@@ -13,9 +14,10 @@
     "real processNext burst/coalescing and turn-generation coverage"
   ],
   "catalog": {"count": 52, "clean": 26, "challenging": 26},
-  "gates": {"unit": "63/63", "integration": "69/69", "regressions": "26/26", "golden": "52/52", "resume": "52/52"},
+  "gates": {"unit": "63/63", "integration": "69/69", "regressions": "26/26", "golden": "52/52", "resume": "52/52", "github_verification": "PASS", "github_run_id": 36460098253},
   "failure_classification": {"remaining_failures": [], "HARNESS_DEFECT": [], "SCENARIO_CONTRACT_DEFECT": [], "PRODUCT_DEFECT": []},
   "process_next": {"scenario": "direct-clean-02", "burst_messages": 2, "coalesced_messages_asserted": true, "turn_generation_asserted": true},
+  "correction_verification": {"golden_fixture_tracked": true, "golden_fixture_sha256": "A3111C75088F63E9B329B7EF37402AB992C958602BE4702BFA1B60FFE4CF3C4A", "duplicate_dead_switch_case_removed": true},
   "environment": "disposable PostgreSQL via compose.test.yml; FakeChannel only; no WAHA/OpenAI calls",
   "live_actions": {"waha": false, "remote_db_reset": false, "deploy": false, "live_checkpoint_changed": false},
   "phase4_started": false,
