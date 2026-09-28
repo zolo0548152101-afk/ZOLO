@@ -1,7 +1,7 @@
 import { IntegrationAdapter, type GoldenScenario } from "./adapters/integration-adapter.js";
+import type { Role } from "../../src/domain/types.js";
 
 type Snapshot = Awaited<ReturnType<IntegrationAdapter["snapshot"]>>;
-const askIntents = new Set(["ask_photo", "ask_name", "ask_address", "ask_schedule_approval", "ask_verification", "ask_details"]);
 
 function facts(snapshot: Snapshot) {
   return snapshot.requests.map((request) => ({
@@ -20,14 +20,13 @@ function facts(snapshot: Snapshot) {
 }
 
 function requestFacts(snapshot: Snapshot) {
-  return { counts: snapshot.counts, requests: facts(snapshot), searches: snapshot.searches, outbox: snapshot.outbox, events: snapshot.events, planner: snapshot.message?.ai_plan ?? null, actual_intent: snapshot.actualIntent };
+  return { counts: snapshot.counts, requests: facts(snapshot), searches: snapshot.searches, outbox: snapshot.outbox, events: snapshot.events, planner: snapshot.message?.ai_plan ?? null, actual_intent: snapshot.actualIntent, turn: snapshot.turn, turn_messages: snapshot.turnMessages, coalesced_messages: snapshot.coalescedMessages, media: snapshot.media };
 }
 
 function assertReply(scenario: GoldenScenario, step: number, snapshot: Snapshot, errors: string[]) {
   const expected = scenario.steps[step]!.expect.reply_intent_any;
   const actual = snapshot.actualIntent;
-  const matches = expected.includes(actual) || (expected.includes("ask_details") && askIntents.has(actual));
-  if (!matches) errors.push(`reply_intent: expected=${expected.join("|")} actual=${actual}`);
+  if (!expected.includes(actual)) errors.push(`reply_intent: expected=${expected.join("|")} actual=${actual}`);
 }
 
 function assertBusiness(scenario: GoldenScenario, snapshot: Snapshot, errors: string[]) {
@@ -45,6 +44,22 @@ function assertBusiness(scenario: GoldenScenario, snapshot: Snapshot, errors: st
     errors.push("reply_missing_from_outbox");
   if (snapshot.events.length === 0)
     errors.push("business_event_missing");
+  for (const request of snapshot.requests) {
+    if (!request.items.length || request.items.some((item) => !item.description || item.quantity < 1)) errors.push("item_facts_incomplete");
+    const roles = new Set(request.parties.map((party) => party.role));
+    const requiredRoles: Role[] = scenario.flow === "direct_handoff" || scenario.flow === "self_transfer"
+      ? ["donor", "receiver"]
+      : scenario.flow === "open_donation" ? ["donor"] : [];
+    if (requiredRoles.some((role) => !roles.has(role))) errors.push(`donor_receiver_roles_missing:${requiredRoles.join(",")}`);
+    for (const party of request.parties) {
+      if (party.address && (!party.settlement || party.floor === null || party.floor === undefined)) errors.push(`location_fact_incomplete:${party.role}`);
+    }
+  }
+  for (const row of snapshot.outbox) {
+    if (!row.dedupe_key || !row.text) errors.push("outbox_purpose_or_text_missing");
+    if (row.dedupe_key?.startsWith("reply:") && row.phone !== snapshot.phone) errors.push("reply_wrong_recipient");
+    if (row.state === "sent" && !row.provider_id) errors.push("sent_without_provider_id");
+  }
   if (scenario.flow === "open_request") {
     if (snapshot.requests.some((request) => request.photo_ids.length > 0)) errors.push("requester_entered_donor_photo_flow");
   }
@@ -56,6 +71,26 @@ function assertBusiness(scenario: GoldenScenario, snapshot: Snapshot, errors: st
     const [donor, receiver] = snapshot.requests[0].parties;
     if (donor?.address && receiver?.address && donor.address === receiver.address && donor.settlement === receiver.settlement && donor.floor === receiver.floor) errors.push("self_transfer_addresses_merged");
   }
+  const step = scenario.steps[snapshot.step];
+  if (step?.inbound.process_next) {
+    if (!snapshot.message?.turn_id || snapshot.message.turn_generation === null || snapshot.message.turn_generation === undefined) errors.push("process_next_missing_turn_generation");
+    if (snapshot.turnMessages < 1) errors.push("process_next_missing_turn_membership");
+    if ((step.inbound.burst?.length ?? 1) > 1 && snapshot.coalescedMessages < 1) errors.push("process_next_burst_not_coalesced");
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, code: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(code)), timeoutMs);
+    promise.then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
+  });
+}
+
+function classifyFailure(errors: any[]): "HARNESS_DEFECT" | "SCENARIO_CONTRACT_DEFECT" | "PRODUCT_DEFECT" {
+  const text = JSON.stringify(errors);
+  if (/timeout|missing_test_plan|reference_fixture|unsupported_forbidden_effect|TEST_DATABASE_URL/i.test(text)) return "HARNESS_DEFECT";
+  if (/reply_intent|request_count|search_count|scenario_missing|unknown_semantic/i.test(text)) return "SCENARIO_CONTRACT_DEFECT";
+  return "PRODUCT_DEFECT";
 }
 
 function assertForbidden(scenario: GoldenScenario, step: number, snapshot: Snapshot, previous: Snapshot | null, errors: string[]) {
@@ -106,6 +141,7 @@ function assertForbidden(scenario: GoldenScenario, step: number, snapshot: Snaps
         break;
       case "blind_retry_after_uncertain_send":
         if (new Set(snapshot.outbox.map((row) => row.dedupe_key).filter(Boolean)).size !== snapshot.outbox.filter((row) => row.dedupe_key).length) errors.push(effect);
+        if (snapshot.outbox.some((row) => row.state === "uncertain" && row.provider_id)) errors.push(`${effect}:uncertain_row_has_provider_id`);
         break;
       case "donor_flow":
         if (scenario.flow === "open_request" && snapshot.actualIntent === "ask_photo") errors.push(effect);
@@ -114,14 +150,21 @@ function assertForbidden(scenario: GoldenScenario, step: number, snapshot: Snaps
         if (scenario.flow === "self_transfer" && step > 0 && snapshot.actualIntent === "ask_address") errors.push(effect);
         break;
       case "stale_ai_plan_commit":
-        if (snapshot.message?.error_code === "stale_plan") errors.push(effect);
+        if (snapshot.message?.error_code === "stale_plan" || (snapshot.message?.error_code === null && snapshot.message?.ai_plan && snapshot.events.some((event) => event.event_type === "stale_plan"))) errors.push(effect);
         break;
       case "wrong_party_notification":
-        if (snapshot.outbox.some((row) => row.phone === snapshot.phone && row.text.includes("נדרש טיפול אנושי"))) errors.push(effect);
+        if (snapshot.outbox.some((row) => row.dedupe_key?.startsWith("reply:") && row.phone !== snapshot.phone)) errors.push(effect);
+        if (snapshot.outbox.some((row) => row.phone === snapshot.phone && row.text.includes("נדרש טיפול אנושי") && row.dedupe_key?.startsWith("human-alert:"))) errors.push(effect);
         break;
       case "ask_photo":
+        if (snapshot.actualIntent === "ask_photo") errors.push(effect);
+        break;
       case "ask_address":
+        if (snapshot.actualIntent === "ask_address") errors.push(effect);
+        break;
       case "ask_name":
+        if (snapshot.actualIntent === "ask_name") errors.push(effect);
+        break;
       case "schedule_without_both_approvals":
         break;
       default:
@@ -142,10 +185,12 @@ export async function runGoldenScenarios(
       const steps: any[] = [];
       let previous: Snapshot | null = null;
       const scenarioErrors: any[] = [];
+      const scenarioDeadline = Date.now() + Number(process.env.GOLDEN_SCENARIO_TIMEOUT_MS ?? 30000);
       for (let index = 0; index < scenario.steps.length; index += 1) {
         const step = scenario.steps[index]!;
         try {
-          const snapshot = await adapter.step(scenario, step, index);
+          if (Date.now() >= scenarioDeadline) throw new Error(`scenario_timeout:${scenario.id}`);
+          const snapshot = await withTimeout(adapter.step(scenario, step, index), Number(process.env.GOLDEN_STEP_TIMEOUT_MS ?? 10000), `step_timeout:${scenario.id}:${index + 1}`);
           const errors: string[] = [];
           assertReply(scenario, index, snapshot, errors);
           assertBusiness(scenario, snapshot, errors);
@@ -160,7 +205,7 @@ export async function runGoldenScenarios(
           break;
         }
       }
-      const result = { id: scenario.id, title: `${scenario.flow}: ${scenario.id}`, flow: scenario.flow, difficulty: scenario.difficulty, invariant_ids: scenario.invariant_ids, status: scenarioErrors.length ? "failed" : "passed", steps, errors: scenarioErrors };
+      const result = { id: scenario.id, title: `${scenario.flow}: ${scenario.id}`, flow: scenario.flow, difficulty: scenario.difficulty, invariant_ids: scenario.invariant_ids, status: scenarioErrors.length ? "failed" : "passed", failure_classification: scenarioErrors.length ? classifyFailure(scenarioErrors) : null, steps, errors: scenarioErrors };
       results.push(result);
       await onScenario?.(result, results);
     }

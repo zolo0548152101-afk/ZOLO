@@ -11,7 +11,7 @@ import { config, FakeChannel, FakePlanner, log } from "../../fixtures.js";
 import type { Mode } from "../../../src/domain/types.js";
 import { planSchema, type Plan } from "../../../src/domain/types.js";
 
-export type GoldenStep = { inbound: { text: string; fixture_image?: string; external_id?: string; action?: string }; planner?: Plan; expect: { reply_intent_any: string[] }; forbidden_effects: string[] };
+export type GoldenStep = { inbound: { text: string; fixture_image?: string; external_id?: string; action?: string; burst?: string[]; process_next?: boolean }; planner?: Plan; expect: { reply_intent_any: string[] }; forbidden_effects: string[] };
 export type GoldenScenario = {
   id: string;
   flow: string;
@@ -35,6 +35,7 @@ function plannerFixture(scenario: GoldenScenario, index: number): Plan | undefin
     ], key);
   const directOpening: Record<string, Plan> = {
     "direct-clean-01:0": fixturePlan([{ type: "donate", items: [{ kind: "bed", description: "מיטה", quantity: 1 }], counterparty_phone: "584152101", counterparty_name: "טל", direct: true, free: null, working: null }, { type: "details", request_number: null, role: "donor", name: null, settlement: "בית שאן", address: "רחוב העלייה", floor: 2 }], key),
+    "direct-clean-02:0": fixturePlan([{ type: "donate", items: [{ kind: "table", description: "שולחן", quantity: 1 }], counterparty_phone: "584152101", counterparty_name: "טל", direct: true, free: null, working: null }, { type: "details", request_number: null, role: "donor", name: null, settlement: "בית שאן", address: "רחוב שיכון א", floor: 3 }], key),
     "direct-clean-05:0": fixturePlan([{ type: "donate", items: [{ kind: "bed", description: "מיטה זוגית", quantity: 1 }], counterparty_phone: "584152101", counterparty_name: "טל", direct: true, free: null, working: null }, { type: "details", request_number: null, role: "donor", name: null, settlement: "בית שאן", address: "רחוב העלייה", floor: 1 }], key),
     "direct-challenge-01:0": fixturePlan([{ type: "donate", items: [{ kind: "bed", description: "מיטה", quantity: 1 }], counterparty_phone: "584152101", counterparty_name: "טל", direct: true, free: null, working: null }, { type: "details", request_number: null, role: "donor", name: null, settlement: "בית שאן", address: "רחוב העלייה", floor: 2 }], key),
     "direct-challenge-03:0": fixturePlan([{ type: "donate", items: [{ kind: "chairs", description: "כיסא", quantity: 1 }], counterparty_phone: "584152101", counterparty_name: "טל", direct: true, free: null, working: null }, { type: "details", request_number: null, role: "donor", name: null, settlement: "בית שאן", address: "רחוב העלייה", floor: 1 }], key),
@@ -175,18 +176,25 @@ export class IntegrationAdapter {
     // correctly classify the request as a same-person/borderline case and
     // masks the conversation contract we are trying to exercise.
     const phone = scenario.flow === "open_donation" ? "584152101" : "536662043";
-    const externalId = step.inbound.external_id ?? `${scenario.id}:${index}:${randomUUID()}`;
+    const burst = step.inbound.burst?.length ? step.inbound.burst : [step.inbound.text];
     const image = step.inbound.fixture_image ? await readFile(step.inbound.fixture_image) : null;
     const captured = image ? await this.storage.put(image, "image") : undefined;
-    const stored = await this.engine.s.ingest({
-      external_id: externalId,
-      chat_id: `972${phone}@c.us`,
-      kind: image ? "image" : "text",
-      text: step.inbound.text,
-      media_url: null,
-      contacts: [],
-      location: null,
-    }, "simulation" as Mode, captured);
+    const storedIds: string[] = [];
+    for (const [position, text] of burst.entries()) {
+      const externalId = position === 0 && step.inbound.external_id
+        ? step.inbound.external_id
+        : `${scenario.id}:${index}:${position}:${randomUUID()}`;
+      const stored = await this.engine.s.ingest({
+        external_id: externalId,
+        chat_id: `972${phone}@c.us`,
+        kind: image && position === burst.length - 1 ? "image" : "text",
+        media_url: null,
+        text,
+        contacts: [],
+        location: null,
+      }, "simulation" as Mode, image && position === burst.length - 1 ? captured : undefined);
+      storedIds.push(stored.id);
+    }
     const declaredPlanner = step.planner ?? plannerFixture(scenario, index);
     if (declaredPlanner) {
       const plan = planSchema.parse(declaredPlanner);
@@ -195,26 +203,38 @@ export class IntegrationAdapter {
       // Hebrew text or race the engine's deterministic branch.
       await this.pool.query(
         "UPDATE messages SET ai_plan=$2,ai_metadata=$3 WHERE id=$1 AND processed_at IS NULL",
-        [stored.id, JSON.stringify(plan), JSON.stringify({ provider: "golden_fixture", action_source: "golden_fixture" })],
+        [storedIds.at(-1), JSON.stringify(plan), JSON.stringify({ provider: "golden_fixture", action_source: "golden_fixture" })],
       );
     }
-    await this.engine.ingestNext();
-    await this.engine.process(stored.id);
-    return this.snapshot(stored.id, phone, index);
+    for (const _id of storedIds) await this.engine.ingestNext();
+    const targetId = storedIds.at(-1)!;
+    if (step.inbound.process_next) await this.engine.processNext(storedIds[0]!);
+    else await this.engine.process(targetId);
+    return this.snapshot(targetId, phone, index);
   }
 
   async snapshot(messageId: string, phone: string, step: number) {
-    const message = (await this.pool.query(`SELECT id,reply,processed_at,error_code,media_state,media_id,ai_plan,ai_metadata FROM messages WHERE id=$1`, [messageId])).rows[0] ?? null;
+    const message = (await this.pool.query(`SELECT id,reply,processed_at,error_code,media_state,media_id,ai_plan,ai_metadata,turn_id,turn_generation FROM messages WHERE id=$1`, [messageId])).rows[0] ?? null;
     const result = (await this.pool.query<{ result: { intent?: string } | null }>("SELECT result FROM command_results WHERE message_id=$1", [messageId])).rows[0]?.result;
     const requestRows = await this.pool.query<{ id: string }>("SELECT id FROM requests ORDER BY number");
     const requests = [];
     for (const row of requestRows.rows) requests.push(await this.engine.s.request(row.id));
-    const outbox = (await this.pool.query("SELECT id,phone,text,state,media_id,match_id,dedupe_key FROM outbox ORDER BY seq")).rows;
+    const outbox = (await this.pool.query("SELECT id,phone,text,state,media_id,match_id,request_id,dedupe_key,format_state,delivery_state,provider_id FROM outbox ORDER BY seq")).rows;
     const events = (await this.pool.query("SELECT event_type,request_id,data FROM request_events ORDER BY created_at")).rows;
     const searches = (await this.pool.query("SELECT c.phone, s.kind, s.state, s.updated_at FROM searches s JOIN contacts c ON c.id=s.contact_id ORDER BY c.phone")).rows;
     const counts = (await this.pool.query<{ requests: number; messages: number }>("SELECT (SELECT count(*)::int FROM requests) requests,(SELECT count(*)::int FROM messages) messages")).rows[0]!;
+    const turn = message?.turn_id
+      ? (await this.pool.query("SELECT id,generation,status,deadline_at,completed_at FROM conversation_turns WHERE id=$1", [message.turn_id])).rows[0] ?? null
+      : null;
+    const turnMessages = message?.turn_id
+      ? (await this.pool.query("SELECT count(*)::int AS count FROM turn_messages WHERE turn_id=$1", [message.turn_id])).rows[0]?.count ?? 0
+      : 0;
+    const coalescedMessages = (await this.pool.query("SELECT count(*)::int AS count FROM messages WHERE error_code LIKE 'coalesced_into:%'")).rows[0]?.count ?? 0;
+    const media = message?.media_id
+      ? (await this.pool.query("SELECT id,checksum,size_bytes,mime_type FROM media WHERE id=$1", [message.media_id])).rows[0] ?? null
+      : null;
     const actualIntent = result?.intent ?? (message?.reply ? "other" : "no_reply");
-    return { message, requests, outbox, events, searches, counts, actualIntent, phone, step };
+    return { message, requests, outbox, events, searches, counts, actualIntent, phone, step, turn, turnMessages, coalescedMessages, media };
   }
 
   async close(): Promise<void> {
