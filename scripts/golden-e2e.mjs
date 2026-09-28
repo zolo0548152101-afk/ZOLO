@@ -14,6 +14,9 @@ const compile = spawnSync(process.execPath, [resolve(root, "node_modules/typescr
 if (compile.status !== 0) fail("golden_test_compilation_failed");
 const catalog = spawnSync(process.execPath, [resolve(root, "tests/golden/catalog.test.mjs")], { cwd: root, encoding: "utf8", stdio: "pipe" });
 if (catalog.status !== 0) fail(`golden_catalog_invalid:${catalog.stderr || catalog.stdout}`);
+const detectorProof = spawnSync(process.execPath, [resolve(root, "tests/golden/forbidden-detectors.test.mjs")], { cwd: root, encoding: "utf8", stdio: "pipe" });
+if (detectorProof.status !== 0) fail(`forbidden_detector_tests_failed:${detectorProof.stderr || detectorProof.stdout}`);
+const detectorProofResult = JSON.parse(detectorProof.stdout.trim().split("\n").at(-1));
 const blueprints = JSON.parse(await readFile(resolve(root, "tests/golden/scenarios.json"), "utf8"));
 const contracts = JSON.parse(await readFile(resolve(root, "tests/golden/contracts.json"), "utf8"));
 const scenarios = blueprints.flatMap((blueprint) => blueprint.variants.map((variant) => ({
@@ -59,6 +62,7 @@ const report = {
   cross_flow: results.filter((result) => result.flow === "cross_flow").length,
   failure_recovery: results.filter((result) => result.flow === "failure_recovery").length,
   git_sha: process.env.GIT_SHA ?? "unknown",
+  forbidden_detector_proof: detectorProofResult,
   failure_classifications: Object.fromEntries([...new Set(results.map((result) => result.failure_classification).filter(Boolean))].map((classification) => [classification, results.filter((result) => result.failure_classification === classification).length])),
   environment: { database: "disposable PostgreSQL TEST_DATABASE_URL / haim_core_test", external_provider: "FakeChannel; no WAHA/OpenAI calls" },
   scenarios: results,

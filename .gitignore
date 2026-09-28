@@ -6,3 +6,6 @@ dist-tests/
 .env.*
 data/
 *.log
+artifacts/qa/reviewer-watcher*.json
+artifacts/qa/reviewer-watcher*.lock
+artifacts/qa/codex-review-run-*.log

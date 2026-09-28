@@ -125,6 +125,7 @@ Phase 3 is closed. Phase 4 has not started and must not be started without the s
 - correction verification: commit `46c39cd01b11ddc0120bde6e6d31ad4bb5e102a4` passed GitHub verification workflow run `36460098253`; fixture SHA-256 is `A3111C75088F63E9B329B7EF37402AB992C958602BE4702BFA1B60FFE4CF3C4A`.
 - coordination: `scripts/qa-review-watcher.ps1` and `docs/qa/COORDINATION_LOOP_V2.md` implement the reusable reviewer-wait protocol without live-system access.
 - coordination-loop correction: the watcher is now a real persistent orchestrator that detects `codex --version`, invokes non-interactive `codex exec` only for an exact-SHA new directive, persists state, enforces a single-instance lock, verifies post-run Git convergence/CI, and remains alive. Self-test: `QA_REVIEW_ORCHESTRATOR_SELFTEST PASS`.
+- latest Phase 3.1 correction verification: executable forbidden-effect detector suite passes `6/6`, covering prohibited and safe states for `stale_ai_plan_commit`, `wrong_party_notification`, and `blind_retry_after_uncertain_send`; `direct-clean-01` step 2 proves stored location facts remain present and the reply contract is verification-only with no `ask_address_again`. Full disposable gates: unit `63/63`, integration `69/69`, regressions `26/26`, Golden `52/52`, resume `52/52`. Evidence: `artifacts/qa/phase-3.1-verification-20260928.json`, `artifacts/qa/golden-report.json`, and `artifacts/qa/regression-report.json`.
 
 ### Persistent GitHub checkpoint rule
 

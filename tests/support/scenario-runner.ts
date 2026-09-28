@@ -93,7 +93,8 @@ function classifyFailure(errors: any[]): "HARNESS_DEFECT" | "SCENARIO_CONTRACT_D
   return "PRODUCT_DEFECT";
 }
 
-function assertForbidden(scenario: GoldenScenario, step: number, snapshot: Snapshot, previous: Snapshot | null, errors: string[]) {
+export function forbiddenEffectErrors(scenario: GoldenScenario, step: number, snapshot: Snapshot, previous: Snapshot | null): string[] {
+  const errors: string[] = [];
   for (const effect of scenario.steps[step]!.forbidden_effects) {
     switch (effect) {
       case "duplicate_request":
@@ -166,9 +167,14 @@ function assertForbidden(scenario: GoldenScenario, step: number, snapshot: Snaps
         if (snapshot.actualIntent === "ask_name") errors.push(effect);
         break;
       default:
-        errors.push(`unsupported_forbidden_effect:${effect}`);
+      errors.push(`unsupported_forbidden_effect:${effect}`);
     }
   }
+  return errors;
+}
+
+function assertForbidden(scenario: GoldenScenario, step: number, snapshot: Snapshot, previous: Snapshot | null, errors: string[]) {
+  errors.push(...forbiddenEffectErrors(scenario, step, snapshot, previous));
 }
 
 export async function runGoldenScenarios(
