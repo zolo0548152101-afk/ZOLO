@@ -124,6 +124,7 @@ Phase 3 is closed. Phase 4 has not started and must not be started without the s
 - correction: track `tests/fixtures/qa-synthetic-bed-20260928.png` so the Golden suite is self-contained in GitHub Actions; remove the duplicate dead `schedule_without_both_approvals` switch case. CI must pass on the new pushed SHA before Phase 3.1 is resubmitted.
 - correction verification: commit `46c39cd01b11ddc0120bde6e6d31ad4bb5e102a4` passed GitHub verification workflow run `36460098253`; fixture SHA-256 is `A3111C75088F63E9B329B7EF37402AB992C958602BE4702BFA1B60FFE4CF3C4A`.
 - coordination: `scripts/qa-review-watcher.ps1` and `docs/qa/COORDINATION_LOOP_V2.md` implement the reusable reviewer-wait protocol without live-system access.
+- coordination-loop correction: the watcher is now a real persistent orchestrator that detects `codex --version`, invokes non-interactive `codex exec` only for an exact-SHA new directive, persists state, enforces a single-instance lock, verifies post-run Git convergence/CI, and remains alive. Self-test: `QA_REVIEW_ORCHESTRATOR_SELFTEST PASS`.
 
 ### Persistent GitHub checkpoint rule
 
