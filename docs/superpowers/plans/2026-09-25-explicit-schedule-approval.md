@@ -1,5 +1,7 @@
 # Explicit Schedule Approval Implementation Plan
 
+> עדכון מדיניות 27/09/2026: ימי שלישי 16:00–20:00; מכסת ברירת מחדל 10; אישור מנהל נדרש לכל הובלה נוספת בנפרד. סעיפים היסטוריים שאוסרים שינוי יום/שעות/קיבולת הוחלפו בהחלטת הבעלים המאוחרת.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Prevent a Haim Yahad request from becoming coordinated until each party has explicitly approved the same exact proposed date.

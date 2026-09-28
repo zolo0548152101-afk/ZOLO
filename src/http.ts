@@ -5,11 +5,19 @@ import { z, ZodError } from "zod";
 import type { Config } from "./config.js";
 import { Runtime } from "./application/runtime.js";
 import { AppError, errorCode } from "./domain/types.js";
-import { canonicalPhone, statusText } from "./domain/policies.js";
+import {
+  canonicalPhone,
+  MAX_TRANSPORT_CAPACITY,
+  statusText,
+} from "./domain/policies.js";
 import { parseWebhook, verifyHmac } from "./infrastructure/webhook.js";
 import { QUEUES } from "./infrastructure/queue.js";
 const uuid = z.uuid();
 const reason = z.string().trim().min(3).max(500);
+const isTuesdayDate = (value: string) => {
+  const date = new Date(`${value}T12:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value && date.getUTCDay() === 2;
+};
 const number = z.coerce.number().int().positive();
 const paramsNumber = z.object({ number });
 const databaseTable = z.enum([
@@ -120,6 +128,7 @@ export async function makeHttp(
 </style></head><body><header><div><h1>חיים יחד · מרכז ניהול</h1><div class="sub">V5 · תפעול, הובלות וסימולציות</div></div><div class="badge">מצב: ${c.BOT_MODE}</div></header><main>
 <section class="login"><label>טוקן ניהול<input id="token" type="password" autocomplete="off" placeholder="הדבק את HAIM_ADMIN_TOKEN"></label><button id="connect">התחבר</button><button class="secondary" id="refresh">רענן נתונים</button></section><div id="message" class="notice">הדף שומר את הטוקן בדפדפן שלך בלבד, עד לסגירת הלשונית.</div>
 <section class="grid" id="metrics"><div class="card metric"><span>תיבת כניסה ממתינה</span><b>—</b></div><div class="card metric"><span>הודעות יוצאות</span><b>—</b></div><div class="card metric"><span>תורי עבודה</span><b>—</b></div><div class="card metric"><span>קריאות AI</span><b>—</b></div></section>
+<section class="card" style="margin-top:14px"><h2>חיבור WhatsApp</h2><label>סשן לחיבור<select id="waha-session"><option value="HAIM_YAHAD">HAIM_YAHAD</option><option value="default">default</option><option value="TAL_ZOLO">TAL_ZOLO</option></select></label><div id="waha-status" class="notice">התחבר כדי לבדוק את מצב החיבור.</div><div class="actions"><button id="waha-refresh" class="secondary" type="button">בדוק חיבור</button><button id="waha-reconnect" type="button">חבר מחדש</button><button id="waha-qr" class="secondary" type="button">הצג QR</button></div><div id="waha-qr-box" style="display:none;margin-top:12px;text-align:center"><img id="waha-qr-image" alt="קוד QR לחיבור WhatsApp" style="max-width:280px;background:white;padding:10px;border-radius:10px"><div class="hint">סרוק את הקוד מתוך WhatsApp בטלפון. לאחר הסריקה לחץ על בדוק חיבור.</div></div></section>
 <section class="two"><div class="card"><h2>רשומות הובלות</h2><div class="hint">כל הובלה נשמרת במסד הנתונים ומופיעה כאן.</div><div class="table"><table><thead><tr><th>#</th><th>סטטוס</th><th>פריטים</th><th>מוסר ← מקבל</th><th>תאריך</th></tr></thead><tbody id="requests"><tr><td colspan="5">התחבר כדי לטעון נתונים</td></tr></tbody></table></div></div><div class="card"><h2>תור הודעות לא ודאיות</h2><div class="table"><table><thead><tr><th>טלפון</th><th>מצב</th><th>שגיאה</th></tr></thead><tbody id="outbox"><tr><td colspan="3">—</td></tr></tbody></table></div></div></section>
 <section class="two"><div class="card"><h2>סימולציית צ׳אט</h2><div class="hint">ההודעות רצות בסביבה נפרדת, ולא נשלחות ל־WhatsApp.</div><div id="chat" class="chat"><div class="hint">כתוב הודעה כדי לדבר עם הבוט.</div></div><form id="simulate" class="form"><input id="phone" inputmode="numeric" placeholder="טלפון לדוגמה, למשל 584152101" required><textarea id="text" rows="3" placeholder="כתוב הודעה לבוט…" required></textarea><button>שלח לבוט</button></form></div><div class="card"><h2>גישת בוט</h2><div class="radios"><label><input type="radio" name="access" value="open" checked> פתוח לכולם</label><label><input type="radio" name="access" value="allowlist"> פתוח רק למספרים שאגדיר</label></div><label>מספרים מורשים<textarea id="allowlist" rows="5" placeholder="מספר אחד בכל שורה או מופרד בפסיקים"></textarea></label><div class="hint">מספר חסום אינו מקבל תגובה מהבוט.</div><div class="actions"><button id="save-access" type="button">שמור הגדרת גישה</button></div><hr><h2>איפוס שיחה</h2><input id="reset-phone" inputmode="numeric" placeholder="מספר טלפון לאיפוס"><div class="actions"><button id="reset-one" class="secondary" type="button">אפס שיחה למספר</button><button id="reset-all" class="danger" type="button">אפס את כל זיכרון הבוט</button></div><div class="hint">הפעולה מתחילה שיחה חדשה; רשומות ההובלות וההיסטוריה נשמרות.</div></div></section>
 <section class="two"><div class="card"><h2>תורים שנכשלו</h2><div class="table"><table><thead><tr><th>תור</th><th>ניסיונות</th><th>מזהה</th></tr></thead><tbody id="failed"><tr><td colspan="3">—</td></tr></tbody></table></div></div></section>
@@ -127,15 +136,15 @@ export async function makeHttp(
 <script>
 const token=document.querySelector('#token'),msg=document.querySelector('#message'),chat=document.querySelector('#chat');token.value=sessionStorage.getItem('haim-admin-token')||'';
 function say(text,kind){msg.textContent=text;msg.className='notice '+(kind||'')}function esc(value){const s=String(value??'');return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}function rows(id,html,span){document.querySelector(id).innerHTML=html||'<tr><td colspan="'+span+'">אין נתונים</td></tr>'}function header(extra){return Object.assign({'x-admin-token':token.value.trim()},extra||{})}async function api(path,options){if(!token.value.trim())throw new Error('יש להזין טוקן ניהול');const o=Object.assign({},options||{});o.headers=header(o.headers);const r=await fetch('/admin/'+path,o);const j=await r.json();if(!r.ok)throw new Error(j.error?.message||j.error?.code||'הפעולה נכשלה');return j}function bubble(text,kind){if(chat.querySelector('.hint'))chat.innerHTML='';const d=document.createElement('div');d.className='bubble '+kind;d.textContent=text;chat.appendChild(d);chat.scrollTop=chat.scrollHeight}function party(x,role){const p=(x.parties||[]).find(v=>v.role===role);return p?(p.name||p.phone||'—'):'—'}
-async function refresh(){try{sessionStorage.setItem('haim-admin-token',token.value.trim());say('טוען נתונים…');const a=await Promise.all([api('metrics'),api('requests'),api('outbox?state=uncertain'),api('jobs/failed'),api('access')]);const m=a[0],requests=a[1].requests||[],outbox=a[2].rows||[],failed=a[3].jobs||[],access=a[4];const outTotal=(m.outbox||[]).reduce((n,x)=>n+Number(x.count||0),0),queueTotal=(m.queues||[]).reduce((n,x)=>n+Number(x.stats?.created||0),0);document.querySelector('#metrics').innerHTML='<div class="card metric"><span>תיבת כניסה ממתינה</span><b>'+esc(m.inbox?.pending)+'</b></div><div class="card metric"><span>הודעות יוצאות</span><b>'+outTotal+'</b></div><div class="card metric"><span>תורי עבודה</span><b>'+queueTotal+'</b></div><div class="card metric"><span>קריאות AI</span><b>'+esc(m.ai?.calls)+'</b></div>';rows('#requests',requests.map(x=>'<tr><td>'+esc(x.number)+'</td><td>'+esc(x.status)+'</td><td>'+esc((x.items||[]).map(i=>i.description).join(', '))+'</td><td>'+esc(party(x,'donor'))+' ← '+esc(party(x,'receiver'))+'</td><td>'+esc(x.run_date||'—')+'</td></tr>').join(''),5);rows('#outbox',outbox.map(x=>'<tr><td>'+esc(x.phone)+'</td><td>'+esc(x.state)+'</td><td>'+esc(x.error_code||'—')+'</td></tr>').join(''),3);rows('#failed',failed.map(x=>'<tr><td>'+esc(x.queue)+'</td><td>'+esc(x.retry_count)+'</td><td>'+esc(x.id).slice(0,8)+'</td></tr>').join(''),3);document.querySelector('input[name="access"][value="'+access.mode+'"]').checked=true;document.querySelector('#allowlist').value=(access.phones||[]).join('\n');say('עודכן עכשיו','ok')}catch(e){say(e.message||'הטעינה נכשלה','error')}}
-async function waitForReply(url){for(let i=0;i<90;i++){await new Promise(resolve=>setTimeout(resolve,500));const r=await fetch(url,{headers:header()});const j=await r.json();if(!r.ok)throw new Error(j.error?.message||'הסימולציה נכשלה');if(j.message?.processed_at){const reply=j.message.reply||(j.outbox||[]).map(x=>x.text).filter(Boolean).join('\n');return reply||'הבוט עיבד את ההודעה ללא תשובה.'}}throw new Error('הסימולציה עדיין מעבדת. נסה שוב בעוד רגע.')}document.querySelector('#connect').onclick=refresh;document.querySelector('#refresh').onclick=refresh;
+async function refresh(){try{sessionStorage.setItem('haim-admin-token',token.value.trim());say('טוען נתונים…');const a=await Promise.all([api('metrics'),api('requests'),api('outbox?state=uncertain'),api('jobs/failed'),api('access')]);const m=a[0],requests=a[1].requests||[],outbox=a[2].rows||[],failed=a[3].jobs||[],access=a[4];const outTotal=(m.outbox||[]).reduce((n,x)=>n+Number(x.count||0),0),queueTotal=(m.queues||[]).reduce((n,x)=>n+Number(x.stats?.created||0),0);document.querySelector('#metrics').innerHTML='<div class="card metric"><span>תיבת כניסה ממתינה</span><b>'+esc(m.inbox?.pending)+'</b></div><div class="card metric"><span>הודעות יוצאות</span><b>'+outTotal+'</b></div><div class="card metric"><span>תורי עבודה</span><b>'+queueTotal+'</b></div><div class="card metric"><span>קריאות AI</span><b>'+esc(m.ai?.calls)+'</b></div>';rows('#requests',requests.map(x=>'<tr><td>'+esc(x.number)+'</td><td>'+esc(x.status)+'</td><td>'+esc((x.items||[]).map(i=>i.description).join(', '))+'</td><td>'+esc(party(x,'donor'))+' ← '+esc(party(x,'receiver'))+'</td><td>'+esc(x.run_date||(x.proposed_run_date?'מוצע — ממתין לאישור: '+x.proposed_run_date:'—'))+'</td></tr>').join(''),5);rows('#outbox',outbox.map(x=>'<tr><td>'+esc(x.phone)+'</td><td>'+esc(x.state)+'</td><td>'+esc(x.error_code||'—')+'</td></tr>').join(''),3);rows('#failed',failed.map(x=>'<tr><td>'+esc(x.queue)+'</td><td>'+esc(x.retry_count)+'</td><td>'+esc(x.id).slice(0,8)+'</td></tr>').join(''),3);document.querySelector('input[name="access"][value="'+access.mode+'"]').checked=true;document.querySelector('#allowlist').value=(access.phones||[]).join('\n');say('עודכן עכשיו','ok')}catch(e){say(e.message||'הטעינה נכשלה','error')}}
+async function waitForReply(url){for(let i=0;i<90;i++){await new Promise(resolve=>setTimeout(resolve,500));const r=await fetch(url,{headers:header()});const j=await r.json();if(!r.ok)throw new Error(j.error?.message||'הסימולציה נכשלה');if(j.message?.processed_at){const reply=j.message.reply||(j.outbox||[]).map(x=>x.text).filter(Boolean).join('\n');return reply||'הבוט עיבד את ההודעה ללא תשובה.'}}throw new Error('הסימולציה עדיין מעבדת. נסה שוב בעוד רגע.')}function wahaSession(){return encodeURIComponent(document.querySelector('#waha-session').value)}async function wahaStatus(){try{const s=await api('waha/status?session='+wahaSession()),el=document.querySelector('#waha-status');el.textContent=s.connected?'מחובר · '+s.status:'מנותק · '+(s.status||'לא זמין')+(s.message?' · '+s.message:'');el.className='notice '+(s.connected?'ok':'error');return s}catch(e){const el=document.querySelector('#waha-status');el.textContent='לא ניתן לבדוק את החיבור: '+(e.message||'שגיאה');el.className='notice error';throw e}}document.querySelector('#connect').onclick=refresh;document.querySelector('#refresh').onclick=refresh;document.querySelector('#waha-session').onchange=()=>wahaStatus().catch(()=>{});document.querySelector('#waha-refresh').onclick=()=>wahaStatus().catch(()=>{});document.querySelector('#waha-reconnect').onclick=async()=>{try{await api('waha/reconnect?session='+wahaSession(),{method:'POST'});say('בקשת חיבור מחדש נשלחה','ok');await wahaStatus()}catch(e){say(e.message||'החיבור מחדש נכשל','error')}};document.querySelector('#waha-qr').onclick=async()=>{try{const r=await api('waha/qr?session='+wahaSession());if(!r.data_url)throw new Error('QR עדיין לא זמין');document.querySelector('#waha-qr-image').src=r.data_url;document.querySelector('#waha-qr-box').style.display='block';say('קוד QR נטען','ok')}catch(e){say(e.message||'קוד ה־QR לא זמין','error')}};setInterval(()=>{if(token.value.trim())wahaStatus().catch(()=>{})},30000);
 document.querySelector('#simulate').onsubmit=async e=>{e.preventDefault();const phone=document.querySelector('#phone').value,text=document.querySelector('#text').value;try{bubble(text,'me');document.querySelector('#text').value='';say('הבוט חושב…');const r=await api('simulate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({phone,text})});const reply=await waitForReply(r.result_url);bubble(reply,'bot');say('הסימולציה הושלמה','ok');refresh()}catch(e){bubble('לא התקבלה תשובה: '+(e.message||'שגיאה'),'bot');say(e.message||'הסימולציה נכשלה','error')}};
 document.querySelector('#save-access').onclick=async()=>{try{const mode=document.querySelector('input[name="access"]:checked').value,phones=document.querySelector('#allowlist').value.split(/[\s,]+/).filter(Boolean);await api('access',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({mode,phones})});say('הגדרת הגישה נשמרה','ok')}catch(e){say(e.message||'השמירה נכשלה','error')}};document.querySelector('#reset-one').onclick=async()=>{const phone=document.querySelector('#reset-phone').value.trim();if(!phone)return say('יש להזין מספר טלפון','error');if(!confirm('לאפס את זיכרון השיחה עבור '+phone+'? רשומות ההובלה לא יימחקו.'))return;try{await api('conversations/'+encodeURIComponent(phone)+'/reset',{method:'POST'});say('השיחה אופסה','ok')}catch(e){say(e.message||'האיפוס נכשל','error')}};document.querySelector('#reset-all').onclick=async()=>{if(!confirm('לאפס את זיכרון הבוט לכל המשתמשים? רשומות ההובלה יישמרו.'))return;try{await api('conversations/reset-all',{method:'POST'});say('זיכרון הבוט אופס לכל המשתמשים','ok')}catch(e){say(e.message||'האיפוס נכשל','error')}};
 let dbRows={},dbEditable=[];async function loadDb(){try{const table=document.querySelector('#db-table').value,r=await api('database?table='+encodeURIComponent(table));dbEditable=r.editable_fields||[];dbRows=Object.fromEntries(r.rows.map(x=>[x.id,x]));document.querySelector('#db-head').innerHTML='<tr>'+r.columns.map(x=>'<th>'+esc(x)+'</th>').join('')+'<th>פעולות</th></tr>';document.querySelector('#db-rows').innerHTML=r.rows.map(x=>'<tr>'+r.columns.map(k=>'<td>'+esc(x[k])+'</td>').join('')+'<td><button class="secondary" onclick="dbEdit(\''+x.id+'\')">ערוך</button> <button class="danger" onclick="dbDelete(\''+x.id+'\')">מחק</button></td></tr>').join('')||'<tr><td>אין רשומות</td></tr>';say('רשומות המסד נטענו','ok')}catch(e){say(e.message||'טעינת המסד נכשלה','error')}}window.dbEdit=async id=>{const table=document.querySelector('#db-table').value,row=dbRows[id],editable=Object.fromEntries(dbEditable.map(k=>[k,row[k]??null]));if(!dbEditable.length)return say('אין שדות עריכה לטבלה הזו','error');const raw=prompt('ערוך רק את השדות האלו בפורמט JSON',JSON.stringify(editable,null,2));if(raw===null)return;try{const parsed=JSON.parse(raw),changes={};for(const k of dbEditable)if(JSON.stringify(parsed[k]??null)!==JSON.stringify(editable[k]??null))changes[k]=parsed[k]??null;await api('database/'+table+'/'+encodeURIComponent(id),{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({changes})});await loadDb();say('הרשומה עודכנה','ok')}catch(e){say(e.message||'העדכון נכשל','error')}};window.dbDelete=async id=>{const table=document.querySelector('#db-table').value;if(!confirm('למחוק את הרשומה? פעולה זו אינה ניתנת לביטול.'))return;try{await api('database/'+table+'/'+encodeURIComponent(id),{method:'DELETE'});await loadDb();say('הרשומה נמחקה','ok')}catch(e){say(e.message||'המחיקה נכשלה','error')}};document.querySelector('#db-load').onclick=loadDb;const clearAll=document.querySelector('#db-clear-all');if(clearAll)clearAll.onclick=async()=>{const phrase=prompt('פעולה בלתי הפיכה. להקליד בדיוק: מחק הכל');if(phrase!=='מחק הכל')return say('המחיקה בוטלה','error');try{const r=await api('database/clear-all',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirm:phrase})});await refresh();await loadDb();say('נמחקו כל רשומות הבדיקות ('+Object.values(r.deleted||{}).reduce((n,v)=>n+Number(v||0),0)+')','ok')}catch(e){say(e.message||'הניקוי נכשל','error')}};
 </script><script>
 const dbDangerBar=document.createElement('div');dbDangerBar.className='actions';dbDangerBar.style='margin-top:12px';const clearPhoneButton=document.createElement('button');clearPhoneButton.className='danger';clearPhoneButton.type='button';clearPhoneButton.textContent='מחק נתוני מספר';const clearSystemButton=document.createElement('button');clearSystemButton.className='danger';clearSystemButton.type='button';clearSystemButton.textContent='מחק את כל הרשומות';dbDangerBar.append(clearPhoneButton,clearSystemButton);document.querySelector('#db-table')?.parentElement?.parentElement?.append(dbDangerBar);clearPhoneButton.onclick=async()=>{const phone=prompt('הזן מספר למחיקת כל הנתונים הקשורים אליו');if(phone===null||!phone.trim())return;if(!confirm('למחוק לצמיתות את כל נתוני המספר '+phone+'?'))return;try{const r=await api('database/clear-phone',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({phone:phone.trim(),confirm:true})});await refresh();await window.loadDb();say('נתוני המספר נמחקו','ok')}catch(e){say(e.message||'מחיקת נתוני המספר נכשלה','error')}};clearSystemButton.onclick=async()=>{if(!confirm('למחוק לצמיתות את כל הרשומות במערכת?\n\nהגדרות המערכת ורשימות היישובים לא יימחקו.'))return;try{const r=await api('database/clear-all',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirm:true})});await refresh();await window.loadDb();say('כל הרשומות נמחקו','ok')}catch(e){say(e.message||'מחיקת כל הרשומות נכשלה','error')}};
 const clearAllButton=document.querySelector('#db-clear-all');if(clearAllButton)clearAllButton.onclick=async()=>{if(!confirm('למחוק לצמיתות את כל הרשומות בסביבת הבדיקות?'))return;try{const r=await api('database/clear-all',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirm:true})});await refresh();await loadDb();say('נמחקו כל רשומות הבדיקות ('+Object.values(r.deleted||{}).reduce((n,v)=>n+Number(v||0),0)+')','ok')}catch(e){say(e.message||'הניקוי נכשל','error')}};
-const dbLabels={number:'מספר פנייה',status:'סטטוס',donor_phone:'טלפון מוסר',donor_name:'שם מוסר',pickup_city:'יישוב איסוף',pickup_address:'כתובת איסוף',pickup_floor:'קומת איסוף',receiver_phone:'טלפון מקבל',receiver_name:'שם מקבל',destination_city:'יישוב יעד',destination_address:'כתובת יעד',destination_floor:'קומת יעד',items:'פריטים',item_description:'תיאור פריט',quantity:'כמות',needs_disassembly:'נדרש פירוק',requested_date:'תאריך מבוקש',preferred_time:'שעה מועדפת',run_date:'תאריך הובלה',represents_both_parties:'אותו אדם משני הצדדים',closed_at:'נסגר בתאריך',human_reason:'סיבת טיפול אנושי',donor_approved:'המוסר אישר',receiver_approved:'המקבל אישר',photos:'מספר תמונות',media_ids:'תמונות להורדה',locations:'מיקומים שנשלחו',created_at:'נוצר בתאריך',updated_at:'עודכן בתאריך',phone:'טלפון',kind:'סוג הודעה',text:'תוכן',reply:'תשובת הבוט',error_code:'קוד שגיאה',received_at:'התקבל בתאריך',mode:'מצב שיחה',session:'סשן',chat_id:'מזהה צ׳אט',selected_request_id:'פנייה נבחרת',version:'גרסה',state:'מצב שליחה'};
+const dbLabels={number:'מספר פנייה',status:'סטטוס',donor_phone:'טלפון מוסר',donor_name:'שם מוסר',pickup_city:'יישוב איסוף',pickup_address:'כתובת איסוף',pickup_floor:'קומת איסוף',receiver_phone:'טלפון מקבל',receiver_name:'שם מקבל',destination_city:'יישוב יעד',destination_address:'כתובת יעד',destination_floor:'קומת יעד',items:'פריטים',item_description:'תיאור פריט',quantity:'כמות',needs_disassembly:'נדרש פירוק',requested_date:'תאריך מבוקש',preferred_time:'שעה מועדפת',run_date:'תאריך הובלה שאושר',proposed_run_date:'מועד מוצע — ממתין לאישור',donor_schedule_approved_date:'אישור מועד המוסר',receiver_schedule_approved_date:'אישור מועד המקבל',represents_both_parties:'אותו אדם משני הצדדים',closed_at:'נסגר בתאריך',human_reason:'סיבת טיפול אנושי',donor_approved:'המוסר אישר השתתפות',receiver_approved:'המקבל אישר השתתפות',photos:'מספר תמונות',media_ids:'תמונות להורדה',locations:'מיקומים שנשלחו',created_at:'נוצר בתאריך',updated_at:'עודכן בתאריך',phone:'טלפון',kind:'סוג הודעה',text:'תוכן',reply:'תשובת הבוט',error_code:'קוד שגיאה',received_at:'התקבל בתאריך',mode:'מצב שיחה',session:'סשן',chat_id:'מזהה צ׳אט',selected_request_id:'פנייה נבחרת',version:'גרסה',state:'מצב שליחה'};
 const dbStatusLabels={collecting:'בהשלמת פרטים',available:'ממתינה למקבל',awaiting_approval:'ממתינה לאישור',waiting_capacity:'ממתינה למקום בהובלה',coordinated:'תואמה',human:'בטיפול אנושי',cancel_pending:'ממתינה להחלטה לאחר ביטול',cancelled:'בוטלה',closed:'הושלמה',rejected:'לא מתאימה'};
 const dbStatusByLabel=Object.fromEntries(Object.entries(dbStatusLabels).map(([k,v])=>[v,k]));
 function dbDisplay(key,value){if(key==='status')return dbStatusLabels[value]||value;if(key==='needs_disassembly'||key==='represents_both_parties'||key==='donor_approved'||key==='receiver_approved')return value===true?'כן':value===false?'לא':'—';return value??'—'}
@@ -206,6 +215,8 @@ function decoratePhoneCells(){document.querySelectorAll('#db-rows td').forEach(t
 decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=dbColumns.indexOf('media_ids'),li=dbColumns.indexOf('locations');document.querySelectorAll('#db-rows tr').forEach((tr,i)=>{const x=dbVisibleRows[(dbPage-1)*20+i];if(!x)return;if(mi>=0){const cell=tr.children[mi],ids=Array.isArray(x.media_ids)?x.media_ids:[];cell.innerHTML=ids.length?ids.map(id=>'<a href="/admin/media/'+encodeURIComponent(id)+'" target="_blank" download>הורד תמונה</a>').join('<br>'):'—'}if(li>=0){const cell=tr.children[li],ls=Array.isArray(x.locations)?x.locations:[];cell.innerHTML=ls.length?ls.map((l,j)=>'<button class="secondary" type="button" onclick="dbCopyLocation(\\''+dbSafe(JSON.stringify(l))+"\\')">העתק מיקום "+(j+1)+'</button>').join('<br>'):'—'}})};const dbRenderVisible=dbRender;dbRender=function(){const all=dbAllRows,term=(dbSearch.value||'').trim().toLocaleLowerCase();dbAllRows=all.filter(x=>!term||Object.values(x).some(v=>String(v??'').toLocaleLowerCase().includes(term)));if(dbSortKey)dbAllRows.sort((a,b)=>String(a[dbSortKey]??'').localeCompare(String(b[dbSortKey]??''),'he',{numeric:true})*dbSortDir);dbVisibleRows=dbAllRows.slice();dbRenderVisible();dbAllRows=all;decorateRequestArtifacts()};
 </script><script>
 (() => {
+  async function downloadAdminMedia(anchor){const response=await fetch(anchor.href,{headers:header()});const contentType=response.headers.get('content-type')||'';if(!response.ok||!contentType.startsWith('image/')){const body=await response.json().catch(()=>({}));throw new Error(body.error?.message||'הורדת התמונה נכשלה')}const blob=await response.blob();const objectUrl=URL.createObjectURL(blob);const link=document.createElement('a');link.href=objectUrl;link.download=anchor.dataset.filename||'image';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(objectUrl),1000)}
+  document.addEventListener('click',event=>{const target=event.target instanceof Element?event.target.closest('a[href^="/admin/media/"]'):null;if(!target)return;event.preventDefault();void downloadAdminMedia(target).catch(err=>say(err.message||'הורדת התמונה נכשלה','error'))});
   let allRows=[], columns=[], tableName='', page=1, sortKey='', sortDir=1;
   const perPage=20, head=document.querySelector('#db-head'), body=document.querySelector('#db-rows'), pages=document.querySelector('#db-pages');
   const search=document.createElement('input'); search.placeholder='חיפוש בכל העמודות…'; search.setAttribute('aria-label','חיפוש בכל העמודות'); document.querySelector('#db-load').parentElement.append(search);
@@ -244,6 +255,66 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
     async (admin) => {
       admin.addHook("onRequest", async (req) => {
         if (!authorized(req, c)) throw new AppError("admin_unauthorized", 401);
+      });
+      const wahaCall = async (path: string, init: RequestInit = {}) => {
+        const headers = new Headers(init.headers);
+        headers.set("X-Api-Key", c.WAHA_API_KEY);
+        if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+        return fetch(`${c.WAHA_BASE_URL}${path}`, {
+          ...init,
+          headers,
+          signal: AbortSignal.timeout(c.WAHA_TIMEOUT_MS),
+        });
+      };
+      const allowedWahaSessions = new Set([c.WAHA_SESSION, "default", "TAL_ZOLO"]);
+      const requestedWahaSession = (req: FastifyRequest) => {
+        const value = (req.query as { session?: unknown } | undefined)?.session;
+        const session = typeof value === "string" && value.trim() ? value.trim() : c.WAHA_SESSION;
+        if (!allowedWahaSessions.has(session)) throw new AppError("waha_session_not_allowed", 400, "סשן WhatsApp זה אינו מורשה בדף הניהול.");
+        return session;
+      };
+      admin.get("/waha/status", async (req) => {
+        const session = requestedWahaSession(req);
+        try {
+          const r = await wahaCall(`/api/sessions/${encodeURIComponent(session)}`);
+          const body = await r.json().catch(() => ({}));
+          const status = typeof body?.status === "string" ? body.status : "UNKNOWN";
+          return { ok: true, connected: r.ok && status === "WORKING", session, status };
+        } catch {
+          return { ok: true, connected: false, session, status: "UNAVAILABLE", message: "WAHA אינו זמין" };
+        }
+      });
+      admin.post("/waha/reconnect", async (req) => {
+        const session = requestedWahaSession(req);
+        const r = await wahaCall("/api/sessions/start", {
+          method: "POST",
+          body: JSON.stringify({ name: session }),
+        });
+        if (!r.ok && r.status !== 422) throw new AppError("waha_reconnect_failed", 502, "לא ניתן להתחיל את סשן WhatsApp.");
+        return { ok: true, started: r.ok, session };
+      });
+      admin.get("/waha/qr", async (req) => {
+        const session = requestedWahaSession(req);
+        const paths = [
+          `/api/${encodeURIComponent(session)}/auth/qr`,
+          `/api/sessions/${encodeURIComponent(session)}/auth/qr`,
+        ];
+        for (const path of paths) {
+          const r = await wahaCall(path);
+          if (!r.ok) continue;
+          const contentType = r.headers.get("content-type") ?? "image/png";
+          if (contentType.includes("json")) {
+            const body = await r.json().catch(() => ({}));
+            const value = typeof body?.value === "string" ? body.value : typeof body?.data === "string" ? body.data : null;
+            if (value) return { ok: true, data_url: value.startsWith("data:") ? value : `data:image/png;base64,${value}` };
+          } else {
+            const bytes = Buffer.from(await r.arrayBuffer());
+            // The admin client consumes JSON. Returning the raw PNG made the
+            // button appear to do nothing because api() attempted r.json().
+            return { ok: true, data_url: `data:${contentType};base64,${bytes.toString("base64")}` };
+          }
+        }
+        throw new AppError("waha_qr_unavailable", 404, "קוד ה־QR עדיין לא זמין. נסה לחבר מחדש ולרענן.");
       });
       admin.get("/metrics", async () => {
         const s = runtime.requireStore();
@@ -303,9 +374,9 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           .parse(req.query);
         const views = {
           requests: {
-            columns: ["number","status","donor_phone","donor_name","pickup_city","pickup_address","pickup_floor","receiver_phone","receiver_name","destination_city","destination_address","destination_floor","items","quantity","needs_disassembly","requested_date","preferred_time","run_date","represents_both_parties","closed_at","human_reason","donor_approved","receiver_approved","photos","media_ids","locations","created_at","updated_at"],
+            columns: ["number","status","donor_phone","donor_name","pickup_city","pickup_address","pickup_floor","receiver_phone","receiver_name","destination_city","destination_address","destination_floor","items","quantity","needs_disassembly","requested_date","preferred_time","proposed_run_date","donor_schedule_approved_date","receiver_schedule_approved_date","run_date","represents_both_parties","closed_at","human_reason","donor_approved","receiver_approved","photos","media_ids","locations","created_at","updated_at"],
             editableFields: ["status", "run_date", "preferred_time", "represents_both_parties", "human_reason", "donor_phone", "donor_name", "pickup_city", "pickup_address", "pickup_floor", "receiver_phone", "receiver_name", "destination_city", "destination_address", "destination_floor", "item_description", "quantity"],
-            sql: `SELECT r.id,r.number,r.status,dc.phone AS donor_phone,d.name AS donor_name,d.settlement AS pickup_city,d.address AS pickup_address,d.floor AS pickup_floor,rc.phone AS receiver_phone,v.name AS receiver_name,v.settlement AS destination_city,v.address AS destination_address,v.floor AS destination_floor,string_agg(i.description, ', ' ORDER BY i.position) AS items,coalesce(sum(i.quantity),0)::int AS quantity,bool_or(i.needs_disassembly) AS needs_disassembly,r.earliest_run_date AS requested_date,r.preferred_time,r.run_date,r.represents_both_parties,r.closed_at,r.human_reason,d.approved_at IS NOT NULL AS donor_approved,v.approved_at IS NOT NULL AS receiver_approved,(SELECT count(*)::int FROM request_media rm WHERE rm.request_id=r.id) AS photos,(SELECT coalesce(json_agg(rm.media_id ORDER BY rm.media_id),'[]'::json) FROM request_media rm WHERE rm.request_id=r.id) AS media_ids,(SELECT coalesce(json_agg(json_build_object('role',rl.role,'latitude',rl.latitude,'longitude',rl.longitude) ORDER BY rl.role),'[]'::json) FROM request_locations rl WHERE rl.request_id=r.id) AS locations,r.created_at,r.updated_at FROM requests r LEFT JOIN request_parties d ON d.request_id=r.id AND d.role='donor' LEFT JOIN contacts dc ON dc.id=d.contact_id LEFT JOIN request_parties v ON v.request_id=r.id AND v.role='receiver' LEFT JOIN contacts rc ON rc.id=v.contact_id LEFT JOIN request_items i ON i.request_id=r.id GROUP BY r.id,dc.phone,d.name,d.settlement,d.address,d.floor,d.approved_at,rc.phone,v.name,v.settlement,v.address,v.floor,v.approved_at ORDER BY r.number DESC LIMIT $1`,
+            sql: `SELECT r.id,r.number,r.status,dc.phone AS donor_phone,d.name AS donor_name,d.settlement AS pickup_city,d.address AS pickup_address,d.floor AS pickup_floor,rc.phone AS receiver_phone,v.name AS receiver_name,v.settlement AS destination_city,v.address AS destination_address,v.floor AS destination_floor,string_agg(i.description, ', ' ORDER BY i.position) AS items,coalesce(sum(i.quantity),0)::int AS quantity,bool_or(i.needs_disassembly) AS needs_disassembly,r.earliest_run_date AS requested_date,r.preferred_time,r.proposed_run_date,d.schedule_approved_date AS donor_schedule_approved_date,v.schedule_approved_date AS receiver_schedule_approved_date,r.run_date,r.represents_both_parties,r.closed_at,r.human_reason,d.approved_at IS NOT NULL AS donor_approved,v.approved_at IS NOT NULL AS receiver_approved,(SELECT count(*)::int FROM request_media rm WHERE rm.request_id=r.id) AS photos,(SELECT coalesce(json_agg(rm.media_id ORDER BY rm.media_id),'[]'::json) FROM request_media rm WHERE rm.request_id=r.id) AS media_ids,(SELECT coalesce(json_agg(json_build_object('role',rl.role,'latitude',rl.latitude,'longitude',rl.longitude) ORDER BY rl.role),'[]'::json) FROM request_locations rl WHERE rl.request_id=r.id) AS locations,r.created_at,r.updated_at FROM requests r LEFT JOIN request_parties d ON d.request_id=r.id AND d.role='donor' LEFT JOIN contacts dc ON dc.id=d.contact_id LEFT JOIN request_parties v ON v.request_id=r.id AND v.role='receiver' LEFT JOIN contacts rc ON rc.id=v.contact_id LEFT JOIN request_items i ON i.request_id=r.id GROUP BY r.id,dc.phone,d.name,d.settlement,d.address,d.floor,d.approved_at,d.schedule_approved_date,rc.phone,v.name,v.settlement,v.address,v.floor,v.approved_at,v.schedule_approved_date ORDER BY r.number DESC LIMIT $1`,
           },
           contacts: {
             columns: ["phone", "created_at"],
@@ -334,7 +405,9 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
       admin.patch("/database/requests/:id/full", async (req) => {
         const p = z.object({ id: uuid }).parse(req.params);
         const b = z.object({ changes: z.strictObject({
-          status: z.enum(["collecting","available","awaiting_approval","waiting_capacity","coordinated","human","cancel_pending","cancelled","closed","rejected"]).optional(), run_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(), preferred_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable().optional(), represents_both_parties: z.boolean().optional(), human_reason: z.string().max(1000).nullable().optional(),
+          status: z.enum(["collecting","available","awaiting_approval","waiting_capacity","coordinated","human","cancel_pending","cancelled","closed","rejected"]).optional(),
+          run_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+          preferred_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable().optional(), represents_both_parties: z.boolean().optional(), human_reason: z.string().max(1000).nullable().optional(),
           donor_phone: z.string().optional(), donor_name: z.string().max(160).nullable().optional(),
           pickup_city: z.string().max(160).nullable().optional(), pickup_address: z.string().max(500).nullable().optional(), pickup_floor: z.coerce.number().int().min(-3).max(100).nullable().optional(),
           receiver_phone: z.string().optional(), receiver_name: z.string().max(160).nullable().optional(),
@@ -343,8 +416,23 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
         }) }).parse(req.body);
         const changes = b.changes as Record<string, any>, s = runtime.requireStore();
         await s.transaction(async (client) => {
-          const current = await client.query<{ role: string; contact_id: string }>("SELECT role,contact_id FROM request_parties WHERE request_id=$1", [p.id]);
+          const current = await client.query<{ role: string; contact_id: string; status: string; run_date: string | null }>("SELECT rp.role,rp.contact_id,r.status,r.run_date::text FROM request_parties rp JOIN requests r ON r.id=rp.request_id WHERE rp.request_id=$1 FOR UPDATE OF r", [p.id]);
           if (current.rows.length === 0) throw new AppError("database_record_not_found", 404, "הרשומה לא נמצאה.");
+          const scheduleAffecting = Object.keys(changes).some((key) => key !== "human_reason");
+          const effectiveStatus = changes.status ?? current.rows[0]!.status;
+          const effectiveDate = changes.run_date === undefined ? current.rows[0]!.run_date : changes.run_date;
+          if (effectiveDate && !isTuesdayDate(effectiveDate))
+            throw new AppError("tuesday_only", 400, "אפשר לשבץ הובלה רק ביום שלישי.");
+          if (effectiveDate)
+            await client.query("INSERT INTO transport_runs(date,capacity) VALUES($1,$2) ON CONFLICT DO NOTHING", [effectiveDate, 10]);
+          if (effectiveStatus === "coordinated") {
+            if (!effectiveDate) throw new AppError("coordinated_requires_run_date", 400, "יש לבחור תאריך הובלה לפני סימון הפנייה כמתואמת.");
+            await client.query("SELECT date FROM transport_runs WHERE date=$1 FOR UPDATE", [effectiveDate]);
+            const capacity = await client.query<{ capacity: number; status: string }>("SELECT capacity,status FROM transport_runs WHERE date=$1", [effectiveDate]);
+            const booked = await client.query<{ n: number }>("SELECT count(*)::int n FROM requests WHERE id<>$2 AND ((run_date=$1 AND status IN ('coordinated','closed')) OR (proposed_run_date=$1 AND status='awaiting_approval'))", [effectiveDate, p.id]);
+            if (capacity.rows[0]?.status !== "open" || booked.rows[0]!.n >= capacity.rows[0]!.capacity)
+              throw new AppError("transport_capacity_full", 409, "המכסה לתאריך הזה מלאה או שהסבב סגור.");
+          }
           const basic = ["status", "run_date", "preferred_time", "represents_both_parties", "human_reason"].filter((k) => changes[k] !== undefined);
           if (basic.length) await client.query(`UPDATE requests SET ${basic.map((k, i) => k + "=$" + (i + 1)).join(",")},updated_at=clock_timestamp(),version=version+1 WHERE id=$${basic.length + 1}`, [...basic.map((k) => changes[k]), p.id]);
           for (const role of ["donor", "receiver"] as const) {
@@ -370,8 +458,13 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             add("description", changes.item_description); add("quantity", changes.quantity); add("needs_disassembly", changes.needs_disassembly);
             if (fields.length) await client.query(`UPDATE request_items SET ${fields.map((f, i) => f + "=$" + (i + 1)).join(",")} WHERE request_id=$${values.length + 1} AND position=0`, [...values, p.id]);
           }
+          if (scheduleAffecting) {
+            if (changes.status !== undefined || changes.run_date !== undefined)
+              await client.query("UPDATE requests SET proposed_run_date=NULL WHERE id=$1", [p.id]);
+            await client.query("UPDATE request_parties SET approved_at=NULL,approved_by=NULL,schedule_approved=false,schedule_approved_date=NULL,schedule_approved_at=NULL WHERE request_id=$1", [p.id]);
+          }
           await client.query("UPDATE requests SET updated_at=clock_timestamp(),version=version+1 WHERE id=$1", [p.id]);
-          await s.event(client, { trace_id: req.id }, "admin", "database_request_full_updated", { fields: Object.keys(changes) }, p.id);
+          await s.event(client, { trace_id: req.id }, "admin", "database_request_full_updated", { fields: Object.keys(changes), manual_schedule_override: changes.status === "coordinated" || changes.run_date !== undefined }, p.id);
         });
         return { ok: true };
       });
@@ -401,11 +494,37 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
         const values = fields.map((field) => (parsed as Record<string, unknown>)[field]);
         const s = runtime.requireStore();
         await s.transaction(async (client) => {
+          let effectiveStatus: string | undefined, effectiveDate: string | null | undefined;
+          if (p.table === "requests") {
+            const state = await client.query<{ status: string; run_date: string | null }>("SELECT status,run_date::text FROM requests WHERE id=$1 FOR UPDATE", [p.id]);
+            if (!state.rows[0]) throw new AppError("database_record_not_found", 404, "הרשומה לא נמצאה.");
+            effectiveStatus = (parsed as { status?: string }).status ?? state.rows[0].status;
+            effectiveDate = (parsed as { run_date?: string | null }).run_date === undefined ? state.rows[0].run_date : (parsed as { run_date?: string | null }).run_date;
+            if (effectiveDate && !isTuesdayDate(effectiveDate))
+              throw new AppError("tuesday_only", 400, "אפשר לשבץ הובלה רק ביום שלישי.");
+            if (effectiveDate)
+              await client.query("INSERT INTO transport_runs(date,capacity) VALUES($1,10) ON CONFLICT DO NOTHING", [effectiveDate]);
+            if (effectiveStatus === "coordinated") {
+              if (!effectiveDate) throw new AppError("coordinated_requires_run_date", 400, "יש לבחור תאריך הובלה לפני סימון הפנייה כמתואמת.");
+              await client.query("INSERT INTO transport_runs(date,capacity) VALUES($1,10) ON CONFLICT DO NOTHING", [effectiveDate]);
+              await client.query("SELECT date FROM transport_runs WHERE date=$1 FOR UPDATE", [effectiveDate]);
+              const capacity = await client.query<{ capacity: number; status: string }>("SELECT capacity,status FROM transport_runs WHERE date=$1", [effectiveDate]);
+              const booked = await client.query<{ n: number }>("SELECT count(*)::int n FROM requests WHERE id<>$2 AND ((run_date=$1 AND status IN ('coordinated','closed')) OR (proposed_run_date=$1 AND status='awaiting_approval'))", [effectiveDate, p.id]);
+              if (capacity.rows[0]?.status !== "open" || booked.rows[0]!.n >= capacity.rows[0]!.capacity)
+                throw new AppError("transport_capacity_full", 409, "המכסה לתאריך הזה מלאה או שהסבב סגור.");
+            }
+          }
           const r = await client.query(
             `UPDATE ${p.table} SET ${assignment}${p.table === "requests" ? ",updated_at=clock_timestamp(),version=version+1" : ""} WHERE id=$${values.length + 1}`,
             [...values, p.id],
           );
           if (!r.rowCount) throw new AppError("database_record_not_found", 404, "הרשומה לא נמצאה.");
+          if (p.table === "requests" && fields.some((field) => ["status", "run_date", "preferred_time", "represents_both_parties"].includes(field))) {
+            if (fields.some((field) => ["preferred_time", "represents_both_parties"].includes(field)))
+              await client.query("UPDATE requests SET proposed_run_date=NULL WHERE id=$1", [p.id]);
+            await client.query("UPDATE request_parties SET approved_at=NULL,approved_by=NULL,schedule_approved=false,schedule_approved_date=NULL,schedule_approved_at=NULL WHERE request_id=$1", [p.id]);
+            await s.event(client, { trace_id: req.id }, "admin", "admin_manual_schedule_override", { id: p.id, fields, status: effectiveStatus, run_date: effectiveDate, manual_schedule_override: fields.some((field) => ["status", "run_date"].includes(field)) });
+          }
           await s.event(client, { trace_id: req.id }, "admin", "database_record_updated", { table: p.table, id: p.id, fields });
         });
         return { ok: true };
@@ -446,6 +565,8 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             deleted[table] = (await client.query(sql)).rowCount ?? 0;
           };
           await remove("integration_outbox", "DELETE FROM integration_outbox");
+          await remove("transport_capacity_approvals", "DELETE FROM transport_capacity_approvals");
+          await client.query("UPDATE transport_runs SET capacity=10 WHERE status='open'");
           await remove("request_events", "DELETE FROM request_events");
           await remove("request_verifications", "DELETE FROM request_verifications");
           await remove("outbox", "DELETE FROM outbox");
@@ -909,7 +1030,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
         const p = z.object({ date: z.iso.date() }).parse(req.params),
           b = z
             .strictObject({
-              capacity: z.number().int().min(1).max(100),
+              capacity: z.number().int().min(1).max(MAX_TRANSPORT_CAPACITY),
               reason,
             })
             .parse(req.body),
@@ -926,7 +1047,9 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             [p.date],
           );
           const used = await client.query<{ n: number }>(
-            "SELECT count(*)::int n FROM requests WHERE run_date=$1 AND status IN ('coordinated','closed')",
+            `SELECT count(*)::int n FROM requests
+             WHERE (run_date=$1 AND status IN ('coordinated','closed'))
+                OR (proposed_run_date=$1 AND status='awaiting_approval')`,
             [p.date],
           );
           if (used.rows[0]!.n > b.capacity)
@@ -934,6 +1057,11 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           await client.query(
             "UPDATE transport_runs SET capacity=$2 WHERE date=$1",
             [p.date, b.capacity],
+          );
+          await client.query(
+            `UPDATE transport_capacity_approvals SET status='approved',resolved_at=clock_timestamp(),resolved_by=$2
+             WHERE run_date=$1 AND status='pending' AND requested_capacity<=$3`,
+            [p.date, "admin-ui", b.capacity],
           );
           await s.event(
             client,

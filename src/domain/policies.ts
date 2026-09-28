@@ -9,8 +9,10 @@ export const OUTSIDE =
   "תוכנית חיים יחד פועלת בבית שאן וביישובים הסמוכים בלבד. מאחר שאחת מנקודות ההובלה נמצאת מחוץ לאזור הפעילות, לא נוכל לסייע בהובלה הזו.";
 export const PHOTO_THANKS = "תודה, התמונה התקבלה.";
 export const PHOTO_FIRST = "בשמחה. כדי להמשיך, נא לשלוח תמונה של הפריט.";
+export const DEFAULT_TRANSPORT_CAPACITY = 10;
+export const MAX_TRANSPORT_CAPACITY = 100;
 export const GREETING =
-  "שלום, שמחים שפניתם אלינו 😊\nנוכל לעזור בימי שלישי בין השעות 16:00–21:00.\n\nלהמשך התיאום, נא לוודא שהמוסר והמקבל — כל אחד לחוד ובעצמו — ישלחו הודעה עם הפרטים הבאים:\n\n1. שם מלא\n2. תמונה ושם של החפץ\n3. כתובת\n\nכמה הבהרות:\n\n- אנו לא מפרקים ומרכיבים ארונות\n- אנו מעבירים עד 2 רהיטים לאדם\n- הפעילות בהתנדבות\n- אנו מעבירים רק רהיטים שנמסרו ולא נקנו\n- הפעילות מתקיימת בבית שאן ובעמק הקרוב";
+  "שלום, שמחים שפניתם אלינו 😊\nנוכל לעזור בימי שלישי בין השעות 16:00–20:00. ניתן לתאם עד 10 הובלות בכל יום שלישי; מעבר לכך נבקש אישור מנהל לפני תיאום נוסף.\n\nלהמשך התיאום, נא לוודא שהמוסר והמקבל — כל אחד לחוד ובעצמו — ישלחו הודעה עם הפרטים הבאים:\n\n1. שם מלא\n2. תמונה ושם של החפץ\n3. כתובת\n\nכמה הבהרות:\n\n- אנו לא מפרקים ומרכיבים ארונות\n- אנו מעבירים עד 2 רהיטים לאדם\n- הפעילות בהתנדבות\n- אנו מעבירים רק רהיטים שנמסרו ולא נקנו\n- הפעילות מתקיימת בבית שאן ובעמק הקרוב";
 export const HUMAN_REPLY = "העברתי את הפנייה לטיפול אנושי. נעדכן.";
 export const SUKKAH =
   "בשמחה. נא למלא את הטופס הבא, ולאחר מכן יצרו איתכם קשר להמשך:\nhttps://docs.google.com/forms/d/e/1FAIpQLSd-lls8Yp8pstD3M_OsBAV9JK-FbDHHTLatPZbqnGtmhUN1vA/viewform";
@@ -103,7 +105,7 @@ export function directHandoffIntent(t: string): boolean {
   if (!/(?:להעביר|למסור|מעביר|מעבירה|מוסר|מוסרת|ישירות)/.test(text)) return false;
   if (/(?:למסירה|לתרומה|לבית שאן|לעפולה|לתל אביב|לצמח|לקרקע)/.test(text))
     return false;
-  return /(?:להעביר|למסור|מעביר|מעבירה|מוסר|מוסרת).{0,80}\sל[א-ת]{2,}(?:\s+[א-ת]{2,})?(?:\s|$)/.test(text);
+  return /(?:להעביר|למסור|מעביר|מעבירה|מוסר|מוסרת).{0,80}\sל[א-ת]{2,}(?:\s+[א-ת]{2,})?(?=$|[\s,.;!?])/.test(text);
 }
 export function grounded(plan: Plan, text: string): boolean {
   return (
@@ -237,9 +239,9 @@ export function nextQuestion(
     )
   )
     return { text: "האם נדרש פירוק של הפריט לצורך ההובלה?", floorNote: false };
-  if (!p.approved_at || !p.schedule_approved)
+  if (!p.approved_at)
     return {
-      text: `נא לאשר את חלקך ב${p.role === "donor" ? "מסירה" : "קבלה"} בפנייה ${r.number}. ההובלות בימי שלישי בין 16:00–20:00. נעדכן.`,
+      text: `נא לאשר את חלקך ב${p.role === "donor" ? "מסירה" : "קבלה"} בפנייה ${r.number}. אישור חלקך נפרד מאישור מועד ההובלה.`,
       floorNote: false,
     };
   if (!p.settlement)
@@ -258,11 +260,14 @@ export function nextQuestion(
                 ? "תודה. חסר רק השם."
                 : "נא לציין שם וכתובת."
               : "תודה. חסרה רק הכתובת המדויקת.") +
-            (!p.floor_note_shown ? " בבניין עם קומות — לציין קומה." : "")
+            (!p.floor_note_shown && p.floor === null
+              ? " בבניין עם קומות — לציין קומה."
+              : "")
           : !p.name
             ? "נא לציין שם ותיאור כללי של המקום ביישוב, למשל ״בכניסה״ או ״ליד המזכירות״."
             : "תודה. חסר רק תיאור כללי של המקום ביישוב, למשל ״בכניסה״ או ״ליד המזכירות״.",
-      floorNote: p.settlement === "בית שאן" && !p.floor_note_shown,
+      floorNote:
+        p.settlement === "בית שאן" && !p.floor_note_shown && p.floor === null,
     };
   if (!r.parties.some((x) => x.role !== p.role))
     return {
@@ -271,9 +276,20 @@ export function nextQuestion(
         : "נא לשלוח את מספר המוסר או כרטיס איש קשר.",
       floorNote: false,
     };
+  const proposal = r.proposed_run_date;
+  if (proposal && p.schedule_approved_date !== proposal) {
+    const [year, month, day] = proposal.split("-");
+    return {
+      text: `הוצע מועד ההובלה ליום שלישי ${day}/${month}/${year}, בין 16:00–20:00. נא לאשר את המועד במפורש.`,
+      floorNote: false,
+    };
+  }
+  const other = r.parties.find((x) => x.phone !== p.phone);
+  if (proposal && other && other.schedule_approved_date !== proposal)
+    return { text: `אישרת את מועד ההובלה בפנייה ${r.number}. ממתינים לאישור המועד של הצד השני.`, floorNote: false };
   return { text: "הפרטים נשמרו. נעדכן.", floorNote: false };
 }
-export function readyToCoordinate(r: Request): boolean {
+export function readyToProposeSchedule(r: Request): boolean {
   if (
     ![
       "collecting",
@@ -282,19 +298,12 @@ export function readyToCoordinate(r: Request): boolean {
       "waiting_capacity",
     ].includes(r.status) ||
     r.parties.length !== 2 ||
+    (r.origin === "direct" && !r.represents_both_parties && !r.verification_contacted) ||
     itemError(r.items, true)
   )
     return false;
   return (
-    r.parties.every(
-      (p) =>
-        p.approved_at &&
-        p.approved_by === p.phone &&
-        p.schedule_approved &&
-        p.name &&
-        p.settlement &&
-        p.address,
-    ) &&
+    r.parties.every((p) => p.approved_at && p.approved_by === p.phone && p.name && p.settlement && p.address) &&
     r.items.every(
       (i) =>
         i.free === true &&
@@ -307,6 +316,16 @@ export function readyToCoordinate(r: Request): boolean {
           i.needs_disassembly !== null) &&
         i.evacuation !== "different",
     )
+  );
+}
+export function readyToCoordinate(r: Request): boolean {
+  return Boolean(
+    !r.run_date &&
+    r.proposed_run_date &&
+      readyToProposeSchedule(r) &&
+      r.parties.every(
+        (p) => p.approved_at && p.approved_by === p.phone && p.schedule_approved_date === r.proposed_run_date,
+      ),
   );
 }
 export function localDate(now: Date): {
@@ -368,7 +387,14 @@ export function statusText(requests: Request[]): string {
       const verification = (r.verification_states ?? []).map((x) =>
         `${x.role === "donor" ? "מוסר" : "מקבל"}: ${x.state}`,
       ).join(" · ");
-      return `${line}\nמצב: ${labels[r.status] ?? r.status}\nמוסר: ${d?.name ?? "—"} · ${d?.phone ?? "—"}\nאיסוף: ${d?.settlement ?? "—"}, ${d?.address ?? "—"}\nמקבל: ${v?.name ?? "—"} · ${v?.phone ?? "—"}\nיעד: ${v?.settlement ?? "—"}, ${v?.address ?? "—"}\n${locations ? `${locations}\n` : ""}${photos}\nאימות צד שני: ${verification || (r.verification_contacted ? "מצב קודם לא ודאי" : "טרם התבקש")}\nתאריך הובלה: ${r.run_date ?? "טרם נקבע"}\nחלון הובלה: 16:00–20:00${r.status === "coordinated" ? "\nביום ההובלה ניצור קשר טלפוני לפני ההגעה" : ""}${r.human_reason ? `\nסיבת טיפול: ${r.human_reason}` : ""}`;
+      const dateOnly = (value: string | null | undefined) => value?.slice(0, 10) ?? null;
+      const proposedDate = dateOnly(r.proposed_run_date);
+      const schedule = r.run_date
+        ? `תאריך הובלה שאושר: ${r.run_date}`
+        : proposedDate
+          ? `מועד מוצע — ממתין לאישור: ${proposedDate} · ${r.parties.map((party) => `${party.role === "donor" ? "מוסר" : "מקבל"}: ${dateOnly(party.schedule_approved_date) === proposedDate ? "אישר/ה" : "ממתין/ה"}`).join(" · ")}`
+          : "תאריך הובלה: טרם נקבע";
+      return `${line}\nמצב: ${labels[r.status] ?? r.status}\nמוסר: ${d?.name ?? "—"} · ${d?.phone ?? "—"}\nאיסוף: ${d?.settlement ?? "—"}, ${d?.address ?? "—"}\nמקבל: ${v?.name ?? "—"} · ${v?.phone ?? "—"}\nיעד: ${v?.settlement ?? "—"}, ${v?.address ?? "—"}\n${locations ? `${locations}\n` : ""}${photos}\nאימות צד שני: ${verification || (r.verification_contacted ? "מצב קודם לא ודאי" : "טרם התבקש")}\n${schedule}\nחלון הובלה: 16:00–20:00 · בדרך כלל עד ${DEFAULT_TRANSPORT_CAPACITY} הובלות; תוספת דורשת אישור מנהל${r.status === "coordinated" ? "\nביום ההובלה ניצור קשר טלפוני לפני ההגעה" : ""}${r.human_reason ? `\nסיבת טיפול: ${r.human_reason}` : ""}`;
     })
     .join("\n\n");
   const coordinated = requests

@@ -1,0 +1,914 @@
+{
+  "ok": true,
+  "generated_at": "2026-09-28T16:30:18.967Z",
+  "suites": {
+    "unit": {
+      "status": "passed",
+      "tests": [
+        {
+          "name": "negative managed human-escalation text does not request escalation",
+          "status": "passed"
+        },
+        {
+          "name": "שלום bypasses AI, information and donation only on request",
+          "status": "passed"
+        },
+        {
+          "name": "all required status phrasings are read only intents",
+          "status": "passed"
+        },
+        {
+          "name": "approval accepts a clear consent after a self-introduction",
+          "status": "passed"
+        },
+        {
+          "name": "recipient approval keeps location facts supplied in the same message",
+          "status": "passed"
+        },
+        {
+          "name": "date approval is a separate command and must match the current proposal prompt",
+          "status": "passed"
+        },
+        {
+          "name": "explicit approval of the exact shared proposal works without a same-chat proposal turn",
+          "status": "passed"
+        },
+        {
+          "name": "recipient can approve the proposed date after the recipient-specific prompt",
+          "status": "passed"
+        },
+        {
+          "name": "a party may approve the exact active proposal when the proposal was sent in the other chat",
+          "status": "passed"
+        },
+        {
+          "name": "role approval records participation only and cannot approve a proposed date",
+          "status": "passed"
+        },
+        {
+          "name": "an open donation that may help someone is not a direct handoff",
+          "status": "passed"
+        },
+        {
+          "name": "direct handoff does not require disassembly and preserves explicit broken fact",
+          "status": "passed"
+        },
+        {
+          "name": "direct handoff with a comma after the recipient keeps the supplied pickup location",
+          "status": "passed"
+        },
+        {
+          "name": "direct handoff opening stores donor pickup facts and name without a photo",
+          "status": "passed"
+        },
+        {
+          "name": "direct handoff by phone after a correction keeps donor name and pickup facts",
+          "status": "passed"
+        },
+        {
+          "name": "name introduction answer stores the extracted name, not the label text",
+          "status": "passed"
+        },
+        {
+          "name": "natural אני name introduction stores only the person's name",
+          "status": "passed"
+        },
+        {
+          "name": "direct pickup reply extracts street and name from the first location answer",
+          "status": "passed"
+        },
+        {
+          "name": "canonical phones reject LID and malformed identities",
+          "status": "passed"
+        },
+        {
+          "name": "donor without receiver can continue without photo",
+          "status": "passed"
+        },
+        {
+          "name": "direct recipient does not require a photo to coordinate",
+          "status": "passed"
+        },
+        {
+          "name": "מחולה בכניסה enough and never mentions floor, including supplied floor",
+          "status": "passed"
+        },
+        {
+          "name": "Beit Shean floor note shown at most once; never asks באיזו קומה",
+          "status": "passed"
+        },
+        {
+          "name": "Beit Shean does not remind someone to provide a floor already stored",
+          "status": "passed"
+        },
+        {
+          "name": "when a Beit Shean donor supplied a name, ask only for the missing address",
+          "status": "passed"
+        },
+        {
+          "name": "address plus floor never becomes a receiver name or repeats the settlement",
+          "status": "passed"
+        },
+        {
+          "name": "receiver's first settlement message persists a supplied floor",
+          "status": "passed"
+        },
+        {
+          "name": "deterministic flow turns a donation sentence into a request without AI",
+          "status": "passed"
+        },
+        {
+          "name": "general donation preserves opening pickup facts and an explicit condition",
+          "status": "passed"
+        },
+        {
+          "name": "deterministic donation extracts a named recipient",
+          "status": "passed"
+        },
+        {
+          "name": "deterministic donation extracts a recipient written directly after ל",
+          "status": "passed"
+        },
+        {
+          "name": "general request wording with למסירה remains a seek intent",
+          "status": "passed"
+        },
+        {
+          "name": "self transfer extracts pickup and destination independently from one message",
+          "status": "passed"
+        },
+        {
+          "name": "self transfer preserves an explicitly supplied name from the opening turn",
+          "status": "passed"
+        },
+        {
+          "name": "self transfer recognizes להעביר אליי with pickup and destination phrased as אוספים ומביאים",
+          "status": "passed"
+        },
+        {
+          "name": "self transfer inherits settlement only when destination omits it",
+          "status": "passed"
+        },
+        {
+          "name": "direct handoff assigns an address after the named recipient phone to the receiver",
+          "status": "passed"
+        },
+        {
+          "name": "direct handoff without a phone skips condition checks and asks before contact",
+          "status": "passed"
+        },
+        {
+          "name": "named recipient who wants the item bypasses the photo gate",
+          "status": "passed"
+        },
+        {
+          "name": "partial recipient name followed by a VCard asks one confirmation question",
+          "status": "passed"
+        },
+        {
+          "name": "an explicit new donation is not confused with an older open request",
+          "status": "passed"
+        },
+        {
+          "name": "wardrobe rejection occurs after photo; only small whole wardrobe allowed",
+          "status": "passed"
+        },
+        {
+          "name": "fridge has no disassembly question; receiver never asked about disassembly",
+          "status": "passed"
+        },
+        {
+          "name": "two-item limit, table and chairs is one, free and usable are mandatory",
+          "status": "passed"
+        },
+        {
+          "name": "oven subtype mandatory; no inferred readiness from photos",
+          "status": "passed"
+        },
+        {
+          "name": "each party approves their own identity",
+          "status": "passed"
+        },
+        {
+          "name": "coordination requires each party to approve the same proposed Tuesday",
+          "status": "passed"
+        },
+        {
+          "name": "Tuesday window uses Jerusalem timezone and closes at 20:00",
+          "status": "passed"
+        },
+        {
+          "name": "coordinated status includes complete details and every active request",
+          "status": "passed"
+        },
+        {
+          "name": "a proposed date is clearly pending and never presented as coordinated",
+          "status": "passed"
+        },
+        {
+          "name": "transport capacity configuration cannot exceed ten",
+          "status": "passed"
+        },
+        {
+          "name": "coordinated status adds a map-ordered transport recommendation",
+          "status": "passed"
+        },
+        {
+          "name": "tools cannot write status, SQL, actor identity, arbitrary fields or duplicate commands",
+          "status": "passed"
+        },
+        {
+          "name": "WAHA official SHA-512 HMAC fixture, changed bytes rejected",
+          "status": "passed"
+        },
+        {
+          "name": "groups, status, newsletter, outbound and other sessions ignored; malformed rejected",
+          "status": "passed"
+        },
+        {
+          "name": "message.any is accepted and fromMe remains ignored",
+          "status": "passed"
+        },
+        {
+          "name": "contact card supplies name/phone; location is optional and bounded",
+          "status": "passed"
+        },
+        {
+          "name": "contact card accepts WhatsApp grouped TEL fields",
+          "status": "passed"
+        },
+        {
+          "name": "@lid resolution uses configured session API and does not treat LID as phone",
+          "status": "passed"
+        },
+        {
+          "name": "WAHA send explicit invalid chat falls back; timeout and 5xx do not resend",
+          "status": "passed"
+        },
+        {
+          "name": "media is checksummed and durable; traversal and symlink paths rejected",
+          "status": "passed"
+        },
+        {
+          "name": "media SSRF, redirects and oversized downloads are blocked",
+          "status": "passed"
+        },
+        {
+          "name": "required response constants preserved exactly",
+          "status": "passed"
+        }
+      ],
+      "exit_code": 0
+    },
+    "integration": {
+      "status": "passed",
+      "tests": [
+        {
+          "name": "direct handoff with a known recipient accepts implicit donation wording",
+          "status": "passed"
+        },
+        {
+          "name": "direct phone opening persists all donor facts from one corrected message",
+          "status": "passed"
+        },
+        {
+          "name": "migrations are idempotent; legacy schema untouched; relational constraints reject invalid data",
+          "status": "passed"
+        },
+        {
+          "name": "שלום: no request, no AI, exactly one shadow reply and zero channel sends",
+          "status": "passed"
+        },
+        {
+          "name": "donor bed without receiver PHOTO FIRST; prohibited early details never stored",
+          "status": "passed"
+        },
+        {
+          "name": "donor image persists checksum and request link; acknowledgement continues safely",
+          "status": "passed"
+        },
+        {
+          "name": "מחולה בכניסה accepted; supplied floor ignored and stored as ground",
+          "status": "passed"
+        },
+        {
+          "name": "active location dataset resolves approved Beit Shean street aliases",
+          "status": "passed"
+        },
+        {
+          "name": "settlement and street in one message persist both fields",
+          "status": "passed"
+        },
+        {
+          "name": "official Beit Shean snapshot stages and resolves a normalized street before rollback",
+          "status": "passed"
+        },
+        {
+          "name": "clear outside endpoint stops, including mixed AI escalation plan; no admin alert",
+          "status": "passed"
+        },
+        {
+          "name": "a party can correct an outside-area rejection without losing the direct request facts",
+          "status": "passed"
+        },
+        {
+          "name": "unknown/borderline settlement escalates instead of falsely classifying outside",
+          "status": "passed"
+        },
+        {
+          "name": "wardrobe disassembly rejected after image; old ready state cannot survive rejection",
+          "status": "passed"
+        },
+        {
+          "name": "small wardrobe transportable whole is accepted after photo",
+          "status": "passed"
+        },
+        {
+          "name": "fridge suppresses disassembly; more than two items create no request",
+          "status": "passed"
+        },
+        {
+          "name": "requester seeks fridge before details; no matches means no request/details collected",
+          "status": "passed"
+        },
+        {
+          "name": "requester asking for an item למסירה is not routed to the donor photo flow",
+          "status": "passed"
+        },
+        {
+          "name": "match with image: image delivered before interest/receiver details and exclusive claim",
+          "status": "passed"
+        },
+        {
+          "name": "match without photo requests it from donor; multiple waiting receivers survive",
+          "status": "passed"
+        },
+        {
+          "name": "donor and receiver approvals are separate and repeat approval preserves timestamp",
+          "status": "passed"
+        },
+        {
+          "name": "both parties must explicitly approve the same proposed Tuesday before coordination",
+          "status": "passed"
+        },
+        {
+          "name": "natural schedule approval accepts a database timestamp and preserves the other party approval",
+          "status": "passed"
+        },
+        {
+          "name": "explicit shared-date approval from the other party chat coordinates without repeating the proposal",
+          "status": "passed"
+        },
+        {
+          "name": "direct donation skips the generic condition question",
+          "status": "passed"
+        },
+        {
+          "name": "natural direct wording with a phone after the recipient skips photo and condition",
+          "status": "passed"
+        },
+        {
+          "name": "natural direct wording preserves the named recipient with the phone",
+          "status": "passed"
+        },
+        {
+          "name": "direct recipient verification repeats supplied destination details and asks only for approval",
+          "status": "passed"
+        },
+        {
+          "name": "donor cannot overwrite receiver destination after the direct request creation message",
+          "status": "passed"
+        },
+        {
+          "name": "a contact candidate can convert an open donation before the photo gate",
+          "status": "passed"
+        },
+        {
+          "name": "a plain admin yes remains part of the active conversation when no capacity approval is pending",
+          "status": "passed"
+        },
+        {
+          "name": "direct handoff keeps supplied pickup and extracts a later labeled donor name",
+          "status": "passed"
+        },
+        {
+          "name": "cancellation notifies the other party and supports final close",
+          "status": "passed"
+        },
+        {
+          "name": "adding a named recipient later also skips the condition question",
+          "status": "passed"
+        },
+        {
+          "name": "counterparty notice is formatted after commit before it becomes sendable",
+          "status": "passed"
+        },
+        {
+          "name": "five independent donation and receive route passes remain isolated",
+          "status": "passed"
+        },
+        {
+          "name": "four canonical flows pass five isolated simulations each",
+          "status": "passed"
+        },
+        {
+          "name": "self transfer persists distinct pickup and destination from the opening message",
+          "status": "passed"
+        },
+        {
+          "name": "self transfer to אליי treats the sender as both parties without requiring a phone in the text",
+          "status": "passed"
+        },
+        {
+          "name": "receiver cannot alter donor item facts; attempted forbidden change escalates durably",
+          "status": "passed"
+        },
+        {
+          "name": "duplicate webhook has one durable inbox and one business effect; completion retry is harmless",
+          "status": "passed"
+        },
+        {
+          "name": "outbox receipt projection is monotonic and distinguishes acceptance from delivery",
+          "status": "passed"
+        },
+        {
+          "name": "integration events are enqueued durably with an idempotency row",
+          "status": "passed"
+        },
+        {
+          "name": "two quick messages preserve receipt order even when processing is invoked backwards",
+          "status": "passed"
+        },
+        {
+          "name": "quiet-window admission durably links every message in one turn",
+          "status": "passed"
+        },
+        {
+          "name": "a newer message supersedes an in-flight AI turn without an old reply",
+          "status": "passed"
+        },
+        {
+          "name": "core donation starts with PHOTO-FIRST without calling the AI planner",
+          "status": "passed"
+        },
+        {
+          "name": "repeated donation does not silently open a duplicate request",
+          "status": "passed"
+        },
+        {
+          "name": "an existing open donation can be redirected to a named recipient",
+          "status": "passed"
+        },
+        {
+          "name": "receiver details wait for the counterparty created by the same AI plan",
+          "status": "passed"
+        },
+        {
+          "name": "duplicate clarification reloads the latest request and preserves the other party approval",
+          "status": "passed"
+        },
+        {
+          "name": "atomic business commit rolls back if enqueue fails, then retries without duplicate request",
+          "status": "passed"
+        },
+        {
+          "name": "pg-boss retries retain FIFO blocker and release it only after predecessor completes",
+          "status": "passed"
+        },
+        {
+          "name": "ambiguous WAHA failure is never blindly resent; shadow work never flushes into live",
+          "status": "passed"
+        },
+        {
+          "name": "human escalation includes required context; follow-up does not resume the bot",
+          "status": "passed"
+        },
+        {
+          "name": "status is read only; multiple active requests; coordinated request plus new request",
+          "status": "passed"
+        },
+        {
+          "name": "admin \\#פניות לחיים יחד lists every request read-only without AI",
+          "status": "passed"
+        },
+        {
+          "name": "Tuesday capacity is enforced and same-day requires explicit admin approval",
+          "status": "passed"
+        },
+        {
+          "name": "admin can explicitly extend a Tuesday run beyond the default capacity of ten",
+          "status": "passed"
+        },
+        {
+          "name": "only the configured admin can approve one extra transport on WhatsApp",
+          "status": "passed"
+        },
+        {
+          "name": "coordinated arrangements stop at ten and request admin approval before another proposal",
+          "status": "passed"
+        },
+        {
+          "name": "group, malformed webhook and admin authentication boundaries",
+          "status": "passed"
+        },
+        {
+          "name": "admin retains direct status and run-date editing with auditable scheduling validation",
+          "status": "passed"
+        },
+        {
+          "name": "@lid and canonical chat resolve into one contact and ordered conversation",
+          "status": "passed"
+        },
+        {
+          "name": "OpenAI timeout retries once then durable human escalation, never invented success",
+          "status": "passed"
+        },
+        {
+          "name": "duplicate OpenAI/tool execution uses one persisted plan and one command result",
+          "status": "passed"
+        },
+        {
+          "name": "native PostgreSQL: concurrent Tuesday booking transactions cannot oversubscribe",
+          "status": "passed"
+        },
+        {
+          "name": "native PostgreSQL: SIGKILL worker lease recovers and successor stays blocked",
+          "status": "passed"
+        },
+        {
+          "name": "admin clear-all requires the exact destructive confirmation and resets test data only",
+          "status": "passed"
+        }
+      ],
+      "exit_code": 0
+    }
+  },
+  "regressions": [
+    {
+      "id": "REG-001",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "integration",
+          "id": "integration:both parties must explicitly approve the same proposed Tuesday before coordination",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-002",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "integration",
+          "id": "integration:direct recipient verification repeats supplied destination details and asks only for approval",
+          "status": "passed"
+        },
+        {
+          "kind": "unit",
+          "id": "unit:recipient approval keeps location facts supplied in the same message",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-003",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "unit",
+          "id": "unit:direct recipient does not require a photo to coordinate",
+          "status": "passed"
+        },
+        {
+          "kind": "integration",
+          "id": "integration:natural direct wording with a phone after the recipient skips photo and condition",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-004",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "unit",
+          "id": "unit:general donation preserves opening pickup facts and an explicit condition",
+          "status": "passed"
+        },
+        {
+          "kind": "integration",
+          "id": "integration:core donation starts with PHOTO-FIRST without calling the AI planner",
+          "status": "passed"
+        },
+        {
+          "kind": "integration",
+          "id": "integration:donor image persists checksum and request link; acknowledgement continues safely",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-005",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "unit",
+          "id": "unit:self transfer extracts pickup and destination independently from one message",
+          "status": "passed"
+        },
+        {
+          "kind": "integration",
+          "id": "integration:self transfer persists distinct pickup and destination from the opening message",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-006",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "integration",
+          "id": "integration:direct phone opening persists all donor facts from one corrected message",
+          "status": "passed"
+        },
+        {
+          "kind": "unit",
+          "id": "unit:direct handoff opening stores donor pickup facts and name without a photo",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-007",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "integration",
+          "id": "integration:a plain admin yes remains part of the active conversation when no capacity approval is pending",
+          "status": "passed"
+        },
+        {
+          "kind": "integration",
+          "id": "integration:only the configured admin can approve one extra transport on WhatsApp",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-008",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "unit",
+          "id": "unit:tools cannot write status, SQL, actor identity, arbitrary fields or duplicate commands",
+          "status": "passed"
+        },
+        {
+          "kind": "integration",
+          "id": "integration:receiver cannot alter donor item facts; attempted forbidden change escalates durably",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-009",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "unit",
+          "id": "unit:general request wording with למסירה remains a seek intent",
+          "status": "passed"
+        },
+        {
+          "kind": "integration",
+          "id": "integration:requester asking for an item למסירה is not routed to the donor photo flow",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-010",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "unit",
+          "id": "unit:WAHA send explicit invalid chat falls back; timeout and 5xx do not resend",
+          "status": "passed"
+        },
+        {
+          "kind": "integration",
+          "id": "integration:ambiguous WAHA failure is never blindly resent; shadow work never flushes into live",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-011",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "command",
+          "id": "command:check-prompt-wiring",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-012",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "unit",
+          "id": "unit:contact card supplies name/phone; location is optional and bounded",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-013",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "unit",
+          "id": "unit:self transfer preserves an explicitly supplied name from the opening turn",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-014",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "unit",
+          "id": "unit:self transfer recognizes להעביר אליי with pickup and destination phrased as אוספים ומביאים",
+          "status": "passed"
+        },
+        {
+          "kind": "integration",
+          "id": "integration:self transfer to אליי treats the sender as both parties without requiring a phone in the text",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-015",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "integration",
+          "id": "integration:self transfer to אליי treats the sender as both parties without requiring a phone in the text",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-016",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "unit",
+          "id": "unit:negative managed human-escalation text does not request escalation",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-017",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "unit",
+          "id": "unit:media is checksummed and durable; traversal and symlink paths rejected",
+          "status": "passed"
+        },
+        {
+          "kind": "integration",
+          "id": "integration:donor image persists checksum and request link; acknowledgement continues safely",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-018",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "integration",
+          "id": "integration:an existing open donation can be redirected to a named recipient",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-019",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "integration",
+          "id": "integration:natural direct wording with a phone after the recipient skips photo and condition",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-020",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "unit",
+          "id": "unit:recipient can approve the proposed date after the recipient-specific prompt",
+          "status": "passed"
+        },
+        {
+          "kind": "integration",
+          "id": "integration:natural schedule approval accepts a database timestamp and preserves the other party approval",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-021",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "unit",
+          "id": "unit:a party may approve the exact active proposal when the proposal was sent in the other chat",
+          "status": "passed"
+        },
+        {
+          "kind": "integration",
+          "id": "integration:explicit shared-date approval from the other party chat coordinates without repeating the proposal",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-022",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "integration",
+          "id": "integration:repeated donation does not silently open a duplicate request",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-023",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "integration",
+          "id": "integration:coordinated arrangements stop at ten and request admin approval before another proposal",
+          "status": "passed"
+        },
+        {
+          "kind": "integration",
+          "id": "integration:admin can explicitly extend a Tuesday run beyond the default capacity of ten",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-024",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "unit",
+          "id": "unit:Beit Shean does not remind someone to provide a floor already stored",
+          "status": "passed"
+        },
+        {
+          "kind": "unit",
+          "id": "unit:when a Beit Shean donor supplied a name, ask only for the missing address",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-025",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "integration",
+          "id": "integration:donor bed without receiver PHOTO FIRST; prohibited early details never stored",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "REG-026",
+      "status": "PASS",
+      "tests": [
+        {
+          "kind": "integration",
+          "id": "integration:direct handoff with a known recipient accepts implicit donation wording",
+          "status": "passed"
+        }
+      ]
+    }
+  ]
+}

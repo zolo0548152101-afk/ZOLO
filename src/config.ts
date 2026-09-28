@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { canonicalPhone } from "./domain/policies.js";
+import { canonicalPhone, DEFAULT_TRANSPORT_CAPACITY } from "./domain/policies.js";
 const flag = z.enum(["true", "false"]).transform((v) => v === "true");
 const schemas = z.enum([
   "haim_core",
@@ -63,7 +63,12 @@ const envSchema = z.object({
     .max(120000)
     .default(45000),
   OPENAI_TRANSCRIBE_MODEL: z.string().default("gpt-4o-mini-transcribe"),
-  TRANSPORT_CAPACITY: z.coerce.number().int().min(1).max(100).default(10),
+  TRANSPORT_CAPACITY: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(DEFAULT_TRANSPORT_CAPACITY)
+    .default(DEFAULT_TRANSPORT_CAPACITY),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
   ENABLE_SIMULATE: flag.default(true),
   LIVE_ALLOWLIST: z.string().default(""),

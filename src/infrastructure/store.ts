@@ -17,6 +17,8 @@ import {
 import {
   ACTIVE,
   canonicalPhone,
+  DEFAULT_TRANSPORT_CAPACITY,
+  MAX_TRANSPORT_CAPACITY,
   norm,
   nextTuesday,
   readyToCoordinate,
@@ -144,12 +146,12 @@ export class Store {
     const base = await c.query<
       Omit<Request, "parties" | "items" | "photo_ids">
     >(
-      `SELECT id,number::int,version,status,origin,verification_contacted,run_date::text,earliest_run_date::text,preferred_time,represents_both_parties,closed_at::text,human_reason,created_at::text FROM requests WHERE id=$1 ${lock ? "FOR UPDATE" : ""}`,
+      `SELECT id,number::int,version,status,origin,verification_contacted,run_date::text,proposed_run_date::text,earliest_run_date::text,preferred_time,represents_both_parties,closed_at::text,human_reason,created_at::text FROM requests WHERE id=$1 ${lock ? "FOR UPDATE" : ""}`,
       [id],
     );
     if (!base.rows[0]) throw new AppError("request_not_found", 404);
     const parties = await c.query<Party>(
-      `SELECT p.role,co.phone,p.name,p.settlement,p.address,p.floor,p.floor_note_shown,p.approved_at::text,ap.phone AS approved_by,p.schedule_approved FROM request_parties p JOIN contacts co ON co.id=p.contact_id LEFT JOIN contacts ap ON ap.id=p.approved_by WHERE p.request_id=$1 ORDER BY role`,
+      `SELECT p.role,co.phone,p.name,p.settlement,p.address,p.floor,p.floor_note_shown,p.approved_at::text,ap.phone AS approved_by,(p.schedule_approved_date::date=COALESCE(r.proposed_run_date,r.run_date)::date AND p.schedule_approved_date IS NOT NULL) AS schedule_approved,p.schedule_approved_date::text,p.schedule_approved_at::text FROM request_parties p JOIN requests r ON r.id=p.request_id JOIN contacts co ON co.id=p.contact_id LEFT JOIN contacts ap ON ap.id=p.approved_by WHERE p.request_id=$1 ORDER BY role`,
       [id],
     );
     const items = await c.query<Item>(
@@ -275,11 +277,41 @@ export class Store {
         role: "assistant",
         content: latest.rows[0].text.slice(0, 2000),
       });
+    const reset = await c.query<{ reset_at: string | null }>(
+      "SELECT reset_at::text FROM conversation_resets WHERE conversation_id=$1",
+      [conv.rows[0].id],
+    );
+    const resetAt = reset.rows[0]?.reset_at ?? null;
+    const requests = (await this.active(message.phone, c)).filter(
+      (r) => !resetAt || r.created_at > resetAt,
+    );
+    const messageText = (message.transcript ?? message.text).trim();
+    if (/(?:טעיתי|תיקון|בעצם|התכוונתי)/.test(messageText)) {
+      const correction = await c.query<{ id: string }>(
+        `SELECT DISTINCT r.id,r.number
+         FROM requests r
+         JOIN request_parties p ON p.request_id=r.id
+         JOIN contacts co ON co.id=p.contact_id
+         WHERE co.phone=$1 AND r.status='rejected'
+           AND ($2::timestamptz IS NULL OR r.created_at>$2)
+           AND EXISTS(
+             SELECT 1 FROM request_events e
+             WHERE e.request_id=r.id AND e.event_type='outside_area_rejected'
+           )
+         ORDER BY r.number DESC LIMIT 2`,
+        [message.phone, resetAt],
+      );
+      if (correction.rows.length === 1)
+        requests.push(await this.request(correction.rows[0]!.id, c));
+    }
+    const candidates = (await this.candidates(message.phone, c)).filter(
+      (candidate) => !resetAt || candidate.request.created_at > resetAt,
+    );
     return {
       message,
       conversation: conv.rows[0],
-      requests: await this.active(message.phone, c),
-      candidates: await this.candidates(message.phone, c),
+      requests,
+      candidates,
       history,
     };
   }
@@ -308,6 +340,7 @@ export class Store {
       parties,
       photo_ids: [],
       run_date: null,
+      proposed_run_date: null,
       earliest_run_date: null,
       preferred_time: null,
       represents_both_parties: false,
@@ -324,7 +357,7 @@ export class Store {
   }
   async save(c: pg.PoolClient, r: Request): Promise<void> {
     const result = await c.query(
-      `UPDATE requests SET version=version+1,status=$2,origin=$3,run_date=$4,human_reason=$5,preferred_time=$7,earliest_run_date=$8,verification_contacted=$9,represents_both_parties=$10,closed_at=$11,updated_at=clock_timestamp() WHERE id=$1 AND version=$6`,
+      `UPDATE requests SET version=version+1,status=$2,origin=$3,run_date=$4,proposed_run_date=$12,human_reason=$5,preferred_time=$7,earliest_run_date=$8,verification_contacted=$9,represents_both_parties=$10,closed_at=$11,updated_at=clock_timestamp() WHERE id=$1 AND version=$6`,
       [
         r.id,
         r.status,
@@ -337,6 +370,7 @@ export class Store {
         r.verification_contacted,
         r.represents_both_parties ?? false,
         r.closed_at,
+        r.proposed_run_date,
       ],
     );
     if (result.rowCount !== 1) throw new AppError("version_conflict", 409);
@@ -344,8 +378,8 @@ export class Store {
     for (const p of r.parties) {
       const id = await this.contact(c, p.phone);
       await c.query(
-        `INSERT INTO request_parties(request_id,role,contact_id,name,settlement,address,floor,floor_note_shown,approved_at,approved_by,schedule_approved) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-        ON CONFLICT(request_id,role) DO UPDATE SET contact_id=EXCLUDED.contact_id,name=EXCLUDED.name,settlement=EXCLUDED.settlement,address=EXCLUDED.address,floor=EXCLUDED.floor,floor_note_shown=EXCLUDED.floor_note_shown,approved_at=EXCLUDED.approved_at,approved_by=EXCLUDED.approved_by,schedule_approved=EXCLUDED.schedule_approved`,
+        `INSERT INTO request_parties(request_id,role,contact_id,name,settlement,address,floor,floor_note_shown,approved_at,approved_by,schedule_approved,schedule_approved_date,schedule_approved_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        ON CONFLICT(request_id,role) DO UPDATE SET contact_id=EXCLUDED.contact_id,name=EXCLUDED.name,settlement=EXCLUDED.settlement,address=EXCLUDED.address,floor=EXCLUDED.floor,approved_at=EXCLUDED.approved_at,approved_by=EXCLUDED.approved_by,schedule_approved=EXCLUDED.schedule_approved,schedule_approved_date=EXCLUDED.schedule_approved_date,schedule_approved_at=EXCLUDED.schedule_approved_at`,
         [
           r.id,
           p.role,
@@ -357,7 +391,14 @@ export class Store {
           p.floor_note_shown,
           p.approved_at,
           p.approved_by ? id : null,
-          p.schedule_approved,
+          Boolean(
+            (r.proposed_run_date ?? r.run_date) &&
+              p.schedule_approved_date &&
+              p.schedule_approved_date.slice(0, 10) ===
+                (r.proposed_run_date ?? r.run_date)?.slice(0, 10),
+          ),
+          p.schedule_approved_date,
+          p.schedule_approved_at,
         ],
       );
     }
@@ -379,6 +420,88 @@ export class Store {
           v.evacuation,
         ],
       );
+  }
+  async prepareTransportRun(c: pg.PoolClient, date: string): Promise<void> {
+    await c.query(
+      "INSERT INTO transport_runs(date,capacity) VALUES($1,$2) ON CONFLICT(date) DO NOTHING",
+      [date, Math.min(this.config.TRANSPORT_CAPACITY, DEFAULT_TRANSPORT_CAPACITY)],
+    );
+  }
+  private async askForCapacityApproval(
+    c: pg.PoolClient,
+    r: Request,
+    date: string,
+    capacity: number,
+  ): Promise<"pending" | "denied" | "limit"> {
+    if (capacity >= MAX_TRANSPORT_CAPACITY) return "limit";
+    const inserted = await c.query<{ id: string; status: string }>(
+      `INSERT INTO transport_capacity_approvals(run_date,requested_capacity,request_id)
+       VALUES($1,$2,$3) ON CONFLICT(run_date,requested_capacity) DO NOTHING
+       RETURNING id,status`,
+      [date, capacity + 1, r.id],
+    );
+    const approval = inserted.rows[0] ?? (await c.query<{ id: string; status: string }>(
+      "SELECT id,status FROM transport_capacity_approvals WHERE run_date=$1 AND requested_capacity=$2",
+      [date, capacity + 1],
+    )).rows[0];
+    if (!approval) throw new AppError("capacity_approval_not_persisted", 500);
+    if (approval.status === "denied") return "denied";
+    if (inserted.rows[0]) {
+      const [year, month, day] = date.split("-");
+      const trace_id = randomUUID();
+      const text = `הגענו ל־${capacity} הובלות מאושרות ביום שלישי ${day}/${month}/${year}. האם לאשר הובלה נוספת אחת (מכסה ${capacity + 1})?\nהשב/י: כן ${date} או לא ${date}. עד לאישור, לא נציע ולא נתאם הובלות נוספות ליום זה.`;
+      await this.outbound(
+        c,
+        { trace_id, mode: this.config.BOT_MODE, phone: this.config.ADMIN_PHONE },
+        { phone: this.config.ADMIN_PHONE, text },
+        `capacity-approval:${approval.id}`,
+        r.id,
+      );
+      await this.event(c, { trace_id }, "system", "capacity_approval_requested", {
+        date,
+        current_capacity: capacity,
+        requested_capacity: capacity + 1,
+        approval_id: approval.id,
+      }, r.id);
+    }
+    return "pending";
+  }
+  async proposeScheduleDate(
+    c: pg.PoolClient,
+    r: Request,
+    now: Date,
+  ): Promise<string | null> {
+    const first = nextTuesday(now).date;
+    let date = first;
+    if (r.earliest_run_date && r.earliest_run_date > date)
+      date = r.earliest_run_date;
+    const start = new Date(`${date}T12:00:00Z`);
+    const day = (2 - start.getUTCDay() + 7) % 7;
+    start.setUTCDate(start.getUTCDate() + day);
+    date = start.toISOString().slice(0, 10);
+
+    await this.prepareTransportRun(c, date);
+    const run = await c.query<{ capacity: number; status: string }>(
+      "SELECT capacity,status FROM transport_runs WHERE date=$1 FOR UPDATE",
+      [date],
+    );
+    const used = await c.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM requests WHERE run_date=$1 AND status IN ('coordinated','closed')",
+      [date],
+    );
+    if (run.rows[0]?.status !== "open" || (date === first && nextTuesday(now).sameDay))
+      return null;
+    const proposed = await c.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM requests WHERE proposed_run_date=$1 AND status='awaiting_approval'",
+      [date],
+    );
+    if (used.rows[0]!.n >= run.rows[0]!.capacity) {
+      await this.askForCapacityApproval(c, r, date, run.rows[0]!.capacity);
+      return null;
+    }
+    if (used.rows[0]!.n + proposed.rows[0]!.n >= run.rows[0]!.capacity)
+      return null;
+    return date;
   }
   async region(
     c: DB,
@@ -561,7 +684,7 @@ export class Store {
     r: Request,
     now: Date,
     adminSameDay = false,
-  ): Promise<"not_ready" | "same_day" | "full" | "coordinated"> {
+  ): Promise<"not_ready" | "same_day" | "full" | "capacity_denied" | "coordinated"> {
     if (!readyToCoordinate(r)) return "not_ready";
     for (const p of r.parties) {
       const location = await c.query<{ decision: string }>(
@@ -570,33 +693,71 @@ export class Store {
       );
       if (location.rows[0]?.decision !== "allowed") return "not_ready";
     }
-    const target = nextTuesday(now);
-    if (r.earliest_run_date && r.earliest_run_date > target.date) {
-      target.date = r.earliest_run_date;
-      target.sameDay = false;
-    }
-    if (target.sameDay && !adminSameDay) return "same_day";
-    await c.query(
-      "INSERT INTO transport_runs(date,capacity) VALUES($1,$2) ON CONFLICT DO NOTHING",
-      [target.date, this.config.TRANSPORT_CAPACITY],
-    );
+    const date = r.proposed_run_date;
+    if (!date) return "not_ready";
+    const today = nextTuesday(now);
+    if (today.sameDay && today.date === date && !adminSameDay) return "same_day";
+    await this.prepareTransportRun(c, date);
     const run = await c.query<{ capacity: number; status: string }>(
       "SELECT capacity,status FROM transport_runs WHERE date=$1 FOR UPDATE",
-      [target.date],
+      [date],
     );
     const used = await c.query<{ n: number }>(
       "SELECT count(*)::int AS n FROM requests WHERE run_date=$1 AND status IN ('coordinated','closed')",
-      [target.date],
+      [date],
     );
-    if (
-      run.rows[0]!.status !== "open" ||
-      used.rows[0]!.n >= run.rows[0]!.capacity
-    ) {
+    if (run.rows[0]!.status !== "open") {
       r.status = "waiting_capacity";
       return "full";
     }
+    if (used.rows[0]!.n >= run.rows[0]!.capacity) {
+      r.status = "waiting_capacity";
+      const approval = await this.askForCapacityApproval(c, r, date, run.rows[0]!.capacity);
+      return approval === "denied" ? "capacity_denied" : "full";
+    }
     r.status = "coordinated";
-    r.run_date = target.date;
+    r.run_date = date;
+    r.proposed_run_date = null;
     return "coordinated";
+  }
+  async resolveCapacityApproval(
+    c: pg.PoolClient,
+    date: string | null,
+    approved: boolean,
+    adminPhone: string,
+  ): Promise<"approved" | "denied" | "none" | "ambiguous"> {
+    if (canonicalPhone(adminPhone) !== this.config.ADMIN_PHONE)
+      throw new AppError("admin_required", 403);
+    const pending = await c.query<{ id: string; run_date: string; requested_capacity: number }>(
+      `SELECT id,run_date::text,requested_capacity FROM transport_capacity_approvals
+       WHERE status='pending' AND ($1::date IS NULL OR run_date=$1)
+       ORDER BY requested_at FOR UPDATE`,
+      [date],
+    );
+    if (!pending.rows.length) return "none";
+    if (pending.rows.length !== 1) return "ambiguous";
+    const row = pending.rows[0]!;
+    if (approved) {
+      await c.query("SELECT date FROM transport_runs WHERE date=$1 FOR UPDATE", [row.run_date]);
+      const run = await c.query<{ status: string }>(
+        "SELECT status FROM transport_runs WHERE date=$1",
+        [row.run_date],
+      );
+      if (run.rows[0]?.status !== "open") throw new AppError("transport_run_closed", 409);
+      if (row.requested_capacity > MAX_TRANSPORT_CAPACITY)
+        throw new AppError("transport_capacity_limit", 409);
+      await c.query("UPDATE transport_runs SET capacity=$2 WHERE date=$1", [row.run_date, row.requested_capacity]);
+    }
+    await c.query(
+      "UPDATE transport_capacity_approvals SET status=$2,resolved_at=clock_timestamp(),resolved_by=$3 WHERE id=$1",
+      [row.id, approved ? "approved" : "denied", this.config.ADMIN_PHONE],
+    );
+    await this.event(c, { trace_id: randomUUID() }, "admin", approved ? "capacity_approval_granted" : "capacity_approval_denied", {
+      date: row.run_date,
+      requested_capacity: row.requested_capacity,
+      approval_id: row.id,
+      admin_phone: this.config.ADMIN_PHONE,
+    }, null);
+    return approved ? "approved" : "denied";
   }
 }

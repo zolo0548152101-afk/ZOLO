@@ -12,6 +12,8 @@
     "migrate": "node dist/db/migrate-cli.js",
     "test": "tsc -p tsconfig.tests.json && node --test dist-tests/tests/unit.test.js",
     "test:integration": "tsc -p tsconfig.tests.json && node --test --test-concurrency=1 dist-tests/tests/integration.test.js",
+    "test:regressions": "node scripts/test-regressions.mjs",
+    "test:golden": "node scripts/golden-e2e.mjs",
     "test:ai": "node scripts/ai-eval.mjs",
     "check:spec": "node scripts/validate-spec.mjs",
     "check:probes": "node scripts/audit-offline-probes.mjs",

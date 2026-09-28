@@ -33,6 +33,7 @@ export const commandSchema = z.discriminatedUnion("type", [
     type: z.literal("donate"),
     items: z.array(itemInput).min(1).max(20),
     counterparty_phone: str,
+    counterparty_name: str.optional(),
     direct: z.boolean().optional(),
     free: fact,
     working: fact,
@@ -74,6 +75,11 @@ export const commandSchema = z.discriminatedUnion("type", [
     name: str,
   }),
   z.strictObject({ type: z.literal("approve_self"), request_number: ref }),
+  z.strictObject({
+    type: z.literal("approve_schedule"),
+    request_number: ref,
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  }),
   z.strictObject({
     type: z.literal("select"),
     request_number: z.number().int().positive(),
@@ -173,6 +179,8 @@ export interface Party {
   approved_at: string | null;
   approved_by: string | null;
   schedule_approved: boolean;
+  schedule_approved_date: string | null;
+  schedule_approved_at: string | null;
 }
 export interface RequestLocation {
   role: Role;
@@ -197,6 +205,7 @@ export interface Request {
   locations?: RequestLocation[];
   verification_states?: VerificationState[];
   run_date: string | null;
+  proposed_run_date: string | null;
   earliest_run_date: string | null;
   preferred_time?: string | null;
   represents_both_parties?: boolean;

@@ -30,6 +30,7 @@ const no = (text: string): boolean =>
 function kindAndDescription(text: string): { kind: ItemKind; description: string } | null {
   const match: [RegExp, ItemKind, string][] = [
     [/מיטה/i, "bed", "מיטה"],
+    [/שידה/i, "other", "שידה"],
     [/ספה|כורס/i, "sofa", "ספה"],
     [/ארון/i, "wardrobe", "ארון"],
     [/מקרר/i, "fridge", "מקרר"],
@@ -68,20 +69,156 @@ function addressWithSettlement(text: string): string | null {
   return match?.[1]?.trim() ?? null;
 }
 
+function explicitName(text: string): string | null {
+  const normalized = norm(text);
+  const match = normalized.match(
+    /(?:^|[,;.!?]\s*)(?:השם(?:\s+הוא)?|שמי|קוראים\s+לי)\s+([א-ת][א-ת׳״'’\-]*(?:\s+[א-ת][א-ת׳״'’\-]*){0,2})(?=\s*(?:[,;.!?]|$))/u,
+  );
+  if (match?.[1]) return match[1].trim();
+  const introduction = normalized.match(
+    /(?:^|[.!?]\s*)אני\s+([א-ת][א-ת׳״'’\-]*(?:\s+[א-ת][א-ת׳״'’\-]*)?)(?=\s*(?:[,;.!?]|$))/u,
+  );
+  if (!introduction?.[1]) return null;
+  const name = introduction[1].trim();
+  return /^(?:רוצה|צריך|צריכה|מוסר|מוסרת|מעביר|מעבירה|מחפש|מחפשת|מבקש|מבקשת)(?:\s|$)/.test(name)
+    ? null
+    : name;
+}
+
 function addressAndName(text: string): { address: string; name: string | null } | null {
-  const parts = norm(text)
+  const normalized = norm(text);
+  const pickupContext = /^(?:לגבי\s+)?(?:האיסוף|כתובת\s+האיסוף)\s*[:,-]?\s*/u.test(normalized);
+  const locationText = normalized.replace(
+    /^(?:לגבי\s+)?(?:האיסוף|כתובת\s+האיסוף)\s*[:,-]?\s*/u,
+    "",
+  );
+  const parts = locationText
     .replace(/בית\s*[-־]?\s*שאן/g, "")
     .split(/[,;]/)
     .map((part) => part.trim())
     .filter(Boolean);
-  if (
-    parts.length < 1 ||
-    !/^(?:רחוב|שכונת|שכונה|שיכון|שדרות|שד[׳']?)(?:\s|$)/.test(parts[0]!)
-  )
-    return null;
-  const address = parts[0]!;
-  const name = parts.slice(1).join(" ").trim() || null;
+  if (parts.length < 1) return null;
+  const markedStreet = /^(?:רחוב|שכונת|שכונה|שיכון|שדרות|שד[׳']?)(?:\s|$)/u.test(parts[0]!);
+  const unmarkedPickupStreet = pickupContext
+    ? parts[0]!.match(/^([א-ת][א-ת׳״'’\-]*(?:\s+[א-ת][א-ת׳״'’\-]*){1,4})\s+(\d+[א-ת]?(?:\/\d+)?)$/u)
+    : null;
+  if (!markedStreet && !unmarkedPickupStreet) return null;
+  const address = markedStreet
+    ? parts[0]!
+    : `רחוב ${unmarkedPickupStreet![1]} ${unmarkedPickupStreet![2]}`;
+  // A floor supplied after the address is a location field, never a person's
+  // name. This matters when a recipient answers in a second message such as
+  // "בית שאן, רחוב המלך 5, קומה 2".
+  const name =
+    explicitName(locationText) ??
+    (parts
+      .slice(1)
+      .filter((part) => !/^קומה\s*-?\d+\.?$/u.test(part))
+      .join(" ")
+      .trim() || null);
   return { address, name };
+}
+
+function selfTransferName(text: string, markerIndex: number): string | null {
+  const prefix = text.slice(0, markerIndex).trim();
+  const match = prefix.match(
+    /(?:^|[,.،]\s*)אני\s+([א-ת][א-ת׳״'’.-]*?(?:\s+[א-ת][א-ת׳״'’.-]*?){0,3})(?=\s*(?:[,،]|וישלי|(?<!ו)ישלי|ויש\s+לי|(?<!ו)יש\s+לי|צריך|צריכה|רוצה|מבקש|מבקשת|מתכוון|מתכוונת))/u,
+  );
+  return match?.[1]?.trim() ?? null;
+}
+
+function selfTransferDetails(text: string): Command[] | null {
+  const self = text.match(/(?:מעביר|מעבירה|להעביר|רוצה להעביר)\s+(?:לעצמי|אליי)/u);
+  if (!self) return null;
+  const name = selfTransferName(text, self.index!);
+  const tail = text.slice(self.index! + self[0].length);
+  const pickupDropoff = tail.match(
+    /אוספים\s+מ(?<origin>.+?)(?:,\s*)?ו?מביאים\s+ל(?<destination>.+?)(?=[.!?]|$)/u,
+  );
+  const start = tail.search(/מ(?=(?:בית\s*[-־]?\s*שאן|רחוב|שיכון|שכונה|שדרות|שד[׳']?))/u);
+  const originStart = start + 1;
+  const destinationMatch = start < 0
+    ? null
+    : tail.slice(originStart).match(/\s+ל(?=(?:בית\s*[-־]?\s*שאן|רחוב|שיכון|שכונה|שדרות|שד[׳']?))/u);
+  const originText = pickupDropoff?.groups?.origin?.trim()
+    ?? (destinationMatch?.index === undefined ? null : tail.slice(originStart, originStart + destinationMatch.index).trim());
+  const destinationText = pickupDropoff?.groups?.destination?.trim()
+    ?? (destinationMatch?.index === undefined ? null : tail.slice(originStart + destinationMatch.index + destinationMatch[0].length).trim());
+  if (!originText || !destinationText) return null;
+  const place = (value: string) => {
+    const settlement = beitShean(value);
+    const addressMatch = value.match(/(?:רחוב|שיכון|שכונה|שכונת|שדרות|שד[׳']?)\s+[^,.;?]+/u);
+    const address = addressMatch?.[0]
+      ?.replace(/\s+ב?בית\s*[-־]?\s*שאן.*$/u, "")
+      .replace(/\s+(?:קומה|ק[׳'])\s*-?\d+(?:\s+עם\s+מעלית)?\s*$/u, "")
+      .trim() ?? null;
+    return { settlement, address, floor: floor(value) };
+  };
+  const origin = place(originText);
+  const destination = place(destinationText);
+  const destinationSettlement = destination.settlement ?? origin.settlement;
+  if (!origin.settlement || !origin.address || !destinationSettlement || !destination.address)
+    return null;
+  return [
+    {
+      type: "details",
+      request_number: null,
+      role: "donor",
+      name,
+      settlement: origin.settlement,
+      address: origin.address,
+      floor: origin.floor,
+    },
+    {
+      type: "details",
+      request_number: null,
+      role: "receiver",
+      name,
+      settlement: destinationSettlement,
+      address: destination.address,
+      floor: destination.floor,
+    },
+  ];
+}
+
+function suppliedPartyLocation(text: string, role: "donor" | "receiver"): Command | null {
+  const normalized = norm(text);
+  const pickup = normalized.match(/(?:האיסוף|כתובת\s+האיסוף)\s*[:,-]?\s*מ?(.+?)(?=[.!?]|$)/u);
+  if (pickup?.[1]) {
+    const pickupText = pickup[1].trim();
+    const settlement = beitShean(normalized);
+    const street = pickupText.replace(/^רחוב\s+/u, "").match(/^([א-ת][א-ת׳״'’\-]*(?:\s+[א-ת][א-ת׳״'’\-]*){0,4})\s+(\d+[א-ת]?(?:\/\d+)?)/u);
+    if (settlement && street) {
+      const introduced = normalized.match(/אני\s+([א-ת]{2,})(?=\s+(?:מבית|בבית)\s*[-־]?\s*שאן)/u);
+      return {
+        type: "details",
+        request_number: null,
+        role,
+        name: introduced?.[1] ?? null,
+        settlement,
+        address: `רחוב ${street[1]} ${street[2]}`,
+        floor: floor(pickupText),
+      };
+    }
+  }
+  const settlement = beitShean(text);
+  const address = text
+    .match(/(?:רחוב|שיכון|שכונה|שכונת|שדרות|שד[׳']?)\s+[^,.;?]+/u)?.[0]
+    ?.replace(
+      /\s+(?:קומה|ק[׳'])\s*-?\d+(?:\s+עם\s+מעלית)?\s*$/u,
+      "",
+    )
+    .trim();
+  if (!settlement || !address) return null;
+  return {
+    type: "details",
+    request_number: null,
+    role,
+    name: null,
+    settlement,
+    address,
+    floor: floor(text),
+  };
 }
 
 function namedRecipientPhone(text: string): string | null {
@@ -112,6 +249,28 @@ function contactCardName(text: string): string | null {
   return text.match(/(?:^|[\r\n])FN:([^\r\n]+)/i)?.[1]?.trim() || null;
 }
 
+function namedRecipientName(text: string): string | null {
+  const names = [...norm(text).matchAll(/(?:^|\s)ל([א-ת]{2,})(?=$|[\s,.;!?])/gu)]
+    .map((match) => match[1]!)
+    .filter((name) => !["מסירה", "תרומה", "מישהו", "מישהי", "אדם", "בית", "עפולה", "צמח", "קרקע"].includes(name));
+  return names.at(-1) ?? null;
+}
+
+function directLocationRole(text: string): "donor" | "receiver" {
+  const normalized = norm(text);
+  if (/(?:האיסוף|כתובת\s+האיסוף|הפריט\s+(?:נמצא|נמצאת)|אצלי)/u.test(normalized))
+    return "donor";
+  const recipientName = namedRecipientName(text);
+  if (!recipientName) return "donor";
+  const recipientIndex = normalized.lastIndexOf(`ל${recipientName}`);
+  const locationIndex = normalized.search(/(?:ב?בית\s*[-־]?\s*שאן|רחוב|שיכון|שכונה|שכונת|שדרות|שד[׳']?)/u);
+  if (recipientIndex < 0 || locationIndex <= recipientIndex) return "donor";
+  const between = normalized.slice(recipientIndex, locationIndex);
+  return /(?:אצלי|איסוף|נמצא|נמצאת|מהבית\s+שלי|(?:^|\s)(?:היא|הוא|הפריט|המיטה|השידה)(?:\s|$))/u.test(between)
+    ? "donor"
+    : "receiver";
+}
+
 function hasPartialNamedHandoff(ctx: Context): boolean {
   const recent = ctx.history
     .filter((entry) => entry.role === "user")
@@ -139,41 +298,124 @@ export function rulePlan(ctx: Context): Plan | null {
   // looking at active requests: a contact may have older open requests, but
   // "אני רוצה למסור מיטה" must never be interpreted as an answer to one.
   const item = kindAndDescription(text);
+  const normalizedText = norm(text);
+  const selfMove = /(?:להעביר|מעביר|מעבירה)\s+(?:לעצמי|אליי)|אני\s+(?:גם\s+)?(?:המוסר\s+וגם\s+המקבל|שני\s+הצדדים)/.test(
+    normalizedText,
+  );
+  const requesterIntent = /^(?:(?:היי|שלום)\s*[,! ]*)?(?:אני\s+)?(?:מחפש|מחפשת|מבקש|מבקשת|צריך|צריכה)(?=$|[\s,])/.test(
+    normalizedText,
+  );
+  const explicitDonationDeclaration = /(?:יש\s+לי(?=$|[\s,])|אני\s+(?:רוצה\s+)?(?:למסור|לתרום|מוסר|מוסרת|מעביר|מעבירה)|צריך(?:ה)?\s+(?:למסור|לתרום|להעביר))/.test(
+    normalizedText,
+  );
+
+  // A seeker may describe the desired item as "למסירה" to distinguish it
+  // from a purchase. That phrase alone must not turn the request into a
+  // donation. Explicit donor declarations and self-transfers retain priority.
+  if (item && requesterIntent && !selfMove && !explicitDonationDeclaration)
+    return plan(text, [{ type: "seek", kind: item.kind }]);
+
   if (item && donationIntent(text)) {
     const existing = activeRequest(ctx);
     if (
       existing &&
       existing.items.some((candidate) => candidate.kind === item.kind) &&
       !/(?:פנייה\s+חדשה|פריט\s+נוסף|עוד\s+פריט)/.test(text)
-    )
+    ) {
+      const recipientName = directHandoffIntent(text)
+        ? namedRecipientName(text)
+        : null;
+      if (
+        recipientName &&
+        existing.origin === "donation" &&
+        existing.parties.some(
+          (candidate) =>
+            candidate.phone === ctx.conversation.phone &&
+            candidate.role === "donor",
+        ) &&
+        !existing.parties.some((candidate) => candidate.role === "receiver")
+      )
+        return plan(text, [
+          {
+            type: "counterparty",
+            request_number: existing.number,
+            phone: null,
+            name: recipientName,
+          },
+        ]);
       return plan(text, [
         { type: "clarify_duplicate", request_number: existing.number },
       ]);
+    }
     // Natural direct-handoff wording often puts the recipient's name before
     // the phone ("ישירות לטל 058...").  Keep the named parser first, then
     // fall back to the standalone phone parser so the request is classified
     // as direct and never enters the open-donation photo gate.
-    const selfMove = /(?:להעביר|מעביר|מעבירה)\s+לעצמי|אני\s+(?:גם\s+)?(?:המוסר\s+וגם\s+המקבל|שני\s+הצדדים)/.test(
-      norm(text),
-    );
     const other = selfMove
       ? ctx.conversation.phone
       : namedRecipientPhone(text) ?? standalonePhone(text);
-    return plan(text, [
+    const commands: Command[] = [
       {
         type: "donate",
         items: [{ ...item, quantity: 1 }],
         counterparty_phone: other,
+        counterparty_name: other && directHandoffIntent(text) ? namedRecipientName(text) : null,
         direct: Boolean(other) || directHandoffIntent(text),
         free: true,
         working:
-          Boolean(other) || directHandoffIntent(text)
-            ? /שבור|מקולקל|לא\s+(?:תקין|שמיש|עובד)/.test(text)
-              ? false
-              : true
-            : null,
+          /שבור|מקולקל|לא\s+(?:תקין|שמיש|עובד)/.test(text)
+            ? false
+            : /תקינ|שמיש|עובד/.test(text) || Boolean(other) || directHandoffIntent(text)
+              ? true
+              : null,
       },
-    ]);
+    ];
+    if (selfMove) commands.push(...(selfTransferDetails(text) ?? []));
+    else if (other) {
+      const location = suppliedPartyLocation(text, directLocationRole(text));
+      if (location) commands.push(location);
+    } else {
+      // Open donations may include pickup facts in the first message.  Persist
+      // them before entering the photo gate so they never need to be repeated.
+      const location = suppliedPartyLocation(text, "donor");
+      if (location) commands.push(location);
+    }
+    return plan(text, commands);
+  }
+
+  // A general request must start a search even when older requests exist in
+  // the database.  Conversation reset hides those requests from the context;
+  // this guard also makes the intent unambiguous for short/slang messages.
+  if (item && requesterIntent)
+    return plan(text, [{ type: "seek", kind: item.kind }]);
+
+  // An out-of-area answer is reversible when the same party immediately
+  // corrects their own endpoint. Keep this deterministic so the correction
+  // stays attached to the selected request instead of being treated as a new
+  // request by the language model.
+  if (/(?:טעיתי|תיקון|בעצם|התכוונתי)/.test(normalizedText)) {
+    const rejectedForSender = (ctx.requests ?? []).filter((request) => {
+      if (request.status !== "rejected") return false;
+      try {
+        ownParty(request, ctx.conversation.phone);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    const selected = rejectedForSender.find(
+      (request) => request.id === ctx.conversation.selected_request_id,
+    ) ?? (rejectedForSender.length === 1 ? rejectedForSender[0] : undefined);
+    if (selected) {
+      try {
+        const role = ownParty(selected, ctx.conversation.phone).role;
+        const location = suppliedPartyLocation(text, role);
+        if (location?.type === "details")
+          return plan(text, [{ ...location, request_number: selected.number }]);
+      } catch {
+        // A non-party may not reopen or alter a rejected request.
+      }
+    }
   }
 
   const current = activeRequest(ctx);
@@ -209,11 +451,46 @@ export function rulePlan(ctx: Context): Plan | null {
       request_number: current.number,
       accept: yes(text),
     }]);
+  const proposedDate = current.proposed_run_date?.slice(0, 10) ?? null;
+  const priorReply = ctx.history.at(-1)?.content ?? "";
+  const [proposalYear, proposalMonth, proposalDay] = proposedDate?.split("-") ?? [];
+  const proposalLabel = proposedDate
+    ? `${proposalDay}/${proposalMonth}/${proposalYear}`
+    : null;
+  const enteredApprovalDate = text.match(/(?:^|\D)(\d{1,2})[/.](\d{1,2})[/.](\d{4})(?:\D|$)/);
+  const enteredProposalDate = enteredApprovalDate
+    ? `${enteredApprovalDate[3]}-${enteredApprovalDate[2]!.padStart(2, "0")}-${enteredApprovalDate[1]!.padStart(2, "0")}`
+    : null;
+  const sameChatProposalPrompt = Boolean(
+    proposalLabel &&
+    priorReply.includes(proposalLabel) &&
+    /(?:נא לאשר את המועד|נא לאשר במפורש|נדרש עדיין אישור(?: שלך)?|ממתינים לאישור המועד)/.test(priorReply),
+  );
+  if (
+    party.approved_at &&
+    proposedDate &&
+    (sameChatProposalPrompt || enteredProposalDate === proposedDate) &&
+    explicitApproval(text)
+  ) {
+    const date = enteredProposalDate ?? proposedDate;
+    return plan(text, [{
+      type: "approve_schedule",
+      request_number: current.number,
+      date,
+    }]);
+  }
   // A recipient can introduce themself and explicitly consent in one
   // message. Consent must win over profile extraction, otherwise it is
   // misclassified as a name and the approval is lost.
-  if (!party.approved_at && explicitApproval(text))
-    return plan(text, [{ type: "approve_self", request_number: current.number }]);
+  if (!party.approved_at && explicitApproval(text)) {
+    const commands: Command[] = [
+      { type: "approve_self", request_number: current.number },
+    ];
+    const suppliedLocation = suppliedPartyLocation(text, party.role);
+    if (suppliedLocation?.type === "details")
+      commands.push({ ...suppliedLocation, request_number: current.number });
+    return plan(text, commands);
+  }
 
   // A direct handoff commonly arrives as two WhatsApp messages: first the
   // item/name, then a phone number or contact card. Persist that second
@@ -335,7 +612,7 @@ export function rulePlan(ctx: Context): Plan | null {
           name: parsed?.name ?? null,
           settlement,
           address: parsed?.address ?? addressWithSettlement(text),
-          floor: null,
+          floor: floor(text),
         },
       ]);
     }
@@ -355,7 +632,7 @@ export function rulePlan(ctx: Context): Plan | null {
         name: combined.name,
         settlement: null,
         address: combined.address,
-        floor: floor(combined.address),
+        floor: floor(text),
       },
     ]);
 
@@ -367,7 +644,7 @@ export function rulePlan(ctx: Context): Plan | null {
           type: "details",
           request_number: current.number,
           role: party.role,
-          name: withoutSettlement,
+          name: explicitName(withoutSettlement) ?? withoutSettlement,
           settlement: null,
           address: null,
           floor: null,

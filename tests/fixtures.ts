@@ -43,6 +43,7 @@ export class FakePlanner implements Planner {
   fail = false;
   planDelayMs = 0;
   phraseNoticePrefix = "";
+  managedReply = "";
   async plan(
     ctx: Context,
   ): Promise<{ plan: Plan; metadata: Record<string, unknown> }> {
@@ -51,7 +52,13 @@ export class FakePlanner implements Planner {
     if (this.planDelayMs) await delay(this.planDelayMs);
     const plan = this.plans.get(ctx.message.id);
     if (!plan) throw new Error("missing_test_plan");
-    return { plan, metadata: { test_double: true } };
+    return {
+      plan,
+      metadata: {
+        test_double: true,
+        ...(this.managedReply ? { managed_reply: this.managedReply } : {}),
+      },
+    };
   }
   async phraseNotice(
     _ctx: Context,
@@ -131,6 +138,8 @@ export function sampleRequest(): Request {
     approved_at: monday.toISOString(),
     approved_by: phone,
     schedule_approved: true,
+    schedule_approved_date: "2026-09-15",
+    schedule_approved_at: "2026-09-01T12:00:00.000Z",
   });
   return {
     id: randomUUID(),
@@ -150,6 +159,7 @@ export function sampleRequest(): Request {
     parties: [p("donor", "501111111"), p("receiver", "502222222")],
     photo_ids: [randomUUID()],
     run_date: null,
+    proposed_run_date: "2026-09-15",
     earliest_run_date: null,
     human_reason: null,
     created_at: monday.toISOString(),
