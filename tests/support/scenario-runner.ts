@@ -165,8 +165,6 @@ function assertForbidden(scenario: GoldenScenario, step: number, snapshot: Snaps
       case "ask_name":
         if (snapshot.actualIntent === "ask_name") errors.push(effect);
         break;
-      case "schedule_without_both_approvals":
-        break;
       default:
         errors.push(`unsupported_forbidden_effect:${effect}`);
     }
