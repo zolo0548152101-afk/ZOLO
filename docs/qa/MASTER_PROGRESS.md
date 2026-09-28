@@ -112,3 +112,11 @@
 ### Boundary
 
 Phase 3 is closed. Phase 4 has not started and must not be started without the separate authorization and release-candidate decision required by the Master Plan.
+
+### Persistent GitHub checkpoint rule
+
+- The persistent source of truth for build-completion and QA work is GitHub branch `qa-build` in `zolo0548152101-afk/ZOLO`.
+- At every phase boundary, before independent review: run the required gates, update this file and machine-readable evidence, inspect staged content for secrets/runtime-only data, commit the exact verified state, and push `qa-build`.
+- Never push `.env` values, API keys/tokens, WAHA authentication or session data, `node_modules`, database/runtime volumes, downloaded media, or credentials.
+- A push is not a deployment. Deployment remains separately authorized only by the applicable phase.
+- Do not begin the next phase until the verified phase commit is present on `origin/qa-build`.
