@@ -5,11 +5,12 @@ RUN npm ci --ignore-scripts
 COPY tsconfig*.json ./
 COPY src ./src
 COPY tests ./tests
+COPY scripts ./scripts
 RUN npm run build && npm test
 
 FROM build AS verification
 COPY db ./db
-CMD ["node", "--test", "--test-concurrency=1", "dist-tests/tests/integration.test.js"]
+CMD ["sh", "-c", "npm run test:regressions && npm run test:golden"]
 
 FROM node:24-bookworm-slim AS runtime
 ENV NODE_ENV=production PORT=3000

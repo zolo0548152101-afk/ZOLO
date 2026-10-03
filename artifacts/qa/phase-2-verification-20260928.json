@@ -1,0 +1,26 @@
+{
+  "generated_at": "2026-09-28T14:40:47.000Z",
+  "git": {
+    "head": "c8d243784a2c2a6b7d590a8039b3f0722754ee79",
+    "dirty_state_sha256": "51663b2382a2b29bb9647296054a0077fef45e95df9f5e1982f3ffc1ad3ec868",
+    "working_tree_preserved": true
+  },
+  "verification": {
+    "build": {"status": "passed", "command": "pnpm run build"},
+    "unit": {"status": "passed", "count": 63, "command": "node --test dist-tests/tests/unit.test.js"},
+    "integration": {"status": "passed", "count": 68, "command": "node --test --test-concurrency=1 dist-tests/tests/integration.test.js"},
+    "spec": {"status": "passed", "scenarios": 4, "invariants": 34},
+    "offline_probes": {"status": "passed", "count": 12},
+    "prompt_wiring": {"status": "passed"},
+    "regression_gate": {"status": "passed", "count": 24, "report": "artifacts/qa/regression-report.json"},
+    "git_diff_check": {"status": "passed"}
+  },
+  "environment": {
+    "database": "disposable PostgreSQL 17-alpine / haim_core_test",
+    "database_scope": "fresh tmpfs compose.test.yml database; no live DB access",
+    "docker_verification_image": "sha256:8f8ec56a093bada4c32f87078bfd2a132e31e605dcb7131df7db60b1d743dbd1",
+    "live_qa_checkpoint_touched": false,
+    "waha_messages_sent": 0,
+    "reset_performed": false
+  }
+}

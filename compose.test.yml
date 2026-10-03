@@ -4,11 +4,11 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: disposable-test-only
-      POSTGRES_DB: haim_test
+      POSTGRES_DB: haim_core_test
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d haim_test"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d haim_core_test"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -17,7 +17,10 @@ services:
       context: .
       target: verification
     environment:
-      TEST_DATABASE_URL: postgres://postgres:disposable-test-only@postgres:5432/haim_test
+      TEST_DATABASE_URL: postgres://postgres:disposable-test-only@postgres:5432/haim_core_test
+      GIT_SHA: ${GIT_SHA:-unknown}
+    volumes:
+      - ./artifacts/qa:/app/artifacts/qa
     depends_on:
       postgres:
         condition: service_healthy

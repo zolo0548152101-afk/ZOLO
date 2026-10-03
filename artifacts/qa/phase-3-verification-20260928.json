@@ -1,0 +1,30 @@
+{
+  "phase": 3,
+  "title": "Golden Conversation Scenario Runner",
+  "timestamp": "2026-09-28T16:31:46.7472468Z",
+  "git_sha": "c8d243784a2c2a6b7d590a8039b3f0722754ee79",
+  "verdict": "PASS",
+  "scenario_catalog": {"count": 52, "clean": 26, "challenging": 26, "flows": ["direct_handoff", "open_donation", "self_transfer", "open_request", "cross_flow", "failure_recovery"]},
+  "gates": {"unit": "63/63", "integration": "69/69", "regressions": "26/26", "golden": "52/52", "resume": "52/52"},
+  "harness_repairs": [
+    "A: reset preserves and verifies service_locations and streets fixtures; בית שאן, העלייה, and שיכון א are proven resolvable",
+    "B: planner fixtures are structured Plan values validated by planSchema; FakePlanner does not parse Hebrew",
+    "C: actual intent is exposed from command_results.result.intent on the real engine path",
+    "D: all 52 scenarios reconcile with canonical contracts; open_request stores one search and no request",
+    "E: conversation, business/DB, side-effect, and forbidden-effect assertions are enforced per turn",
+    "F: reply intent enum is validated; unknown values fail catalog validation",
+    "G: forbidden-effect detectors are executable and included in every scenario turn",
+    "H: zero failures remain; no unresolved classification exists",
+    "I: persistent golden-run-state.json and --resume are verified",
+    "J: per-step diagnostics include inbound, expected, actual facts, searches, events, outbox, planner, and actual intent"
+  ],
+  "product_fixes": ["PHOTO-FIRST preserves supplied donor settlement/address/floor facts while asking for the photo", "Known direct recipients accept implicit donation wording without reintroducing the generic donation question"],
+  "permanent_regressions": ["REG-025", "REG-026"],
+  "failure_classification": {"remaining_failures": [], "HARNESS_DEFECT": [], "SCENARIO_CONTRACT_DEFECT": [], "PRODUCT_DEFECT": []},
+  "resume_evidence": {"state": "artifacts/qa/golden-run-state.json", "completed": 52, "passed": 52, "failed": 0, "next_scenario": null, "git_sha": "c8d243784a2c2a6b7d590a8039b3f0722754ee79", "catalog_digest": "542cfbff6a4a20318d42b67a550f480757f70b8bf31bdabbbef765242b5e3f31"},
+  "environment": "disposable PostgreSQL via compose.test.yml; FakeChannel only; no WAHA/OpenAI calls",
+  "live_actions": {"waha": false, "remote_db_reset": false, "deploy": false, "live_checkpoint_changed": false},
+  "phase4_started": false,
+  "evidence": ["artifacts/qa/golden-report.json", "artifacts/qa/golden-run-state.json", "artifacts/qa/phase3-final-gitsha.log", "artifacts/qa/phase3-resume.log", "artifacts/qa/regression-report.json"],
+  "next_action": "Phase 4 boundary review only; do not start Phase 4 without explicit authorization and a fresh release-candidate decision."
+}

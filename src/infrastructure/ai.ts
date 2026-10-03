@@ -85,6 +85,16 @@ const boolValue = (
 const action = (actions: Record<string, unknown>, key: string): boolean =>
   actions[key] === true || actions[key] === "true" || actions[key] === "כן";
 
+export function managedNeedsHuman(
+  actions: Record<string, unknown>,
+  updates: Record<string, unknown>,
+): boolean {
+  return (
+    action(actions, "needs_human") ||
+    boolValue(updates, "נדרש טיפול אנושי") === true
+  );
+}
+
 // Keep the managed-prompt contract closed. A newly introduced action must be
 // deliberately mapped here (or rejected explicitly) before it can reach the
 // domain command layer.
@@ -103,6 +113,7 @@ const managedActionKeys = new Set([
 function itemKind(value: string): ItemKind {
   const t = value.toLowerCase();
   if (/מיטה|bed/.test(t)) return "bed";
+  if (/שידה/.test(t)) return "other";
   if (/ספה|כורס|sofa/.test(t)) return "sofa";
   if (/ארון|wardrobe/.test(t)) return "wardrobe";
   if (/מקרר|fridge/.test(t)) return "fridge";
@@ -124,11 +135,27 @@ function descriptionFrom(
   text: string,
   request?: Request,
 ): string {
+  const canonical = (value: string): string | null => {
+    const t = value.replace(/\s+/g, " ").trim();
+    const found = [
+      [/(?:מכונת\s+כביסה)/, "מכונת כביסה"],
+      [/(?:שולחן\s+וכיסאות|כיסאות\s+ושולחן)/, "שולחן וכיסאות"],
+      [/(?:שידה)/, "שידה"],
+      [/(?:מיטה)/, "מיטה"],
+      [/(?:ספה|כורסה)/, "ספה"],
+      [/(?:ארון)/, "ארון"],
+      [/(?:שולחן)/, "שולחן"],
+      [/(?:כיסאות|כיסא)/, "כיסאות"],
+      [/(?:מקרר)/, "מקרר"],
+      [/(?:תנור)/, "תנור"],
+    ] as const;
+    return found.find(([pattern]) => pattern.test(t))?.[1] ?? null;
+  };
   const value = textValue(updates, "מה מעבירים");
-  if (value) return value;
+  if (value) return canonical(value) ?? value;
   const known = request?.items[0]?.description;
   if (known) return known;
-  return text.replace(/\s+/g, " ").trim().slice(0, 120) || "פריט";
+  return canonical(text) ?? (text.replace(/\s+/g, " ").trim().slice(0, 120) || "פריט");
 }
 
 function phoneFrom(value: string | null): string | null {
@@ -148,10 +175,12 @@ function activeRequest(ctx: Context): Request | undefined {
     (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
   );
   if (open.length === 1) return open[0];
-  return (
-    ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-    (ctx.requests.length === 1 ? ctx.requests[0] : undefined)
+  const selected = ctx.requests.find(
+    (r) =>
+      r.id === ctx.conversation.selected_request_id &&
+      !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
   );
+  return selected ?? (open.length === 1 ? open[0] : undefined);
 }
 
 function translate(
@@ -175,9 +204,8 @@ function translate(
     throw new AppError("unsupported_managed_action", 422, "פעולת AI לא מוכרת");
 
   if (action(actions, "interest")) {
-    if (!current)
-      throw new AppError("interest_without_request", 409, "לא נמצאה פנייה מתאימה להתעניינות.");
-    pushOnce({ type: "interest", request_number: current.number });
+    const presented = ctx.candidates.find((candidate) => candidate.state === "presented");
+    if (presented) pushOnce({ type: "interest", request_number: presented.request.number });
   }
   if (action(actions, "notify_receiver") || action(actions, "notify_donor")) {
     if (!current)
@@ -203,7 +231,7 @@ function translate(
         ? "next_week"
         : "ask";
     commands.push({ type: "cancel", request_number: current?.number ?? null, choice });
-  } else if (action(actions, "needs_human") || textValue(updates, "נדרש טיפול אנושי")) {
+  } else if (managedNeedsHuman(actions, updates)) {
     commands.push({
       type: "escalate",
       request_number: current?.number ?? null,

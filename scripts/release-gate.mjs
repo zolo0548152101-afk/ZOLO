@@ -19,7 +19,20 @@ if (mode !== "live") {
   check("schema", env.DB_SCHEMA === "haim_core", "live must use the production schema only at the canary gate");
   check("location_dataset", env.LOCATION_DATASET_ACTIVATED === "true" && Boolean(env.LOCATION_DATASET_VERSION), "a reviewed, checksum-backed location dataset must be activated");
   check("remote_prompt_eval", env.REMOTE_PROMPT_EVAL_PASSED === "true", "the pinned OpenAI managed prompt must pass the paid remote golden evaluation");
-  check("sheets_reconciliation", Boolean(env.SHEETS_RECONCILIATION_ID), "a reviewed Sheets reconciliation run is required before live");
+  const qaNoLegacyImport = env.RELEASE_DATA_SOURCE_MODE === "qa_no_legacy_import";
+  if (qaNoLegacyImport) {
+    const normalizedRecipients = [...new Set((env.LIVE_ALLOWLIST ?? "").split(",").map((phone) => {
+      const digits = phone.trim().replace(/^\+/, "");
+      if (digits.startsWith("0")) return `972${digits.slice(1)}`;
+      if (/^5\d{8}$/.test(digits)) return `972${digits}`;
+      return digits;
+    }).filter(Boolean))].sort();
+    check("qa_allowlist", JSON.stringify(normalizedRecipients) === JSON.stringify(["972536662043", "972584152101"]), "QA live allowlist must contain exactly the two authorized test numbers");
+    check("qa_data_scope", env.QA_DISPOSABLE_DB_VERIFIED === "YES" && Boolean(env.QA_DATA_SCOPE_EVIDENCE_ID), "QA mode requires verified disposable application DB and an evidence ID; do not use for a legacy Sheets import");
+    check("sheets_reconciliation", true, "not applicable: QA-only release with no legacy Sheets import");
+  } else {
+    check("sheets_reconciliation", Boolean(env.SHEETS_RECONCILIATION_ID), "a reviewed Sheets reconciliation run is required before live when migrating legacy data");
+  }
 }
 console.log(JSON.stringify({ ok: failures.length === 0, ...report }, null, 2));
 if (failures.length) process.exitCode = 1;

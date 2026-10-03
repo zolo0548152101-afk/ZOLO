@@ -1,0 +1,50 @@
+{
+  "phase": "3.1",
+  "title": "Golden Harness Hardening",
+  "timestamp": "2026-09-28T20:24:26+03:00",
+  "git_sha": "e0aef669e19689fc07e61d2a2892a5dde1d24774",
+  "source_sha_verified": "e0aef669e19689fc07e61d2a2892a5dde1d24774",
+  "verdict": "PASS",
+  "authorized_scope": [
+    "strict exact reply-intent matching; no ask_details wildcard",
+    "executable ask_photo, ask_address, and ask_name forbidden detectors",
+    "stale AI plan, wrong-party notification, and uncertain-send retry detectors",
+    "business assertions for route parties, item facts, pickup facts, photo persistence, and Outbox purpose/recipient/state",
+    "bounded per-step and per-scenario execution",
+    "real processNext burst/coalescing and turn-generation coverage"
+  ],
+  "catalog": {"count": 52, "clean": 26, "challenging": 26},
+  "gates": {"unit": "63/63", "integration": "69/69", "regressions": "26/26", "golden": "52/52", "resume": "52/52", "forbidden_detectors": "6/6", "github_verification": "PASS", "github_run_id": 36463404927},
+  "failure_classification": {"remaining_failures": [], "HARNESS_DEFECT": [], "SCENARIO_CONTRACT_DEFECT": [], "PRODUCT_DEFECT": []},
+  "process_next": {"scenario": "direct-clean-02", "burst_messages": 2, "coalesced_messages_asserted": true, "turn_generation_asserted": true},
+  "forbidden_detector_proof": {
+    "cases": 6,
+    "passed": 6,
+    "prohibited_states": ["stale_ai_plan_commit", "wrong_party_notification", "blind_retry_after_uncertain_send"],
+    "safe_states": ["current_plan", "same_party_notification", "unique_uncertain_send_without_provider_id"]
+  },
+  "conversation_location_reask_regression": {
+    "scenario": "direct-clean-01",
+    "step": 2,
+    "inbound": "כן, אפשר לפנות אליה לאימות",
+    "stored_facts_before": ["settlement", "address", "floor"],
+    "reply_contract": "ask_verification_only",
+    "forbidden_effect": "ask_address_again",
+    "stored_facts_after": ["settlement", "address", "floor"],
+    "status": "PASS"
+  },
+  "correction_verification": {"golden_fixture_tracked": true, "golden_fixture_sha256": "A3111C75088F63E9B329B7EF37402AB992C958602BE4702BFA1B60FFE4CF3C4A", "duplicate_dead_switch_case_removed": true},
+  "environment": "disposable PostgreSQL via compose.test.yml; FakeChannel only; no WAHA/OpenAI calls",
+  "live_actions": {"waha": false, "remote_db_reset": false, "deploy": false, "live_checkpoint_changed": false},
+  "phase4_started": false,
+  "evidence": [
+    "artifacts/qa/golden-report.json",
+    "artifacts/qa/golden-run-state.json",
+    "artifacts/qa/regression-report.json",
+    "artifacts/qa/phase-3.1-final-golden-report.json",
+    "artifacts/qa/phase-3.1-final-golden-state.json",
+    "artifacts/qa/phase-3.1-final-resume-report.json",
+    "artifacts/qa/phase-3.1-final-regression-report.json",
+    "docs/qa/MASTER_PROGRESS.md"
+  ]
+}

@@ -171,6 +171,40 @@ async function donation(
   await message(p, `יש לי ${label} למסירה`, [donate(label, kind)]);
   return (await s.active(p))[0]!;
 }
+test("direct handoff with a known recipient accepts implicit donation wording", async () => {
+  const donor = phone(), receiver = phone(), cmd = donate("מיטה זוגית", "bed");
+  if (cmd.type !== "donate") throw new Error();
+  cmd.counterparty_phone = receiver;
+  cmd.direct = true;
+  const result = await message(donor, `מיטה זוגית לטל ${receiver}, איסוף מבית שאן רחוב העלייה קומה 1`, [cmd]);
+  assert.doesNotMatch(result.row.reply ?? "", /ברצונך למסור/);
+  assert.equal((await s.active(donor)).length, 1);
+});
+test("direct phone opening persists all donor facts from one corrected message", async () => {
+  const donor = "536662043";
+  const opening = "רגע, תיקון: יש לי שידה קטנה למסירה ישירות למספר 0584152101. אני טל מבית שאן, האיסוף מרחוב הגפן 6 קומה 2. אין לי תמונה.";
+  await message(donor, opening);
+  const active = await s.active(donor);
+  assert.equal(active.length, 1);
+  const request = active[0]!;
+  assert.equal(request.origin, "direct");
+  assert.equal(request.items.length, 1);
+  assert.equal(request.items[0]!.description, "שידה");
+  const giver = request.parties.find((party) => party.role === "donor")!;
+  const recipient = request.parties.find((party) => party.role === "receiver")!;
+  assert.equal(giver.name, "טל");
+  assert.equal(giver.settlement, "בית שאן");
+  assert.equal(giver.address, "רחוב הגפן 6");
+  assert.equal(giver.floor, 2);
+  assert.equal(recipient.phone, "584152101");
+  assert.equal(
+    (await pool.query("SELECT 1 FROM request_media WHERE request_id=$1", [request.id])).rowCount,
+    0,
+  );
+  // The default QA recipient is also the fixture's admin phone; close this
+  // isolated request so later admin-flow tests cannot inherit it as active state.
+  await pool.query("UPDATE requests SET status='closed' WHERE id=$1", [request.id]);
+});
 async function readyRequest(p = phone(), receiver = phone()) {
   let r = await donation(p, "fridge", "מקרר");
   await message(p, "", undefined, true);
@@ -183,11 +217,39 @@ async function readyRequest(p = phone(), receiver = phone()) {
     approved_by: x.role === "donor" ? p : receiver,
   }));
   r.origin = "direct";
+  r.verification_contacted = true;
+  r.proposed_run_date = r.proposed_run_date ?? "2026-09-15";
+  r.run_date = null;
   await s.transaction(async (c) => {
+    await s.prepareTransportRun(c, r.proposed_run_date!);
+    await c.query(
+      "INSERT INTO request_verifications(request_id,role,state,consented_at) VALUES($1,'receiver','consented',clock_timestamp()) ON CONFLICT(request_id,role) DO UPDATE SET state='consented',consented_at=clock_timestamp()",
+      [r.id],
+    );
     await s.request(r.id, c, true);
     await s.save(c, r);
   });
   return r;
+}
+async function setProposedDate(r: Request, date: string) {
+  r.run_date = null;
+  r.proposed_run_date = date;
+  r.status = "awaiting_approval";
+  for (const p of r.parties) {
+    p.schedule_approved = true;
+    p.schedule_approved_date = date;
+    p.schedule_approved_at = new Date().toISOString();
+  }
+  await s.transaction(async (c) => {
+    await s.prepareTransportRun(c, date);
+    const locked = await s.request(r.id, c, true);
+    locked.run_date = null;
+    locked.proposed_run_date = date;
+    locked.status = r.status;
+    locked.parties = r.parties;
+    await s.save(c, locked);
+    r.version = locked.version;
+  });
 }
 
 test("migrations are idempotent; legacy schema untouched; relational constraints reject invalid data", async () => {
@@ -351,6 +413,50 @@ test("clear outside endpoint stops, including mixed AI escalation plan; no admin
     0,
   );
 });
+test("a party can correct an outside-area rejection without losing the direct request facts", async () => {
+  const donor = phone(), receiver = phone(), cmd = donate("מיטה", "bed");
+  if (cmd.type !== "donate") throw new Error();
+  cmd.counterparty_phone = receiver;
+  cmd.direct = true;
+  await message(donor, `יש לי מיטה למסירה לטל ${receiver}`, [cmd]);
+  const request = (await s.active(donor))[0]!;
+  await message(receiver, "כן", [
+    { type: "approve_self", request_number: request.number },
+  ]);
+  await message(donor, "יוסי, בית שאן, רחוב המלך 5, קומה 2", [
+    details({
+      request_number: request.number,
+      role: "donor",
+      name: "יוסי",
+      settlement: "בית שאן",
+      address: "רחוב המלך 5",
+      floor: 2,
+    }),
+  ]);
+  await message(receiver, "טבריה, רחוב הגליל 10, קומה 1", [
+    details({
+      request_number: request.number,
+      role: "receiver",
+      settlement: "טבריה",
+      address: "רחוב הגליל 10",
+      floor: 1,
+    }),
+  ]);
+  assert.equal((await s.request(request.id)).status, "rejected");
+
+  const corrected = await message(
+    receiver,
+    "טעיתי, אני בבית שאן, רחוב שאול המלך 10, קומה 1",
+  );
+  const saved = await s.request(request.id);
+  const receiverParty = saved.parties.find((party) => party.role === "receiver")!;
+  assert.notEqual(saved.status, "rejected");
+  assert.equal(receiverParty.settlement, "בית שאן");
+  assert.equal(receiverParty.address, "רחוב שאול המלך 10");
+  assert.equal(receiverParty.floor, 1);
+  assert.equal(saved.items[0]!.description, "מיטה");
+  assert.doesNotMatch(corrected.row.reply ?? "", /איזה רהיט|איזה פריט|מה מעבירים/);
+});
 test("unknown/borderline settlement escalates instead of falsely classifying outside", async () => {
   const p = phone();
   await donation(p);
@@ -413,6 +519,16 @@ test("requester seeks fridge before details; no matches means no request/details
   assert.equal((await s.active(p)).length, 0);
   assert.match(m.row.reply ?? "", /לא נמצא פריט מתאים/);
 });
+test("requester asking for an item למסירה is not routed to the donor photo flow", async () => {
+  const p = phone(),
+    m = await message(
+      p,
+      "צריך כיסא דחוף לבית שאן, לא משנה לי שכונה, רק שיהיה למסירה ולא קנייה.",
+    );
+  assert.equal((await s.active(p)).length, 0);
+  assert.match(m.row.reply ?? "", /לא נמצא פריט מתאים/);
+  assert.doesNotMatch(m.row.reply ?? "", /תמונה/);
+});
 test("match with image: image delivered before interest/receiver details and exclusive claim", async () => {
   const donor = phone(),
     receiver = phone(),
@@ -471,6 +587,8 @@ test("donor and receiver approvals are separate and repeat approval preserves ti
     { type: "approve_self", request_number: r.number },
   ]);
   const first = await s.request(r.id);
+  assert.equal(first.parties.find((p) => p.role === "receiver")!.approved_at !== null, true);
+  assert.equal(first.parties.find((p) => p.role === "receiver")!.schedule_approved, false);
   await message(receiver, "מאשר שוב", [
     { type: "approve_self", request_number: r.number },
   ]);
@@ -479,6 +597,100 @@ test("donor and receiver approvals are separate and repeat approval preserves ti
     first.parties.find((p) => p.role === "receiver")!.approved_at,
     second.parties.find((p) => p.role === "receiver")!.approved_at,
   );
+});
+test("both parties must explicitly approve the same proposed Tuesday before coordination", async () => {
+  const donor = phone(), receiver = phone(), r = await readyRequest(donor, receiver);
+  r.status = "awaiting_approval";
+  r.run_date = null;
+  r.proposed_run_date = "2026-09-15";
+  for (const p of r.parties) {
+    p.schedule_approved = false;
+    p.schedule_approved_date = null;
+    p.schedule_approved_at = null;
+  }
+  await s.transaction(async (c) => {
+    const locked = await s.request(r.id, c, true);
+    locked.status = r.status;
+    locked.run_date = null;
+    locked.proposed_run_date = r.proposed_run_date;
+    locked.parties = r.parties;
+    await s.save(c, locked);
+  });
+
+  const receiverPrompt = await message(receiver, "הצג את הפנייה", [
+    { type: "select", request_number: r.number },
+  ]);
+  assert.match(receiverPrompt.row.reply ?? "", /יום שלישי 15\/09\/2026/);
+  assert.match(receiverPrompt.row.reply ?? "", /נא לאשר את המועד/);
+  await message(receiver, "מאשר את התאריך 15/09/2026");
+  let stored = await s.request(r.id);
+  assert.equal(stored.status, "awaiting_approval");
+  assert.equal(stored.parties.find((p) => p.role === "receiver")!.schedule_approved_date, "2026-09-15");
+  assert.equal(stored.parties.find((p) => p.role === "donor")!.schedule_approved_date, null);
+  assert.equal(stored.run_date, null);
+
+  const donorPrompt = await message(donor, "הצג את הפנייה", [
+    { type: "select", request_number: r.number },
+  ]);
+  assert.match(donorPrompt.row.reply ?? "", /יום שלישי 15\/09\/2026/);
+  await message(donor, "מאשר את התאריך 15/09/2026");
+  stored = await s.request(r.id);
+  assert.equal(stored.status, "coordinated");
+  assert.equal(stored.proposed_run_date, null);
+  assert.equal(stored.run_date, "2026-09-15");
+  assert.ok(stored.parties.every((p) => p.schedule_approved_date === stored.run_date));
+});
+test("natural schedule approval accepts a database timestamp and preserves the other party approval", async () => {
+  const donor = phone(), receiver = phone(), r = await readyRequest(donor, receiver);
+  await pool.query(
+    "UPDATE requests SET status='awaiting_approval', proposed_run_date=$2::timestamptz, run_date=NULL WHERE id=$1",
+    [r.id, "2026-09-29T00:00:00.000Z"],
+  );
+  await pool.query(
+    "UPDATE request_parties SET schedule_approved=true, schedule_approved_date=$2::timestamptz, schedule_approved_at=clock_timestamp() WHERE request_id=$1 AND role='receiver'",
+    [r.id, "2026-09-29T00:00:00.000Z"],
+  );
+  const prompt = await message(donor, "מה מצב פנייה 1?", [
+    { type: "select", request_number: r.number },
+  ]);
+  assert.match(prompt.row.reply ?? "", /נדרש עדיין אישור|נא לאשר את המועד/);
+  const approved = await message(donor, "מאשר את המועד 29\/09\/2026");
+  const saved = await s.request(r.id);
+  assert.equal(saved.parties.find((p) => p.role === "donor")!.schedule_approved, true);
+  assert.equal(saved.parties.find((p) => p.role === "receiver")!.schedule_approved, true);
+  assert.notEqual(saved.status, "rejected");
+  assert.doesNotMatch(approved.row.reply ?? "", /פירוק|תקין ושמיש/);
+});
+test("explicit shared-date approval from the other party chat coordinates without repeating the proposal", async () => {
+  const donor = phone(), receiver = phone(), r = await readyRequest(donor, receiver);
+  r.status = "awaiting_approval";
+  r.run_date = null;
+  r.proposed_run_date = "2026-09-29";
+  const receiverParty = r.parties.find((party) => party.role === "receiver")!;
+  receiverParty.schedule_approved = true;
+  receiverParty.schedule_approved_date = "2026-09-29";
+  receiverParty.schedule_approved_at = new Date().toISOString();
+  const donorParty = r.parties.find((party) => party.role === "donor")!;
+  donorParty.schedule_approved = false;
+  donorParty.schedule_approved_date = null;
+  donorParty.schedule_approved_at = null;
+  await s.transaction(async (c) => {
+    await s.prepareTransportRun(c, "2026-09-29");
+    const locked = await s.request(r.id, c, true);
+    locked.status = r.status;
+    locked.run_date = null;
+    locked.proposed_run_date = r.proposed_run_date;
+    locked.parties = r.parties;
+    await s.save(c, locked);
+  });
+
+  const approved = await message(donor, "מאשר את המועד 29/09/2026");
+  const saved = await s.request(r.id);
+
+  assert.equal(saved.status, "coordinated");
+  assert.equal(saved.run_date, "2026-09-29");
+  assert.ok(saved.parties.every((party) => party.schedule_approved_date === "2026-09-29"));
+  assert.doesNotMatch(approved.row.reply ?? "", /נא לאשר את המועד/);
 });
 test("direct donation skips the generic condition question", async () => {
   const donor = phone(),
@@ -504,6 +716,150 @@ test("natural direct wording with a phone after the recipient skips photo and co
   const r = (await s.active(donor))[0]!;
   assert.equal(r.origin, "direct");
   assert.equal(r.parties.find((p) => p.role === "receiver")!.phone, receiver);
+});
+
+test("natural direct wording preserves the named recipient with the phone", async () => {
+  const donor = phone(),
+    receiver = phone(),
+    cmd = donate("מיטה", "bed");
+  if (cmd.type !== "donate") throw new Error();
+  cmd.counterparty_phone = receiver;
+  cmd.counterparty_name = "טל";
+  const result = await message(
+    donor,
+    `שלום, אני רוצה למסור את המיטה לטל ${receiver} בבית שאן, רחוב המלך 5 קומה 2`,
+    [cmd],
+  );
+  assert.match(result.row.reply ?? "", /אימות/);
+  const r = (await s.active(donor))[0]!;
+  assert.equal(r.parties.find((p) => p.role === "receiver")!.name, "טל");
+});
+
+test("direct recipient verification repeats supplied destination details and asks only for approval", async () => {
+  const donor = phone(), receiver = phone();
+  await message(
+    donor,
+    `שלום, אני רוצה למסור את המיטה לטל ${receiver} בבית שאן, רחוב המלך 5 קומה 2. המיטה בחינם, שלמה ושמישה.`,
+  );
+  const request = (await s.active(donor))[0]!;
+  const receiverParty = request.parties.find((party) => party.role === "receiver")!;
+  assert.equal(receiverParty.name, "טל");
+  assert.equal(receiverParty.settlement, "בית שאן");
+  assert.equal(receiverParty.address, "רחוב המלך 5");
+  assert.equal(receiverParty.floor, 2);
+
+  const contacted = await message(donor, "כן, תפנו לטל לצורך אימות הפרטים", [{
+    type: "contact_counterparty",
+    request_number: request.number,
+    contact: true,
+  }]);
+  const notice = (await outputs(contacted.id)).find((row) => row.phone === receiver)?.text ?? "";
+  assert.match(notice, /טל/);
+  assert.match(notice, /בית שאן/);
+  assert.match(notice, /רחוב המלך 5/);
+  assert.match(notice, /קומה 2/);
+  assert.match(notice, /נא לאשר/);
+
+  const confirmed = await message(receiver, "כן, אני טל ומאשר לקבל את המיטה");
+  assert.doesNotMatch(confirmed.row.reply ?? "", /לאיזה יישוב|כתובת/);
+  assert.ok((await s.request(request.id)).parties.find((party) => party.role === "receiver")!.approved_at);
+});
+
+test("donor cannot overwrite receiver destination after the direct request creation message", async () => {
+  const donor = phone(), receiver = phone();
+  await message(
+    donor,
+    `אני רוצה למסור את המיטה לטל ${receiver} בבית שאן, רחוב המלך 5 קומה 2`,
+  );
+  const request = (await s.active(donor))[0]!;
+  await message(donor, "תיקון: טל בכלל גרה בעפולה ברחוב אחר 99", [{
+    type: "details",
+    request_number: request.number,
+    role: "receiver",
+    name: null,
+    settlement: "עפולה",
+    address: "רחוב אחר 99",
+    floor: 9,
+  }]);
+  const unchangedReceiver = (await s.request(request.id)).parties.find((party) => party.role === "receiver")!;
+  assert.equal(unchangedReceiver.settlement, "בית שאן");
+  assert.match(unchangedReceiver.address ?? "", /רחוב המלך 5/);
+  assert.equal(unchangedReceiver.floor, 2);
+});
+
+test("a contact candidate can convert an open donation before the photo gate", async () => {
+  const donor = phone(), receiver = phone(), cmd = donate("מיטה", "bed");
+  const started = await message(donor, "רוצה למסור מיטה", [cmd]);
+  assert.match(started.row.reply ?? "", /תמונה/);
+  const request = (await s.active(donor))[0]!;
+
+  const candidate = await message(donor, `זה איש הקשר של טל ${receiver}`, [{
+    type: "counterparty_candidate",
+    request_number: request.number,
+    phone: receiver,
+    name: "טל",
+  }]);
+  assert.match(candidate.row.reply ?? "", /האם התכוונת למסור/);
+  assert.doesNotMatch(candidate.row.reply ?? "", /שלחו כאן תמונה/);
+
+  const confirmed = await message(donor, "כן", [{
+    type: "confirm_counterparty",
+    request_number: request.number,
+    accept: true,
+  }]);
+  assert.doesNotMatch(confirmed.row.reply ?? "", /תמונה/);
+  assert.equal((await s.request(request.id)).origin, "direct");
+});
+
+test("a plain admin yes remains part of the active conversation when no capacity approval is pending", async () => {
+  const receiver = phone(), cmd = donate("שידה", "other");
+  if (cmd.type !== "donate") throw new Error();
+  cmd.counterparty_phone = receiver;
+  cmd.direct = true;
+  await message(cfg.ADMIN_PHONE, `יש לי שידה למסור לטל ${receiver}`, [cmd]);
+  const request = (await s.active(cfg.ADMIN_PHONE))[0]!;
+
+  const result = await message(cfg.ADMIN_PHONE, "כן", [{
+    type: "contact_counterparty",
+    request_number: request.number,
+    contact: true,
+  }]);
+  assert.doesNotMatch(result.row.reply ?? "", /בקשת הגדלת מכסה/);
+  assert.match(result.row.reply ?? "", /נפנה לצד השני|כבר בוצעה/);
+});
+test("direct handoff keeps supplied pickup and extracts a later labeled donor name", async () => {
+  const donor = phone(),
+    receiver = phone(),
+    cmd = donate("שידה", "other");
+  if (cmd.type !== "donate") throw new Error();
+  cmd.counterparty_phone = receiver;
+  cmd.direct = true;
+  const started = await message(
+    donor,
+    "יש לי שידה למסירה לטל, נראה לי המספר שלו מצורף. היא בבית שאן ברחוב העלייה 7 קומה 2",
+    [cmd],
+  );
+  assert.ok(started.row.reply);
+  let request = (await s.active(donor))[0]!;
+  await message(
+    donor,
+    "בית שאן, רחוב העלייה 7, קומה 2",
+    [details({
+      request_number: request.number,
+      role: "donor",
+      settlement: "בית שאן",
+      address: "רחוב העלייה 7",
+    })],
+  );
+  request = (await s.active(donor))[0]!;
+  let donorParty = request.parties.find((party) => party.role === "donor")!;
+  assert.equal(donorParty.settlement, "בית שאן");
+  assert.equal(donorParty.address, "רחוב העלייה 7");
+
+  await message(donor, "השם הוא זולו.");
+  request = (await s.active(donor))[0]!;
+  donorParty = request.parties.find((party) => party.role === "donor")!;
+  assert.equal(donorParty.name, "זולו");
 });
 test("cancellation notifies the other party and supports final close", async () => {
   const r = await readyRequest(),
@@ -618,6 +974,53 @@ test("four canonical flows pass five isolated simulations each", async () => {
     assert.doesNotMatch(requestResult.row.reply ?? "", /תמונה|תקין ושמיש/);
   }
 });
+
+test("self transfer persists distinct pickup and destination from the opening message", async () => {
+  const p = phone();
+  const beforeCalls = ai.calls;
+  const result = await message(
+    p,
+    "אני מעביר לעצמי שולחן מבית שאן רחוב שאול המלך 5 לבית שאן רחוב העלייה 28, קומה 2. מתי אפשר?",
+  );
+  const request = (await s.active(p))[0]!;
+  const donor = request.parties.find((party) => party.role === "donor")!;
+  const receiver = request.parties.find((party) => party.role === "receiver")!;
+  assert.equal(request.origin, "direct");
+  assert.equal(request.represents_both_parties, true);
+  assert.equal(donor.phone, p);
+  assert.equal(receiver.phone, p);
+  assert.equal(donor.settlement, "בית שאן");
+  assert.equal(receiver.settlement, "בית שאן");
+  assert.match(donor.address ?? "", /שאול המלך 5/);
+  assert.match(receiver.address ?? "", /העלייה 28/);
+  assert.equal(donor.floor, null);
+  assert.equal(receiver.floor, 2);
+  assert.doesNotMatch(result.row.reply ?? "", /באיזה יישוב|באיזו עיר/u);
+  assert.equal(ai.calls, beforeCalls);
+});
+
+test("self transfer to אליי treats the sender as both parties without requiring a phone in the text", async () => {
+  const p = phone();
+  const result = await message(
+    p,
+    "היי, אני טליה וישלי כיסא אחד להעביר אליי. אוספים מבית שאן רחוב הגלבוע 9 קומה 3, ומביאים לבית שאן שכונת שיכון א׳ קומה 1. בחינם ותקין, שלישי הבא מתאים לי.",
+  );
+  const request = (await s.active(p))[0]!;
+  const donor = request.parties.find((party) => party.role === "donor")!;
+  const receiver = request.parties.find((party) => party.role === "receiver")!;
+  assert.doesNotMatch(result.row.reply ?? "", /טיפול אנושי/);
+  assert.equal(request.origin, "direct");
+  assert.equal(request.represents_both_parties, true);
+  assert.equal(donor.phone, p);
+  assert.equal(receiver.phone, p);
+  assert.equal(donor.name, "טליה");
+  assert.equal(receiver.name, "טליה");
+  assert.match(donor.address ?? "", /הגלבוע 9/);
+  assert.equal(donor.floor, 3);
+  assert.match(receiver.address ?? "", /שיכון א׳/);
+  assert.equal(receiver.floor, 1);
+});
+
 test("receiver cannot alter donor item facts; attempted forbidden change escalates durably", async () => {
   const r = await readyRequest(),
     receiver = r.parties[1]!.phone;
@@ -797,9 +1200,19 @@ test("a newer message supersedes an in-flight AI turn without an old reply", asy
 test("core donation starts with PHOTO-FIRST without calling the AI planner", async () => {
   const p = phone(),
     calls = ai.calls;
-  let result = await message(p, "אני רוצה למסור מיטה");
+  let result = await message(p, "אני רוצה למסור מיטה בבית שאן רחוב העלייה קומה 2");
   assert.equal(result.row.reply, PHOTO_FIRST);
   assert.equal(ai.calls, calls);
+  const intent = await pool.query<{ intent: string }>(
+    "SELECT result->>'intent' AS intent FROM command_results WHERE message_id=$1",
+    [result.id],
+  );
+  assert.equal(intent.rows[0]!.intent, "ask_photo");
+  const saved = (await s.active(p))[0]!;
+  const donor = saved.parties.find((party) => party.role === "donor")!;
+  assert.equal(donor.settlement, "בית שאן");
+  assert.equal(donor.address, "רחוב העלייה");
+  assert.equal(donor.floor, 2);
 });
 test("repeated donation does not silently open a duplicate request", async () => {
   const p = phone();
@@ -808,10 +1221,58 @@ test("repeated donation does not silently open a duplicate request", async () =>
   assert.match(repeated.row.reply ?? "", /כבר קיימת פנייה/);
   assert.equal((await s.active(p)).length, 1);
 });
+test("an existing open donation can be redirected to a named recipient", async () => {
+  const p = phone();
+  await message(p, "אני רוצה למסור מיטה");
+  const redirected = await message(p, "אני רוצה למסור את המיטה לטל");
+  assert.doesNotMatch(redirected.row.reply ?? "", /כבר קיימת פנייה/);
+  assert.match(redirected.row.reply ?? "", /מספר הטלפון|כרטיס איש קשר/);
+  const conversation = await pool.query<{ pending_counterparty_name: string | null }>(
+    "SELECT pending_counterparty_name FROM conversations cv JOIN contacts c ON c.id=cv.contact_id WHERE c.phone=$1",
+    [p],
+  );
+  assert.equal(conversation.rows[0]!.pending_counterparty_name, "טל");
+  assert.equal((await s.active(p)).length, 1);
+});
+test("receiver details wait for the counterparty created by the same AI plan", async () => {
+  const donor = phone(), receiver = phone();
+  const initial = await message(donor, "אני רוצה למסור מיטה");
+  const request = (await s.active(donor))[0]!;
+  assert.equal(initial.row.reply, PHOTO_FIRST);
+  ai.managedReply = "קיבלתי, אבל לפני שנמשיך נא לשלוח תמונה של המיטה.";
+  let linked;
+  try {
+    linked = await message(
+      donor,
+      `טל כהן ${receiver}`,
+      [
+        details({
+          request_number: request.number,
+          role: "receiver",
+          name: "טל כהן",
+        }),
+        { type: "counterparty", request_number: request.number, phone: receiver, name: "טל כהן" },
+      ],
+    );
+  } finally {
+    ai.managedReply = "";
+  }
+  const processing = await pool.query<{ error_code: string | null }>(
+    "SELECT error_code FROM messages WHERE id=$1",
+    [linked.id],
+  );
+  assert.equal(processing.rows[0]!.error_code, null);
+  assert.doesNotMatch(linked.row.reply ?? "", /תמונה/);
+  const saved = await s.request(request.id);
+  const recipient = saved.parties.find((party) => party.role === "receiver");
+  assert.equal(saved.origin, "direct");
+  assert.equal(recipient?.phone, receiver);
+  assert.equal(recipient?.name, "טל כהן");
+});
 test("duplicate clarification reloads the latest request and preserves the other party approval", async () => {
   const donor = phone(), receiver = phone(), r = await readyRequest(donor, receiver);
   await pool.query(
-    "UPDATE request_parties SET approved_at=clock_timestamp(), approved_by=contact_id, schedule_approved=true WHERE request_id=$1 AND role='receiver'",
+    "UPDATE request_parties SET approved_at=clock_timestamp(), approved_by=contact_id, schedule_approved=true, schedule_approved_date=(SELECT proposed_run_date FROM requests WHERE id=$1), schedule_approved_at=clock_timestamp() WHERE request_id=$1 AND role='receiver'",
     [r.id],
   );
   await message(donor, "יש לי שוב את אותו מקרר", [
@@ -964,6 +1425,8 @@ test("Tuesday capacity is enforced and same-day requires explicit admin approval
   const a = await readyRequest(),
     b = await readyRequest();
   const date = "2026-09-22";
+  await setProposedDate(a, date);
+  await setProposedDate(b, date);
   await pool.query(
     "INSERT INTO transport_runs(date,capacity) VALUES($1,1) ON CONFLICT(date) DO UPDATE SET capacity=1",
     [date],
@@ -984,6 +1447,7 @@ test("Tuesday capacity is enforced and same-day requires explicit admin approval
   assert.equal(first, "coordinated");
   assert.equal(second, "full");
   const x = await readyRequest();
+  await setProposedDate(x, "2026-09-29");
   assert.equal(
     await s.transaction((c) =>
       s.coordinate(c, x, new Date("2026-09-29T08:00:00Z")),
@@ -991,7 +1455,35 @@ test("Tuesday capacity is enforced and same-day requires explicit admin approval
     "same_day",
   );
 });
-test("20 coordinated arrangements are split 10 per week and the 21st waits for capacity", async () => {
+test("admin can explicitly extend a Tuesday run beyond the default capacity of ten", async () => {
+  const response = await app.inject({
+    method: "POST",
+    url: "/admin/transport-runs/2026-11-03/capacity",
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+    payload: { capacity: 11, reason: "QA explicit admin extension" },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal((await pool.query<{ capacity: number }>(
+    "SELECT capacity FROM transport_runs WHERE date='2026-11-03'",
+  )).rows[0]?.capacity, 11);
+});
+test("only the configured admin can approve one extra transport on WhatsApp", async () => {
+  await pool.query("INSERT INTO transport_runs(date,capacity) VALUES('2026-10-27',10) ON CONFLICT(date) DO UPDATE SET capacity=10");
+  await pool.query("INSERT INTO transport_capacity_approvals(run_date,requested_capacity) VALUES('2026-10-27',11)");
+  const adminReply = await message(cfg.ADMIN_PHONE, "כן 2026-10-27");
+  assert.match(adminReply.row.reply ?? "", /אישרת הובלה נוספת אחת/);
+  assert.equal((await pool.query<{ capacity: number }>("SELECT capacity FROM transport_runs WHERE date='2026-10-27'")).rows[0]?.capacity, 11);
+  await pool.query("INSERT INTO transport_runs(date,capacity) VALUES('2026-11-10',10) ON CONFLICT(date) DO UPDATE SET capacity=10");
+  await pool.query("INSERT INTO transport_capacity_approvals(run_date,requested_capacity) VALUES('2026-11-10',11)");
+  const adminNo = await message(cfg.ADMIN_PHONE, "לא 2026-11-10");
+  assert.match(adminNo.row.reply ?? "", /לא אוסיף הובלה/);
+  assert.equal((await pool.query<{ capacity: number }>("SELECT capacity FROM transport_runs WHERE date='2026-11-10'")).rows[0]?.capacity, 10);
+  assert.equal((await pool.query<{ status: string }>("SELECT status FROM transport_capacity_approvals WHERE run_date='2026-11-10'")).rows[0]?.status, "denied");
+  const other = await message(phone(), "כן 2026-10-27");
+  assert.equal((await pool.query<{ capacity: number }>("SELECT capacity FROM transport_runs WHERE date='2026-10-27'")).rows[0]?.capacity, 11);
+  assert.match(other.row.reply ?? "", /רק המנהל המורשה/, "non-admin must not receive the privileged approval result");
+});
+test("coordinated arrangements stop at ten and request admin approval before another proposal", async () => {
   await pool.query(
     "INSERT INTO transport_runs(date,capacity) VALUES ($1,10),($2,10) ON CONFLICT(date) DO UPDATE SET capacity=10",
     ["2026-10-13", "2026-10-20"],
@@ -999,6 +1491,7 @@ test("20 coordinated arrangements are split 10 per week and the 21st waits for c
   const traces: string[] = [];
   for (let i = 0; i < 20; i++) {
     const r = await readyRequest();
+    await setProposedDate(r, i < 10 ? "2026-10-13" : "2026-10-20");
     const runNow = new Date(i < 10 ? "2026-10-12T08:00:00Z" : "2026-10-19T08:00:00Z");
     const result = await s.transaction(async (c) => {
       const locked = await s.request(r.id, c, true);
@@ -1030,10 +1523,63 @@ test("20 coordinated arrangements are split 10 per week and the 21st waits for c
     { run_date: "2026-10-20", n: 10 },
   ]);
   const waiting = await readyRequest();
+  await setProposedDate(waiting, "2026-10-13");
   assert.equal(
     await s.transaction((c) => s.coordinate(c, waiting, new Date("2026-10-12T08:00:00Z"))),
     "full",
   );
+  const pending = await pool.query<{ requested_capacity: number; status: string }>(
+    "SELECT requested_capacity,status FROM transport_capacity_approvals WHERE run_date='2026-10-13'",
+  );
+  assert.deepEqual(pending.rows, [{ requested_capacity: 11, status: "pending" }]);
+  const adminAsk = await pool.query<{ phone: string; text: string }>(
+    "SELECT phone,text FROM outbox WHERE dedupe_key LIKE 'capacity-approval:%' AND text LIKE '%2026-10-13%'",
+  );
+  assert.equal(adminAsk.rows.length, 1);
+  assert.equal(adminAsk.rows[0]?.phone, cfg.ADMIN_PHONE);
+  assert.match(adminAsk.rows[0]?.text ?? "", /כן 2026-10-13 או לא 2026-10-13/);
+  assert.equal((await s.request(waiting.id)).run_date, null);
+
+  // Approval is one slot at a time. Once slot 11 is approved and consumed,
+  // slot 12 must trigger a fresh approval instead of being coordinated.
+  const firstApproval = await s.transaction((c) =>
+    s.resolveCapacityApproval(c, "2026-10-13", true, cfg.ADMIN_PHONE),
+  );
+  assert.equal(firstApproval, "approved");
+  const run = await pool.query<{ capacity: number }>(
+    "SELECT capacity FROM transport_runs WHERE date='2026-10-13'",
+  );
+  assert.equal(run.rows[0]?.capacity, 11);
+  const slotEleven = await s.transaction(async (c) => {
+    const locked = await s.request(waiting.id, c, true);
+    const outcome = await s.coordinate(c, locked, new Date("2026-10-12T08:00:00Z"));
+    await s.save(c, locked);
+    return outcome;
+  });
+  assert.equal(slotEleven, "coordinated");
+  const slotTwelve = await readyRequest();
+  await setProposedDate(slotTwelve, "2026-10-13");
+  const secondAsk = await s.transaction(async (c) => {
+    const locked = await s.request(slotTwelve.id, c, true);
+    const outcome = await s.coordinate(c, locked, new Date("2026-10-12T08:00:00Z"));
+    await s.save(c, locked);
+    return outcome;
+  });
+  assert.equal(secondAsk, "full");
+  assert.equal((await s.request(slotTwelve.id)).run_date, null);
+  const nextApproval = await pool.query<{ requested_capacity: number; status: string }>(
+    "SELECT requested_capacity,status FROM transport_capacity_approvals WHERE run_date='2026-10-13' ORDER BY requested_capacity",
+  );
+  assert.deepEqual(nextApproval.rows, [
+    { requested_capacity: 11, status: "approved" },
+    { requested_capacity: 12, status: "pending" },
+  ]);
+  const asks = await pool.query<{ text: string }>(
+    "SELECT text FROM outbox WHERE dedupe_key LIKE 'capacity-approval:%' AND phone=$1 AND text LIKE '%2026-10-13%' ORDER BY created_at",
+    [cfg.ADMIN_PHONE],
+  );
+  assert.equal(asks.rows.length, 2);
+  assert.match(asks.rows[1]?.text ?? "", /מכסה 12/);
 });
 test("group, malformed webhook and admin authentication boundaries", async () => {
   const payload = JSON.stringify({
@@ -1101,20 +1647,57 @@ test("group, malformed webhook and admin authentication boundaries", async () =>
     ["preferred_time", "represents_both_parties", "closed_at"],
   );
 });
-test("admin edits only the approved legacy request fields and persists them", async () => {
+test("admin retains direct status and run-date editing with auditable scheduling validation", async () => {
   const r = await readyRequest();
+  const view = await app.inject({
+    method: "GET",
+    url: "/admin/database?table=requests&limit=1",
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+  });
+  assert.equal(view.statusCode, 200);
+  assert.ok(view.json<{ editable_fields: string[] }>().editable_fields.includes("run_date"));
+  assert.ok(view.json<{ editable_fields: string[] }>().editable_fields.includes("status"));
   const response = await app.inject({
     method: "PATCH",
     url: `/admin/database/requests/${r.id}`,
     headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
     payload: {
-      changes: { preferred_time: "אחר הצהריים", represents_both_parties: true },
+      changes: { preferred_time: "16:30", represents_both_parties: true },
     },
   });
   assert.equal(response.statusCode, 200);
   const updated = await s.request(r.id);
-  assert.equal(updated.preferred_time, "אחר הצהריים");
+  assert.equal(updated.preferred_time, "16:30");
   assert.equal(updated.represents_both_parties, true);
+  assert.equal(updated.proposed_run_date, null);
+  assert.ok(updated.parties.every((party) => !party.approved_at && !party.schedule_approved_date));
+  const manualScheduleEdit = await app.inject({
+      method: "PATCH",
+      url: `/admin/database/requests/${r.id}`,
+      headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+      payload: { changes: { run_date: "2026-09-29", status: "coordinated" } },
+    });
+  assert.equal(manualScheduleEdit.statusCode, 200);
+  const manuallyScheduled = await s.request(r.id);
+  assert.equal(manuallyScheduled.run_date, "2026-09-29");
+  assert.equal(manuallyScheduled.status, "coordinated");
+  assert.equal(manuallyScheduled.parties.some((party) => party.schedule_approved_date === "2026-09-29"), false);
+  const fullManualEdit = await app.inject({
+    method: "PATCH",
+    url: `/admin/database/requests/${r.id}/full`,
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+    payload: { changes: { run_date: "2026-10-06", status: "coordinated" } },
+  });
+  assert.equal(fullManualEdit.statusCode, 200);
+  assert.equal((await s.request(r.id)).run_date, "2026-10-06");
+  const nonTuesdayEdit = await app.inject({
+    method: "PATCH",
+    url: `/admin/database/requests/${r.id}/full`,
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+    payload: { changes: { run_date: "2026-09-30", status: "coordinated" } },
+  });
+  assert.equal(nonTuesdayEdit.statusCode, 400);
+  assert.equal((await s.request(r.id)).run_date, "2026-10-06");
   const forbidden = await app.inject({
     method: "PATCH",
     url: `/admin/database/requests/${r.id}`,
@@ -1201,9 +1784,11 @@ test(
   async () => {
     const a = await readyRequest(),
       b = await readyRequest(),
-      date = "2026-10-06",
-      when = new Date("2026-10-05T08:00:00Z");
-    await pool.query("INSERT INTO transport_runs(date,capacity) VALUES($1,1)", [
+      date = "2026-12-01",
+      when = new Date("2026-11-30T08:00:00Z");
+    await setProposedDate(a, date);
+    await setProposedDate(b, date);
+    await pool.query("INSERT INTO transport_runs(date,capacity) VALUES($1,1) ON CONFLICT(date) DO UPDATE SET capacity=1", [
       date,
     ]);
     const results = await Promise.all(
@@ -1263,7 +1848,7 @@ test("admin clear-all requires the exact destructive confirmation and resets tes
     method: "POST",
     url: "/admin/database/clear-all",
     headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
-    payload: { confirm: "מחק הכל עכשיו" },
+    payload: { confirm: false },
   });
   assert.equal(wrong.statusCode, 400);
   assert.equal(Number((await pool.query("SELECT count(*) FROM messages")).rows[0].count), before);
@@ -1271,7 +1856,7 @@ test("admin clear-all requires the exact destructive confirmation and resets tes
     method: "POST",
     url: "/admin/database/clear-all",
     headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
-    payload: { confirm: "מחק הכל" },
+    payload: { confirm: true },
   });
   assert.equal(cleared.statusCode, 200);
   assert.ok(Number(cleared.json<{ deleted: { messages: number } }>().deleted.messages) >= before);

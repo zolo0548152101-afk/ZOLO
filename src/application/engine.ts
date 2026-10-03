@@ -34,6 +34,8 @@ import {
   grounded,
   mutable,
   nextQuestion,
+  nextTuesday,
+  readyToProposeSchedule,
 } from "../domain/policies.js";
 import { rulePlan } from "./rule-planner.js";
 
@@ -95,13 +97,37 @@ export class Engine {
         "INSERT INTO contact_identities(session,chat_id,contact_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
         [this.s.config.WAHA_SESSION, m.chat_id, contact],
       );
-      const conv = await c.query<{ id: string }>(
-        `INSERT INTO conversations(contact_id,session,chat_id) VALUES($1,$2,$3) ON CONFLICT(channel,session,contact_id) DO UPDATE SET chat_id=EXCLUDED.chat_id RETURNING id`,
-        [contact, this.s.config.WAHA_SESSION, m.chat_id],
+      // Avoid taking a write lock on the conversation for every inbound
+      // message. A concurrent turn can lock its pending messages before the
+      // conversation row; an unconditional upsert here locks the conversation
+      // first and can deadlock when that turn is waiting on this message row.
+      let conversation = await c.query<{ id: string; chat_id: string }>(
+        "SELECT id,chat_id FROM conversations WHERE channel='whatsapp' AND session=$1 AND contact_id=$2",
+        [this.s.config.WAHA_SESSION, contact],
       );
+      if (!conversation.rows[0]) {
+        const inserted = await c.query<{ id: string; chat_id: string }>(
+          `INSERT INTO conversations(contact_id,session,chat_id) VALUES($1,$2,$3)
+           ON CONFLICT(channel,session,contact_id) DO NOTHING RETURNING id,chat_id`,
+          [contact, this.s.config.WAHA_SESSION, m.chat_id],
+        );
+        conversation = inserted.rows.length
+          ? inserted
+          : await c.query<{ id: string; chat_id: string }>(
+              "SELECT id,chat_id FROM conversations WHERE channel='whatsapp' AND session=$1 AND contact_id=$2",
+              [this.s.config.WAHA_SESSION, contact],
+            );
+      }
+      if (!conversation.rows[0]) throw new AppError("conversation_missing", 409);
+      if (conversation.rows[0].chat_id !== m.chat_id) {
+        await c.query("UPDATE conversations SET chat_id=$2 WHERE id=$1", [
+          conversation.rows[0].id,
+          m.chat_id,
+        ]);
+      }
       await c.query(
         "UPDATE messages SET contact_id=$2,conversation_id=$3 WHERE id=$1",
-        [m.id, contact, conv.rows[0]!.id],
+        [m.id, contact, conversation.rows[0].id],
       );
       await this.s.queue.send(c, "conversation", { id: m.id }, phone);
     });
@@ -324,14 +350,17 @@ export class Engine {
       }
     }
     const deterministic = plan ? null : rulePlan(ctx);
+    const capacityDecisionText =
+      /^(כן|לא)(?:\s+(?:\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4}))?\s*$/.test(text.trim());
     let supersessionCheck = false;
     // Resolve cheap deterministic messages outside the AI error/retry block;
     // a transient DB ordering retry must not be mislabeled as an OpenAI error.
     if (
       !plan &&
       !deterministic &&
-      (quickReply(text) !== null ||
+        (quickReply(text) !== null ||
         isStatus(text) ||
+        capacityDecisionText ||
         (ctx.conversation.phone === this.s.config.ADMIN_PHONE &&
           /^#פניות(?:\s+(?:ל)?חיים\s+יחד)?\s*$/.test(text.trim())))
     ) {
@@ -517,14 +546,69 @@ export class Engine {
       let reply: string | null = null,
         request: Request | null = null,
         reason: string | undefined = technicalReason,
-        protectedReply = false;
+        protectedReply = false,
+        intent = "other";
       const plan = ctx.message.ai_plan
         ? planSchema.parse(ctx.message.ai_plan)
         : proposed;
-      if (
+      let capacityDecision = /^(כן|לא)(?:\s+(\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4}))?\s*$/.exec(text.trim());
+      // A bare "כן"/"לא" is ordinary conversation unless the configured
+      // administrator actually has a pending capacity decision. A dated
+      // answer remains an explicit capacity command so unauthorized actors
+      // receive the correct rejection instead of mutating a request.
+      if (capacityDecision && !capacityDecision[2]) {
+        if (phone !== this.s.config.ADMIN_PHONE) capacityDecision = null;
+        else {
+          const pending = await c.query(
+            "SELECT 1 FROM transport_capacity_approvals WHERE status='pending' LIMIT 1",
+          );
+          if (!pending.rowCount) capacityDecision = null;
+        }
+      }
+      if (capacityDecision) {
+        intent = "acknowledge";
+        if (phone !== this.s.config.ADMIN_PHONE) {
+          reply = "רק המנהל המורשה יכול לאשר הובלה מעבר למכסה. הבקשה שלך לא שינתה את התיאום.";
+          protectedReply = true;
+        } else {
+          const suppliedDate = capacityDecision[2];
+          const date = suppliedDate
+            ? suppliedDate.includes("/")
+              ? suppliedDate.split("/").reverse().join("-")
+              : suppliedDate
+            : null;
+          const parsedDate = date ? new Date(`${date}T12:00:00Z`) : null;
+          if (
+            date &&
+            (!/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+              Number.isNaN(parsedDate?.getTime()) ||
+              parsedDate?.toISOString().slice(0, 10) !== date)
+          ) {
+            reply = "התאריך לא תקין. נא להשיב כן או לא בצירוף תאריך בפורמט YYYY-MM-DD.";
+            protectedReply = true;
+          } else {
+            const result = await this.s.resolveCapacityApproval(
+              c,
+              date,
+              capacityDecision[1] === "כן",
+              phone,
+            );
+            reply =
+              result === "approved"
+                ? "אישרת הובלה נוספת אחת. המכסה הוגדלה באותו יום בלבד; ההובלה עדיין תתואם רק לאחר אישורי הצדדים."
+                : result === "denied"
+                  ? "הבנתי. לא אוסיף הובלה לאותו יום; הפניות הממתינות יישארו ללא תיאום."
+                  : result === "ambiguous"
+                    ? "יש כמה בקשות ממתינות. נא להשיב כן או לא בצירוף תאריך בפורמט YYYY-MM-DD."
+                    : "אין בקשת הגדלת מכסה ממתינה כרגע.";
+            protectedReply = true;
+          }
+        }
+      } else if (
         phone === this.s.config.ADMIN_PHONE &&
         /^#פניות(?:\s+(?:ל)?חיים\s+יחד)?\s*$/.test(text.trim())
       ) {
+        intent = "acknowledge";
         const ids = await c.query<{ id: string }>(
           "SELECT id FROM requests ORDER BY number",
         );
@@ -535,10 +619,12 @@ export class Engine {
         for (const current of requests)
           for (const mediaId of current.photo_ids)
             await this.s.outbound(c, ctx.message, { phone, text: `תמונה שמורה מפנייה ${current.number}`, media_id: mediaId }, `admin-status-media:${id}:${current.id}:${mediaId}`, current.id);
-      } else if (isStatus(text)) reply = statusText(ctx.requests);
+      } else if (isStatus(text)) { reply = statusText(ctx.requests); intent = "other"; }
       else if (ctx.conversation.mode === "human") {
+        intent = "human_escalation";
         await this.alert(c, ctx, "human_followup", null, null);
       } else if (technicalReason || ctx.message.media_state === "failed") {
+        intent = technicalReason ? "clarification" : "human_escalation";
         const selected =
           ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
           (ctx.requests.length === 1 ? ctx.requests[0] : undefined);
@@ -558,6 +644,7 @@ export class Engine {
           reason ??= "media_failure";
         }
       } else if (quickReply(text) !== null) {
+        intent = "acknowledge";
         const quick = quickReply(text)!;
         const selected =
           ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
@@ -567,6 +654,7 @@ export class Engine {
           : quick;
       }
       else if (ctx.message.kind === "image") {
+        intent = "ask_details";
         const owned = ctx.requests.filter(
           (r) =>
             r.parties.some((p) => p.role === "donor" && p.phone === phone) &&
@@ -617,6 +705,7 @@ export class Engine {
           ? `${PHOTO_THANKS}\n${nextQuestion(request, phone).text}`
           : PHOTO_THANKS;
       } else if (ctx.message.kind === "location") {
+        intent = "ask_address";
         const selected =
           ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
           (ctx.requests.length === 1 ? ctx.requests[0] : undefined);
@@ -694,11 +783,65 @@ export class Engine {
               request?.id ?? null,
             );
           } else {
+            const handoffTransitionPlanned = plan.commands.some((candidate) =>
+              candidate.type === "counterparty_candidate" ||
+              candidate.type === "confirm_counterparty" ||
+              candidate.type === "counterparty"
+            );
+            // AI may return receiver details before the command that creates
+            // that receiver. Preserve the plan otherwise, but satisfy this
+            // explicit dependency for an already-open request so the whole
+            // transaction is not rolled back as forbidden_party.
+            const orderedCommands = [...plan.commands];
+            for (let detailsIndex = 0; detailsIndex < orderedCommands.length; detailsIndex++) {
+              const detailsCommand = orderedCommands[detailsIndex]!;
+              if (detailsCommand.type !== "details" || detailsCommand.role !== "receiver") continue;
+              const counterpartyIndex = orderedCommands.findIndex(
+                (candidate, candidateIndex) =>
+                  candidateIndex > detailsIndex &&
+                  candidate.type === "counterparty" &&
+                  candidate.request_number === detailsCommand.request_number,
+              );
+              if (counterpartyIndex < 0) continue;
+              const [counterpartyCommand] = orderedCommands.splice(counterpartyIndex, 1);
+              orderedCommands.splice(detailsIndex, 0, counterpartyCommand!);
+              detailsIndex++;
+            }
+            const executableCommands = orderedCommands.filter((command) => {
+              if (command.type !== "details" || !command.role) return true;
+              const createsCounterparty = orderedCommands.some(
+                (candidate) =>
+                  candidate.type === "counterparty" &&
+                  candidate.request_number === command.request_number,
+              );
+              if (!createsCounterparty) return true;
+              const targetRequest = ctx.requests.find(
+                (candidate) => candidate.number === command.request_number,
+              );
+              const actorRole = targetRequest?.parties.find(
+                (candidate) => candidate.phone === phone,
+              )?.role;
+              // A donor may identify/link a receiver, but cannot assert that
+              // receiver's profile fields. Keep the valid counterparty
+              // transition and let the receiver provide their own details.
+              return !actorRole || actorRole === command.role;
+            });
+            const initialRequestIds = new Set(ctx.requests.map((candidate) => candidate.id));
             let index = 0;
-            for (const command of plan.commands) {
+            const hasSameMessageDonorDetails = executableCommands.some(
+              (candidate) =>
+                candidate.type === "details" && candidate.role === "donor",
+            );
+            for (const command of executableCommands) {
               // Once an open donation is created, PHOTO-FIRST blocks every
-              // later command in the same AI batch until an image arrives.
-              if (request && photoGate(request)) {
+              // later command in the same AI batch until an image arrives,
+              // except donor details extracted from that same opening message.
+              if (
+                request &&
+                photoGate(request) &&
+                !handoffTransitionPlanned &&
+                command.type !== "details"
+              ) {
                 reply = PHOTO_FIRST;
                 break;
               }
@@ -714,6 +857,13 @@ export class Engine {
               }
               reply = result.reply;
               reason = result.humanReason;
+              intent = command.type === "counterparty"
+                ? "ask_verification"
+                : command.type === "details"
+                  ? "ask_details"
+                  : command.type === "donate" && result.request?.origin !== "direct"
+                    ? "ask_photo"
+                    : "acknowledge";
               await this.s.event(
                 c,
                 ctx.message,
@@ -724,7 +874,13 @@ export class Engine {
               );
               // Open donations are PHOTO-FIRST. Do not let a multi-command
               // prompt collect names/addresses before the required photo.
-              if (command.type === "donate" && result.request && photoGate(result.request)) {
+              if (
+                command.type === "donate" &&
+                result.request &&
+                photoGate(result.request) &&
+                !handoffTransitionPlanned &&
+                !hasSameMessageDonorDetails
+              ) {
                 reply = PHOTO_FIRST;
                 break;
               }
@@ -748,6 +904,76 @@ export class Engine {
               index++;
               if (reason || request?.status === "rejected") break;
             }
+            // Donor facts extracted from the opening message are retained, but
+            // the first operational gate remains the photo request. A later
+            // details command must not replace PHOTO-FIRST with a condition
+            // or another detail question.
+            if (
+              request &&
+              !reason &&
+              !initialRequestIds.has(request.id) &&
+              request.origin === "donation" &&
+              photoGate(request) &&
+              !handoffTransitionPlanned
+            ) {
+              reply = PHOTO_FIRST;
+              intent = "ask_photo";
+            }
+            if (
+              request &&
+              !reason &&
+              request.status !== "coordinated" &&
+              readyToProposeSchedule(request) &&
+              (!request.proposed_run_date || request.proposed_run_date < nextTuesday(this.now()).date)
+            ) {
+              const previousProposal = request.proposed_run_date;
+              const proposed = await this.s.proposeScheduleDate(c, request, this.now());
+              if (!proposed) {
+                request.status = "waiting_capacity";
+                const capacityApproval = await c.query<{ status: string }>(
+                  "SELECT status FROM transport_capacity_approvals WHERE request_id=$1 ORDER BY requested_at DESC LIMIT 1",
+                  [request.id],
+                );
+                reply = capacityApproval.rows[0]?.status === "pending"
+                  ? "מכסת ההובלות ליום שלישי מלאה. שלחתי למנהל בקשה לאשר הובלה נוספת. הפנייה ממתינה, ולא ייקבע מועד נוסף עד לאישור מפורש."
+                  : capacityApproval.rows[0]?.status === "denied"
+                    ? "המנהל לא אישר הובלה נוספת ליום שלישי זה. הפנייה נשארה בהמתנה ולא תואמה."
+                    : "אין כרגע מועד שניתן להציע. השארתי את הפנייה בהמתנה; לא תואם מועד נוסף.";
+                await this.s.save(c, request);
+              } else {
+                request.proposed_run_date = proposed;
+                request.status = "awaiting_approval";
+                if (previousProposal !== proposed)
+                  for (const p of request.parties) {
+                    p.schedule_approved = false;
+                    p.schedule_approved_date = null;
+                    p.schedule_approved_at = null;
+                  }
+                await this.s.save(c, request);
+                reply = nextQuestion(request, phone).text;
+                intent = "ask_schedule_approval";
+                for (const p of request.parties) {
+                  if (p.phone === phone || request.represents_both_parties) continue;
+                  const permission = await c.query<{ state: string }>(
+                    "SELECT state FROM request_verifications WHERE request_id=$1 AND role=$2",
+                    [request.id, p.role],
+                  );
+                  const authorized = ["consented", "queued", "provider_accepted", "delivered", "approved"].includes(permission.rows[0]?.state ?? "");
+                  if (!authorized) continue;
+                  const notice = { phone: p.phone, text: nextQuestion(request, p.phone).text };
+                  const outboxId = await this.s.outbound(
+                    c,
+                    ctx.message,
+                    notice,
+                    `schedule-proposal:${request.id}:${proposed}:${p.phone}`,
+                    request.id,
+                    "pending",
+                  );
+                  if (outboxId)
+                    deferredNotices.push({ outboxId, notice, requestId: request.id });
+                }
+              }
+            }
             if (request && !reason) {
               const coordinated = await this.s.coordinate(
                 c,
@@ -759,12 +985,25 @@ export class Engine {
                 reply = HUMAN_REPLY;
               }
               if (coordinated === "full") {
+                const fullDate = request.proposed_run_date!;
+                request.status = "waiting_capacity";
                 await this.s.save(c, request);
-                reply = "אין כרגע מקום פנוי בהובלה הקרובה. נעדכן.";
+                const approval = await c.query<{ status: string }>(
+                  "SELECT status FROM transport_capacity_approvals WHERE run_date=$1 ORDER BY requested_at DESC LIMIT 1",
+                  [fullDate],
+                );
+                reply = approval.rows[0]?.status === "pending"
+                  ? `הגענו למכסת ההובלות ליום שלישי ${fullDate}. שלחתי למנהל בקשה לאשר הובלה נוספת. הפנייה ממתינה; לא אעביר אותה אוטומטית לשבוע הבא ולא אתאם בלי אישור.`
+                  : `מכסת ההובלות ליום שלישי ${fullDate} מלאה ולא אושרה הובלה נוספת. הפנייה נשארה בהמתנה ללא תיאום.`;
+              } else if (coordinated === "capacity_denied") {
+                request.status = "waiting_capacity";
+                await this.s.save(c, request);
+                reply = "המנהל לא אישר הובלה נוספת ליום שלישי הזה. הפנייה נשארה בהמתנה ולא תואמה.";
               }
               if (coordinated === "coordinated") {
                 await this.s.save(c, request);
                 reply = statusText([request]);
+                intent = "coordinated";
                 await this.s.event(
                   c,
                   ctx.message,
@@ -798,6 +1037,7 @@ export class Engine {
           request = null;
           reason = undefined;
           reply = e.publicMessage;
+          intent = "clarification";
           await this.s.event(c, ctx.message, phone, "tool_rejected", {
             code: e.code,
           });
@@ -809,6 +1049,7 @@ export class Engine {
       } else {
         reply = HUMAN_REPLY;
         reason = "no_plan";
+        intent = "human_escalation";
       }
       const metadata = await c.query<{ ai_metadata: Record<string, unknown> | null }>(
         "SELECT ai_metadata FROM messages WHERE id=$1",
@@ -828,6 +1069,8 @@ export class Engine {
       );
       const sideEffectProven =
         noticeEvidence.rows[0]!.n > 0 || request?.status === "coordinated";
+      const managedReplyContradictsState =
+        request?.origin === "direct" && /תמונה/.test(managedReply);
       // The prompt may never override an operational failure, a human handoff,
       // or a missing reply. A deterministic flow question is also protected:
       // the prompt is consulted and logged, but cannot replace the next safe
@@ -837,10 +1080,16 @@ export class Engine {
         reply &&
         managedReply &&
         !protectedReply &&
+        !managedReplyContradictsState &&
         actionSource !== "deterministic_flow" &&
         (!operationalClaim || sideEffectProven)
       )
         reply = managedReply;
+      else if (managedReplyContradictsState)
+        await this.s.event(c, ctx.message, "system", "prompt_state_contradiction_rejected", {
+          claim: managedReply.slice(0, 500),
+          origin: request?.origin,
+        }, request?.id ?? null);
       else if (managedReply && operationalClaim && !sideEffectProven)
         await this.s.event(c, ctx.message, "system", "prompt_claim_rejected", {
           claim: managedReply.slice(0, 500),
@@ -861,6 +1110,7 @@ export class Engine {
           JSON.stringify(plan ?? { fast_path: true }),
           JSON.stringify({
             reply,
+            intent,
             request_number: request?.number ?? null,
             reason: reason ?? null,
           }),

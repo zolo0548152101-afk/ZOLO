@@ -19,7 +19,7 @@ import {
   type Log,
   type Request,
 } from "../domain/types.js";
-import { localDate, statusText } from "../domain/policies.js";
+import { localDate, nextQuestion, statusText } from "../domain/policies.js";
 import { integrationAdapters } from "./integration-port.js";
 export interface RuntimeOverrides {
   pool?: pg.Pool;
@@ -50,9 +50,6 @@ export class Runtime {
     if (this.initializing || this.ready) return;
     this.initializing = true;
     try {
-      await this.pool.query(
-        "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_counterparty_name text",
-      );
       const version = await this.pool.query<{ n: number }>(
         "SELECT count(*)::int AS n FROM pgmigrations",
       );
@@ -303,6 +300,7 @@ export class Runtime {
         [date, ["coordinated", "closed"]],
       );
       const requests: Request[] = [];
+      if (!ids.rows.length) return;
       for (const x of ids.rows) requests.push(await store.request(x.id));
       await store.transaction((c) =>
         store.outbound(
@@ -361,6 +359,38 @@ export class Runtime {
       await store.transaction(async (c) => {
         const r = await store.request(row.id, c, true);
         if (r.status !== "waiting_capacity") return;
+        if (!r.proposed_run_date) {
+          const proposed = await store.proposeScheduleDate(c, r, now);
+          if (!proposed) return;
+          r.proposed_run_date = proposed;
+          r.status = "awaiting_approval";
+          for (const p of r.parties) {
+            p.schedule_approved = false;
+            p.schedule_approved_date = null;
+            p.schedule_approved_at = null;
+          }
+          await store.save(c, r);
+          const trace_id = randomUUID();
+          await store.event(c, { trace_id }, "system", "schedule_proposed_after_capacity_approval", { date: proposed }, r.id);
+          for (const p of r.parties) {
+            const permission = await c.query<{ state: string }>(
+              "SELECT state FROM request_verifications WHERE request_id=$1 AND role=$2",
+              [r.id, p.role],
+            );
+            const authorized = ["consented", "queued", "provider_accepted", "delivered", "approved"].includes(permission.rows[0]?.state ?? "");
+            if (!authorized) continue;
+            const notice = { phone: p.phone, text: nextQuestion(r, p.phone).text };
+            await store.outbound(
+              c,
+              { trace_id, mode: this.config.BOT_MODE },
+              notice,
+              `schedule-proposal-after-capacity:${r.id}:${proposed}:${p.phone}`,
+              r.id,
+              "pending",
+            );
+          }
+          return;
+        }
         if ((await store.coordinate(c, r, now)) === "coordinated") {
           await store.save(c, r);
           const trace_id = randomUUID();
