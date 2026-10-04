@@ -40,8 +40,8 @@
       "target_proof": {
         "application_name": "haim-qa-backup-restore",
         "database_name_contract": true,
-        "source_database": "haim_core_backup_source",
-        "target_database": "haim_core_backup_target",
+        "source_database": "haim_core_test",
+        "target_database": "haim_qa_disposable",
         "distinct_database_identity": true
       },
       "target_state_verification": "PASS",
@@ -57,7 +57,7 @@
   "gates": {
     "build_typecheck": "PASS",
     "unit": "64/64 PASS",
-    "t21_t22_targeted": "4/4 PASS",
+    "t21_t22_targeted": "5/5 PASS",
     "integration": "76/76 PASS",
     "sheets_import": "30/30 PASS",
     "regressions": "26/26 PASS",
