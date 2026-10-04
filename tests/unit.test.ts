@@ -939,6 +939,33 @@ test("transport capacity configuration cannot exceed ten", () => {
     /TRANSPORT_CAPACITY/,
   );
 });
+test("admin capability credentials must be distinct", () => {
+  const base = {
+    NODE_ENV: "test" as const,
+    DATABASE_URL: "postgres://test/test",
+    DB_SCHEMA: "haim_core_test" as const,
+    BOT_MODE: "shadow" as const,
+    AI_ENABLED: "false",
+    WAHA_WEBHOOK_HMAC_KEY: "test-only-hmac-key-not-a-secret-000000",
+    HAIM_ADMIN_TOKEN: "normal-admin-token",
+  };
+  assert.throws(
+    () => readConfig({ ...base, HAIM_ADMIN_DESTRUCTIVE_TOKEN: base.HAIM_ADMIN_TOKEN }),
+    /admin_capability_credentials_must_be_distinct/,
+  );
+  assert.throws(
+    () => readConfig({ ...base, HAIM_ADMIN_READONLY_TOKEN: base.HAIM_ADMIN_TOKEN }),
+    /admin_capability_credentials_must_be_distinct/,
+  );
+  assert.throws(
+    () => readConfig({
+      ...base,
+      HAIM_ADMIN_READONLY_TOKEN: "read-only-token",
+      HAIM_ADMIN_DESTRUCTIVE_TOKEN: "read-only-token",
+    }),
+    /admin_capability_credentials_must_be_distinct/,
+  );
+});
 test("coordinated status adds a map-ordered transport recommendation", () => {
   const a = sampleRequest();
   a.status = "coordinated";

@@ -1700,7 +1700,11 @@ test("admin database is read-only and exposes only named mutation operations", a
     "SELECT data FROM request_events WHERE event_type='conversation_resumed' ORDER BY id DESC LIMIT 1",
   );
   assert.equal(audit.rows[0]?.data?.operation, "resume_conversation");
+  assert.equal(audit.rows[0]?.data?.actor, "admin-http");
   assert.equal(audit.rows[0]?.data?.capability, "normal");
+  assert.equal(audit.rows[0]?.data?.target, `phone:${r.parties[0]!.phone}`);
+  assert.equal(audit.rows[0]?.data?.result, "success");
+  assert.ok(Number.isFinite(Date.parse(audit.rows[0]?.data?.timestamp)));
 });
 test("admin mutations reject cross-origin requests and are rate bounded", async () => {
   const r = await readyRequest();
@@ -1787,7 +1791,11 @@ test("destructive admin operations require test-only capability and explicit con
     "SELECT data FROM request_events WHERE event_type='admin_test_data_cleared' ORDER BY id DESC LIMIT 1",
   );
   assert.equal(event.rows[0]?.data?.operation, "clear_test_data");
+  assert.equal(event.rows[0]?.data?.actor, "admin-http");
   assert.equal(event.rows[0]?.data?.capability, "destructive");
+  assert.equal(event.rows[0]?.data?.target, "test_database");
+  assert.equal(event.rows[0]?.data?.result, "success");
+  assert.ok(Number.isFinite(Date.parse(event.rows[0]?.data?.timestamp)));
 });
 test("@lid and canonical chat resolve into one contact and ordered conversation", async () => {
   const p = phone();

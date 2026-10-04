@@ -82,6 +82,13 @@ const envSchema = z.object({
 export type Config = z.infer<typeof envSchema>;
 export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const c = envSchema.parse(env);
+  const adminCapabilityTokens = [
+    c.HAIM_ADMIN_TOKEN,
+    c.HAIM_ADMIN_READONLY_TOKEN,
+    c.HAIM_ADMIN_DESTRUCTIVE_TOKEN,
+  ].filter(Boolean);
+  if (new Set(adminCapabilityTokens).size !== adminCapabilityTokens.length)
+    throw new Error("admin_capability_credentials_must_be_distinct");
   if (c.BOT_MODE === "live" && c.DB_SCHEMA !== "haim_core")
     throw new Error("live_requires_haim_core");
   if (
