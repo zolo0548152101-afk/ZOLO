@@ -4,9 +4,20 @@
 export interface IntegrationEvent {
   id: string;
   type: string;
+  schemaVersion: number;
   requestId: string | null;
   occurredAt: string;
   data: unknown;
+}
+export class IntegrationDeliveryError extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+    readonly ambiguous = false,
+  ) {
+    super(message);
+    this.name = "IntegrationDeliveryError";
+  }
 }
 export interface IntegrationAdapter {
   readonly name: string;

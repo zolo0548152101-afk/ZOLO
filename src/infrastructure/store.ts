@@ -536,7 +536,7 @@ export class Store {
     data: unknown = {},
     requestId: string | null = null,
   ): Promise<void> {
-    const e = await c.query<{ id: string }>(
+    const e = await c.query<{ id: string; created_at: string }>(
       "INSERT INTO request_events(request_id,message_id,trace_id,actor,event_type,data) VALUES($1,$2,$3,$4,$5,$6) RETURNING id",
       [
         requestId,
@@ -547,11 +547,19 @@ export class Store {
         JSON.stringify(data),
       ],
     );
+    const eventId = e.rows[0]!.id;
+    const payload = data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : { value: data };
+    await c.query(
+      `UPDATE request_events
+          SET data=$2
+        WHERE id=$1`,
+      [eventId, JSON.stringify({ ...payload, event_id: eventId, event_type: type, schema_version: 1, request_id: requestId, occurred_at: new Date().toISOString(), payload })],
+    );
     const integrations = await c.query<{ id: string; integration: string }>(
-      `INSERT INTO integration_outbox(event_id,integration)
-       SELECT $1,name FROM integrations WHERE enabled=true
+      `INSERT INTO integration_outbox(event_id,integration,idempotency_key)
+       SELECT $1::bigint,name,'integration:'||name||':'||($1::bigint)::text FROM integrations WHERE enabled=true
        ON CONFLICT DO NOTHING RETURNING id,integration`,
-      [e.rows[0]!.id],
+      [eventId],
     );
     for (const row of integrations.rows)
       await this.queue.send(c, "integration", { id: row.id }, row.integration);

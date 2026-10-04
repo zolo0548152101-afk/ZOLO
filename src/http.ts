@@ -372,10 +372,33 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           ok: true,
           inbox: inbox.rows[0],
           outbox: outbox.rows,
+          integrations: (await s.pool.query("SELECT integration,state,count(*)::int AS count,coalesce(sum(attempts),0)::int AS attempts FROM integration_outbox GROUP BY integration,state ORDER BY integration,state")).rows,
           queues,
           blocked,
           ai: ai.rows[0],
         };
+      });
+      admin.post("/integrations/:id/replay", async (req) => {
+        const p = z.object({ id: uuid }).parse(req.params);
+        const b = z.strictObject({ reason }).parse(req.body);
+        requireAdminCapability(req, "normal");
+        const s = runtime.requireStore();
+        await s.transaction(async (client) => {
+          const row = await client.query<{ state: string; idempotency_key: string }>(
+            "SELECT state,idempotency_key FROM integration_outbox WHERE id=$1 FOR UPDATE",
+            [p.id],
+          );
+          const item = row.rows[0];
+          if (!item) throw new AppError("integration_delivery_not_found", 404);
+          if (item.state === "delivered") throw new AppError("integration_delivery_already_delivered", 409);
+          if (item.state !== "dead_letter") throw new AppError("integration_delivery_not_terminal", 409);
+          await client.query(
+            "UPDATE integration_outbox SET state='pending',attempts=0,last_error=NULL,error_class=NULL,terminal_at=NULL,next_attempt_at=NULL WHERE id=$1",
+            [p.id],
+          );
+          await s.event(client, { trace_id: req.id }, "admin", "integration_delivery_replayed", adminAuditRecord(req, "replay_integration_delivery", `integration_outbox:${p.id}`, "success", { integration_outbox_id: p.id, idempotency_key: item.idempotency_key, reason: b.reason }));
+        });
+        return { ok: true, id: p.id };
       });
       admin.get("/requests", async (req) => {
         const q = z

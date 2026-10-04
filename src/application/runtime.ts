@@ -20,7 +20,15 @@ import {
   type Request,
 } from "../domain/types.js";
 import { localDate, nextQuestion, statusText } from "../domain/policies.js";
-import { integrationAdapters } from "./integration-port.js";
+import {
+  integrationAdapters,
+  IntegrationDeliveryError,
+  type IntegrationAdapter,
+  type IntegrationEvent,
+} from "./integration-port.js";
+const INTEGRATION_MAX_ATTEMPTS = 3;
+const INTEGRATION_RETRY_DELAY_SECONDS = 2;
+const INTEGRATION_ACTIVE_TIMEOUT_SECONDS = 60;
 export interface RuntimeOverrides {
   pool?: pg.Pool;
   planner?: Planner;
@@ -28,6 +36,7 @@ export interface RuntimeOverrides {
   storage?: MediaStorage;
   queueOptions?: Partial<ConstructorOptions>;
   now?: () => Date;
+  integrationAdapters?: ReadonlyMap<string, IntegrationAdapter>;
 }
 export class Runtime {
   readonly pool: pg.Pool;
@@ -39,12 +48,14 @@ export class Runtime {
   private initializing = false;
   private heartbeat: NodeJS.Timeout | undefined;
   private planner: Planner | null = null;
+  private readonly adapters: ReadonlyMap<string, IntegrationAdapter>;
   constructor(
     readonly config: Config,
     readonly log: Log,
     private readonly overrides: RuntimeOverrides = {},
   ) {
     this.pool = overrides.pool ?? makePool(config, log);
+    this.adapters = overrides.integrationAdapters ?? integrationAdapters;
   }
   async start(workers = true): Promise<void> {
     if (this.initializing || this.ready) return;
@@ -191,8 +202,14 @@ export class Runtime {
             ]);
           });
         }
+        await this.pool.query(
+          `UPDATE integration_outbox
+              SET state='pending'
+            WHERE state='active'
+              AND last_attempt_at < clock_timestamp()-interval '${INTEGRATION_ACTIVE_TIMEOUT_SECONDS} seconds'`,
+        );
         const recoverIntegrations = await this.pool.query<{ id: string; integration: string }>(
-          "SELECT id,integration FROM integration_outbox WHERE state='pending' ORDER BY id LIMIT 500",
+          "SELECT id,integration FROM integration_outbox WHERE state='pending' AND (next_attempt_at IS NULL OR next_attempt_at<=clock_timestamp()) ORDER BY event_id LIMIT 500",
         );
         for (const row of recoverIntegrations.rows) {
           await store.transaction(async (c) => {
@@ -221,31 +238,62 @@ export class Runtime {
     }
   }
 
-  private async deliverIntegration(id: string): Promise<void> {
+  async deliverIntegration(id: string): Promise<void> {
     const row = await this.pool.query<{
       integration: string;
-      state: "pending" | "delivered" | "failed";
+      state: "pending" | "active" | "delivered" | "dead_letter";
+      attempts: number;
       event_id: string;
+      idempotency_key: string;
+      schema_version: number;
+      occurred_at: string;
+      last_error: string | null;
       event_type: string;
       request_id: string | null;
-      occurred_at: string;
       data: unknown;
     }>(
-      `SELECT io.integration,io.state,io.event_id::text,ev.event_type,
-              ev.request_id,ev.created_at::text AS occurred_at,ev.data
+      `SELECT io.integration,io.state,io.attempts,io.idempotency_key,
+              io.event_id::text,ev.data->>'schema_version' AS schema_version,
+              ev.created_at::text AS occurred_at,io.last_error,
+              ev.event_type,ev.request_id,ev.data
          FROM integration_outbox io JOIN request_events ev ON ev.id=io.event_id
         WHERE io.id=$1`,
       [id],
     );
     const item = row.rows[0];
     if (!item || item.state !== "pending") return;
-    const adapter = integrationAdapters.get(item.integration);
+    const claim = await this.pool.query<{ attempts: number }>(
+      `UPDATE integration_outbox io
+          SET state='active',attempts=io.attempts+1,last_attempt_at=clock_timestamp()
+        WHERE io.id=$1 AND io.state='pending'
+          AND (io.next_attempt_at IS NULL OR io.next_attempt_at<=clock_timestamp())
+          AND NOT EXISTS (
+            SELECT 1 FROM integration_outbox prior
+             WHERE prior.integration=io.integration
+               AND prior.event_id<io.event_id
+               AND prior.state<>'delivered'
+          )
+        RETURNING attempts`,
+      [id],
+    );
+    if (!claim.rowCount) return;
+    const attempts = claim.rows[0]!.attempts;
+    const adapter = this.adapters.get(item.integration);
     if (!adapter) {
       await this.pool.query(
-        "UPDATE integration_outbox SET state='failed',attempts=attempts+1,last_error='adapter_not_registered' WHERE id=$1 AND state='pending'",
+        "UPDATE integration_outbox SET state='dead_letter',last_error='adapter_not_registered',terminal_at=clock_timestamp() WHERE id=$1 AND state='active'",
         [id],
       );
       this.log.error({ code: "integration_adapter_missing", integration: item.integration, outbox_id: id });
+      return;
+    }
+    const event = item.data as Record<string, unknown>;
+    if (Number(event.schema_version) !== 1) {
+      await this.pool.query(
+        "UPDATE integration_outbox SET state='dead_letter',last_error='unsupported_schema_version',error_class='terminal',terminal_at=clock_timestamp() WHERE id=$1 AND state='active'",
+        [id],
+      );
+      this.log.error({ code: "integration_schema_version_unsupported", integration: item.integration, outbox_id: id });
       return;
     }
     try {
@@ -253,22 +301,34 @@ export class Runtime {
         {
           id: item.event_id,
           type: item.event_type,
+          schemaVersion: Number(event.schema_version ?? item.schema_version),
           requestId: item.request_id,
           occurredAt: item.occurred_at,
-          data: item.data,
-        },
-        { idempotencyKey: id, signal: AbortSignal.timeout(30000) },
+          data: event.payload ?? item.data,
+        } satisfies IntegrationEvent,
+        { idempotencyKey: item.idempotency_key, signal: AbortSignal.timeout(30000) },
       );
       await this.pool.query(
-        "UPDATE integration_outbox SET state='delivered',attempts=attempts+1,delivered_at=clock_timestamp(),last_error=NULL WHERE id=$1 AND state='pending'",
+        "UPDATE integration_outbox SET state='delivered',delivered_at=clock_timestamp(),last_error=NULL,terminal_at=NULL WHERE id=$1 AND state='active'",
         [id],
       );
     } catch (e) {
+      const retryable = typeof e === "object" && e !== null && "retryable" in e && e.retryable === true;
+      const ambiguous = typeof e === "object" && e !== null && "ambiguous" in e && e.ambiguous === true;
+      const code = (e instanceof IntegrationDeliveryError ? e.message : errorCode(e)).slice(0, 160);
+      if (ambiguous || !retryable || attempts >= INTEGRATION_MAX_ATTEMPTS) {
+        await this.pool.query(
+          "UPDATE integration_outbox SET state='dead_letter',last_error=$2,error_class=$3,terminal_at=clock_timestamp() WHERE id=$1 AND state='active'",
+          [id, code, ambiguous ? "ambiguous" : retryable ? "retry_exhausted" : "terminal"],
+        );
+        if (ambiguous) this.log.error({ code: "integration_ambiguous_delivery", integration: item.integration, outbox_id: id });
+        return;
+      }
       await this.pool.query(
-        "UPDATE integration_outbox SET state='failed',attempts=attempts+1,last_error=$2 WHERE id=$1 AND state='pending'",
-        [id, errorCode(e)],
+        "UPDATE integration_outbox SET state='pending',next_attempt_at=clock_timestamp()+($2 * interval '1 second'),last_error=$3,error_class='retryable' WHERE id=$1 AND state='active'",
+        [id, INTEGRATION_RETRY_DELAY_SECONDS * 2 ** Math.max(0, attempts - 1), code],
       );
-      throw new RetryableError(errorCode(e));
+      throw new RetryableError(code);
     }
   }
   private async beat(): Promise<void> {
