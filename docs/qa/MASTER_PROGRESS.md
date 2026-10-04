@@ -164,8 +164,8 @@ Phase 3 is closed. Phase 4 has not started and must not be started without the s
 - status: correction implemented, canonical gates passed, and independent review requested; T21+ not started.
 - authorized baseline: `8d4b8e0dcc83e52ee3f1f6cd94452b9a8e1e6fe6`.
 - correction scope: actual business-row reconciliation (not counts only), Tuesday/missing-timestamp/destination-identity validation, required quantity and description bounds, consistent supplied-run FK preflight, separate contact/party lineage, importer-owned-contact rollback, truthful dry-run-to-apply metadata, fail-closed apply reconciliation, and a 30-row executable case matrix.
-- verification: unit `64/64`; disposable PostgreSQL integration `76/76`; T20 importer `30/30` executable cases; regressions `26/26`; Golden `52/52`; typecheck, migration/FK/checksum, mapping, diff and secret gates PASS.
-- source commit: `cfecdf2e254319e8728d102acbef6c6dc267f7aa`.
+- verification: unit `64/64`; disposable PostgreSQL integration `76/76`; T20 importer `30/30` exact original acceptance requirements plus additional assertions; regressions `26/26`; Golden `52/52`; typecheck, migration/FK/checksum, mapping, diff and secret gates PASS.
+- source commit: `43d16978ac09ede1ad0db5ea5581d668c8d8c21b`.
 - migrations: `db/migrations/023_sheets_import_lifecycle.sql` SHA-256 `7c2a06d94f8ed5549247609f53a778c0e214f2b5f9be7da22adbeca7a584fce1`; `db/migrations/024_sheets_import_apply_metadata.sql` SHA-256 `f9d732fc9a328be92919242f895939780a675634143f2d992a295c7ec5725d88`; foreign-key failures `0`.
-- evidence: `artifacts/qa/t20-sheets-import-verification.json` (bound to the exact correction source SHA); `docs/qa/T20_SHEETS_IMPORT.md`; requirement and exactly 30 numbered executable-case rows are included in the evidence artifact.
+- evidence: `artifacts/qa/t20-sheets-import-verification.json` (bound to the exact correction source SHA); `docs/qa/T20_SHEETS_IMPORT.md`; the exact original 1–30 acceptance matrix is included in the evidence artifact, with additional low-level assertions kept separately.
 - safety: no Google/API access, no server/SSH/EasyPanel, no live WAHA/DB, no external calls, no deployment, no real messages, no PR merge; T21+ not started.
