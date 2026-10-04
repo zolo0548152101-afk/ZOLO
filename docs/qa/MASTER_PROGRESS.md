@@ -134,3 +134,14 @@ Phase 3 is closed. Phase 4 has not started and must not be started without the s
 - Never push `.env` values, API keys/tokens, WAHA authentication or session data, `node_modules`, database/runtime volumes, downloaded media, or credentials.
 - A push is not a deployment. Deployment remains separately authorized only by the applicable phase.
 - Do not begin the next phase until the verified phase commit is present on `origin/qa-build`.
+
+### Phase 4 — T18 Safe Admin Boundary
+
+- status: implementation complete; independent review requested; T19/T20 not started.
+- source commit: `669904f0fc555121bbcb9b699f660352604465fa`.
+- implementation: added server-side admin capabilities, same-origin protection, bounded mutation rate limiting, production/live destructive guard, structured operation/actor/capability audit fields, exact destructive confirmation, and disabled generic database PATCH/DELETE mutation paths. Database inspection now advertises no editable fields; the UI's active renderer exposes inspection/media/location actions only.
+- focused verification: PASS — unit `63/63`; T18 admin-focused integration `12/12`.
+- full disposable integration: `70 passed, 0 failed, 1 cancelled` due the existing native PostgreSQL SIGKILL worker-lease test timing out at 20 seconds; no T18 assertion failed.
+- other gates: spec and prompt-wiring PASS; regression is blocked by the same integration timeout; Golden is blocked by the existing Windows absolute-path ESM loader issue.
+- evidence: `artifacts/qa/t18-safe-admin-verification.json`.
+- safety: no deployment, production access, live WAHA, live DB, or real messages; T19/T20 not started.
