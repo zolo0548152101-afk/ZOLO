@@ -1,5 +1,15 @@
 # Master Progress
 
+## 2026-10-04 admin clear-all UI fix
+
+- source/deployment commit: `28007748ab5daab465ac4db3c978bca568456671`.
+- root cause: visible admin clear-all handlers sent boolean `confirm: true`; the API requires the exact string `מחק הכל`, producing HTTP 400.
+- regression: `npm run test:admin-clear-all-ui` passed `1/1`.
+- container gates: build passed; core suite passed `64/64`.
+- deployed image: `haim-bot-core:clear-all-2800774`; Swarm service `whatsapp_haim-bot-core` converged at `1/1` with start-first/rollback protection.
+- post-deploy `/health` and `/ready`: HTTP 200.
+- no live clear-all request was sent; no data was deleted by this fix.
+
 ## 2026-10-04 T25 canary qualification gate
 
 - source commit: `084293b82aa1cb1c72947a9d5661fcef0d26835b`.

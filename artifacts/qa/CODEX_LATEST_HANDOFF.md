@@ -1,5 +1,23 @@
 # CODEX LATEST HANDOFF
 
+work_unit: admin clear-all UI bug fix
+candidate_git_sha: 28007748ab5daab465ac4db3c978bca568456671
+branch: qa-build
+status: deployed_health_verified
+deployed_image: haim-bot-core:clear-all-2800774
+service: whatsapp_haim-bot-core 1/1 healthy
+rollback_target: haim-bot-core:t25-c72c831
+
+## Admin clear-all result
+
+- root cause: the visible admin UI handlers sent `confirm: true`, while the API requires the exact confirmation string `מחק הכל`; the request therefore returned HTTP 400.
+- fix: both visible `database/clear-all` handlers now send `confirm: 'מחק הכל'`; the phone-specific destructive endpoint was unchanged.
+- regression: `npm run test:admin-clear-all-ui` passed `1/1`; the test rejects boolean confirmation and requires the exact server contract.
+- container verification: `npm run build` passed and the image test suite passed `64/64`.
+- deployment: Swarm `start-first` with automatic rollback converged at `1/1` on `haim-bot-core:clear-all-2800774`.
+- health: `/health` HTTP 200 and `/ready` HTTP 200.
+- no live clear-all request was sent and no data was deleted during diagnosis, testing, or deployment.
+
 work_unit: T25 canary qualification gate
 candidate_git_sha: 084293b82aa1cb1c72947a9d5661fcef0d26835b
 branch: qa-build
