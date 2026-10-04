@@ -146,10 +146,10 @@ test("prompt evaluation keeps deterministic direct and location eligibility outs
   const direct = cases.find((candidate) => candidate.id === "transport-freeform-no-photo");
   assert.equal(direct?.expected_intent, "transport");
   assert.equal("expected_command_types" in direct, false);
-  for (const id of ["rapid-burst-direct"]) {
+  for (const id of ["rapid-burst-donation"]) {
     const row = cases.find((candidate) => candidate.id === id);
-    assert.equal(row?.expected_intent, "transport");
-    assert.deepEqual(row?.expected_command_types, ["counterparty"]);
+    assert.equal(row?.expected_intent, "donate");
+    assert.deepEqual(row?.expected_command_types, ["donate"]);
   }
   const outside = cases.find((candidate) => candidate.id === "outside-area");
   assert.equal(outside?.expected_intent, "donate");
