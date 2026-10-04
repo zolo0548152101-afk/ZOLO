@@ -1647,7 +1647,7 @@ test("group, malformed webhook and admin authentication boundaries", async () =>
     ["preferred_time", "represents_both_parties", "closed_at"],
   );
 });
-test("admin retains direct status and run-date editing with auditable scheduling validation", async () => {
+test("admin database is read-only and exposes only named mutation operations", async () => {
   const r = await readyRequest();
   const view = await app.inject({
     method: "GET",
@@ -1655,56 +1655,104 @@ test("admin retains direct status and run-date editing with auditable scheduling
     headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
   });
   assert.equal(view.statusCode, 200);
-  assert.ok(view.json<{ editable_fields: string[] }>().editable_fields.includes("run_date"));
-  assert.ok(view.json<{ editable_fields: string[] }>().editable_fields.includes("status"));
-  const response = await app.inject({
+  assert.deepEqual(view.json<{ editable_fields: string[] }>().editable_fields, []);
+  const readOnlyMutation = await app.inject({
     method: "PATCH",
     url: `/admin/database/requests/${r.id}`,
-    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+    headers: {
+      "x-admin-token": cfg.HAIM_ADMIN_TOKEN,
+      "x-admin-capability": "read-only",
+    },
     payload: {
       changes: { preferred_time: "16:30", represents_both_parties: true },
     },
   });
-  assert.equal(response.statusCode, 200);
-  const updated = await s.request(r.id);
-  assert.equal(updated.preferred_time, "16:30");
-  assert.equal(updated.represents_both_parties, true);
-  assert.equal(updated.proposed_run_date, null);
-  assert.ok(updated.parties.every((party) => !party.approved_at && !party.schedule_approved_date));
-  const manualScheduleEdit = await app.inject({
-      method: "PATCH",
-      url: `/admin/database/requests/${r.id}`,
+  assert.equal(readOnlyMutation.statusCode, 403);
+  const genericUpdate = await app.inject({
+    method: "PATCH",
+    url: `/admin/database/requests/${r.id}`,
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+    payload: { changes: { preferred_time: "16:30" } },
+  });
+  assert.equal(genericUpdate.statusCode, 404);
+  const genericDelete = await app.inject({
+    method: "DELETE",
+    url: `/admin/database/requests/${r.id}`,
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+  });
+  assert.equal(genericDelete.statusCode, 404);
+  const namedMutation = await app.inject({
+    method: "POST",
+    url: `/admin/conversations/${encodeURIComponent(r.parties[0]!.phone)}/resume`,
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+    payload: { reason: "T18 named operation" },
+  });
+  assert.equal(namedMutation.statusCode, 200);
+  const audit = await pool.query<{ data: any }>(
+    "SELECT data FROM request_events WHERE event_type='conversation_resumed' ORDER BY id DESC LIMIT 1",
+  );
+  assert.equal(audit.rows[0]?.data?.operation, "resume_conversation");
+  assert.equal(audit.rows[0]?.data?.capability, "normal");
+});
+test("admin mutations reject cross-origin requests and are rate bounded", async () => {
+  const r = await readyRequest();
+  const csrf = await app.inject({
+    method: "POST",
+    url: `/admin/requests/${r.number}/resume`,
+    headers: {
+      "x-admin-token": cfg.HAIM_ADMIN_TOKEN,
+      origin: "https://evil.example",
+    },
+    payload: { reason: "cross-origin", expected_version: r.version },
+  });
+  assert.equal(csrf.statusCode, 403);
+  for (let i = 0; i < 21; i++) {
+    const response = await app.inject({
+      method: "POST",
+      url: "/admin/requests/999999/resume",
       headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
-      payload: { changes: { run_date: "2026-09-29", status: "coordinated" } },
+      payload: { reason: "rate test", expected_version: 1 },
     });
-  assert.equal(manualScheduleEdit.statusCode, 200);
-  const manuallyScheduled = await s.request(r.id);
-  assert.equal(manuallyScheduled.run_date, "2026-09-29");
-  assert.equal(manuallyScheduled.status, "coordinated");
-  assert.equal(manuallyScheduled.parties.some((party) => party.schedule_approved_date === "2026-09-29"), false);
-  const fullManualEdit = await app.inject({
-    method: "PATCH",
-    url: `/admin/database/requests/${r.id}/full`,
+    if (i < 20) assert.equal(response.statusCode, 404);
+    else assert.equal(response.statusCode, 429);
+  }
+});
+test("destructive admin operations require test-only capability and explicit confirmation", async () => {
+  const r = await readyRequest();
+  const m = await enqueue(phone(), "שלום");
+  assert.ok((await s.message(m.id)).id);
+  const before = Number((await pool.query("SELECT count(*) FROM messages")).rows[0].count);
+  const wrongCapability = await app.inject({
+    method: "POST",
+    url: "/admin/database/clear-all",
     headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
-    payload: { changes: { run_date: "2026-10-06", status: "coordinated" } },
+    payload: { confirm: true },
   });
-  assert.equal(fullManualEdit.statusCode, 200);
-  assert.equal((await s.request(r.id)).run_date, "2026-10-06");
-  const nonTuesdayEdit = await app.inject({
-    method: "PATCH",
-    url: `/admin/database/requests/${r.id}/full`,
-    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
-    payload: { changes: { run_date: "2026-09-30", status: "coordinated" } },
-  });
-  assert.equal(nonTuesdayEdit.statusCode, 400);
-  assert.equal((await s.request(r.id)).run_date, "2026-10-06");
-  const forbidden = await app.inject({
+  assert.equal(wrongCapability.statusCode, 403);
+  assert.equal(Number((await pool.query("SELECT count(*) FROM messages")).rows[0].count), before);
+  const wrongConfirmation = await app.inject({
     method: "PATCH",
     url: `/admin/database/requests/${r.id}`,
     headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
     payload: { changes: { closed_at: new Date().toISOString() } },
   });
-  assert.equal(forbidden.statusCode, 400);
+  assert.equal(wrongConfirmation.statusCode, 404);
+  const cleared = await app.inject({
+    method: "POST",
+    url: "/admin/database/clear-all",
+    headers: {
+      "x-admin-token": cfg.HAIM_ADMIN_TOKEN,
+      "x-admin-capability": "destructive",
+    },
+    payload: { confirm: "מחק הכל" },
+  });
+  assert.equal(cleared.statusCode, 200);
+  assert.ok(Number(cleared.json<{ deleted: { messages: number } }>().deleted.messages) >= before);
+  const event = await pool.query<{ data: any }>(
+    "SELECT data FROM request_events WHERE event_type='admin_test_data_cleared' ORDER BY id DESC LIMIT 1",
+  );
+  assert.equal(event.rows[0]?.data?.operation, "clear_test_data");
+  assert.equal(event.rows[0]?.data?.capability, "destructive");
 });
 test("@lid and canonical chat resolve into one contact and ordered conversation", async () => {
   const p = phone();
@@ -1847,16 +1895,16 @@ test("admin clear-all requires the exact destructive confirmation and resets tes
   const wrong = await app.inject({
     method: "POST",
     url: "/admin/database/clear-all",
-    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
-    payload: { confirm: false },
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN, "x-admin-capability": "destructive" },
+    payload: { confirm: "לא" },
   });
   assert.equal(wrong.statusCode, 400);
   assert.equal(Number((await pool.query("SELECT count(*) FROM messages")).rows[0].count), before);
   const cleared = await app.inject({
     method: "POST",
     url: "/admin/database/clear-all",
-    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
-    payload: { confirm: true },
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN, "x-admin-capability": "destructive" },
+    payload: { confirm: "מחק הכל" },
   });
   assert.equal(cleared.statusCode, 200);
   assert.ok(Number(cleared.json<{ deleted: { messages: number } }>().deleted.messages) >= before);

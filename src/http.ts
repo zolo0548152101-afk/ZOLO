@@ -4,6 +4,13 @@ import { timingSafeEqual, randomUUID, createHash } from "node:crypto";
 import { z, ZodError } from "zod";
 import type { Config } from "./config.js";
 import { Runtime } from "./application/runtime.js";
+import {
+  AdminRateLimiter,
+  adminAuditFields,
+  assertAdminSameOrigin,
+  assertDestructiveAllowed,
+  requireAdminCapability,
+} from "./application/admin-service.js";
 import { AppError, errorCode } from "./domain/types.js";
 import {
   canonicalPhone,
@@ -226,7 +233,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
   const button=(text,fn)=>{const b=document.createElement('button');b.type='button';b.className='secondary';b.textContent=text;b.onclick=fn;return b};
   async function conversation(phone){try{const r=await api('database/phone/'+encodeURIComponent(phone)+'/messages');const modal=document.createElement('div');modal.style='position:fixed;inset:0;background:#000b;display:grid;place-items:center;padding:20px;z-index:30';const card=document.createElement('div');card.className='card';card.style='width:min(760px,100%)';const title=document.createElement('h2');title.textContent='כל ההתכתבות עם '+phone;const list=document.createElement('div');list.className='chat';const draw=rows=>{list.replaceChildren();if(!rows.length){list.textContent='אין הודעות שמורות';return}for(const row of rows){const item=document.createElement('div');item.className='bubble me';item.append(document.createTextNode(formatDate(row.received_at)+' · '+(row.kind||'הודעה')+'\n'+(row.text||'')));if(row.reply)item.append(document.createTextNode('\nתשובת הבוט: '+row.reply));if(row.media_url){const a=document.createElement('a');a.href=row.media_url;a.target='_blank';a.download='';a.textContent='הורד תמונה';item.append(document.createElement('br'),a)}if(row.location){item.append(document.createElement('br'),button('העתק מיקום',()=>clip(JSON.stringify(row.location))));}list.append(item)}};draw(r.rows||[]);const form=document.createElement('form');form.className='actions';const text=document.createElement('textarea');text.rows=2;text.required=true;text.placeholder='כתוב הודעה ישירה ל־WhatsApp…';const send=document.createElement('button');send.textContent='שלח הודעה';const close=button('סגור',()=>modal.remove());form.append(text,send,close);form.onsubmit=async e=>{e.preventDefault();try{await api('conversations/'+encodeURIComponent(phone)+'/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:text.value})});text.value='';say('ההודעה נוספה לתור השליחה','ok')}catch(err){say(err.message||'שליחת ההודעה נכשלה','error')}};card.append(title,list,form);modal.append(card);document.body.append(modal)}catch(err){say(err.message||'טעינת ההתכתבות נכשלה','error')}}
   async function requestFiles(id){try{const r=await Promise.all([api('database/requests/'+id+'/media'),api('database/requests/'+id+'/locations')]);const modal=document.createElement('div');modal.style='position:fixed;inset:0;background:#000b;display:grid;place-items:center;padding:20px;z-index:30';const card=document.createElement('div');card.className='card';card.style='width:min(600px,100%)';const title=document.createElement('h2');title.textContent='תמונות ומיקומים';card.append(title);const media=document.createElement('div');media.textContent=r[0].rows.length?'תמונות שמורות:':'';for(const x of r[0].rows){const a=document.createElement('a');a.href=x.url;a.target='_blank';a.download='';a.textContent='הורד תמונה';media.append(document.createElement('br'),a)}const locations=document.createElement('div');locations.style='margin-top:14px';locations.textContent=r[1].rows.length?'מיקומים שנשלחו:':'אין מיקומים שמורים';for(const x of r[1].rows){locations.append(document.createElement('br'),button('העתק מיקום '+x.role,()=>clip(x.latitude+', '+x.longitude)))}card.append(media,locations,button('סגור',()=>modal.remove()));modal.append(card);document.body.append(modal)}catch(err){say(err.message||'טעינת תמונות ומיקומים נכשלה','error')}}
-  function render(){const term=search.value.trim().toLocaleLowerCase();let rows=allRows.filter(row=>!term||Object.values(row).some(v=>String(v??'').toLocaleLowerCase().includes(term)));if(sortKey)rows.sort((a,b)=>String(a[sortKey]??'').localeCompare(String(b[sortKey]??''),'he',{numeric:true})*sortDir);const max=Math.max(1,Math.ceil(rows.length/perPage));page=Math.min(page,max);const visible=rows.slice((page-1)*perPage,page*perPage);body.replaceChildren();for(const row of visible){const tr=document.createElement('tr');for(const key of columns){const td=document.createElement('td');if(['phone','donor_phone','receiver_phone'].includes(key)&&row[key])td.append(button(String(row[key]),()=>conversation(String(row[key]))));else if(key==='media_ids'){const ids=Array.isArray(row[key])?row[key]:[];if(!ids.length)td.textContent='—';for(const id of ids){const a=document.createElement('a');a.href='/admin/media/'+encodeURIComponent(id);a.target='_blank';a.download='';a.textContent='הורד תמונה';td.append(a,document.createElement('br'))}}else if(key==='locations'){const locations=Array.isArray(row[key])?row[key]:[];if(!locations.length)td.textContent='—';for(const location of locations)td.append(button('העתק מיקום',()=>clip(location.latitude+', '+location.longitude)),document.createElement('br'))}else td.textContent=valueFor(key,row[key]);tr.append(td)}const actions=document.createElement('td');actions.append(button('עריכת שדות',()=>window.dbEdit(row.id)),button('מחק',()=>window.dbDelete(row.id)));if(tableName==='requests')actions.append(button('תמונות ומיקומים',()=>requestFiles(row.id)));tr.append(actions);body.append(tr)}if(!visible.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=columns.length+1;td.textContent='אין רשומות';tr.append(td);body.append(tr)}pages.replaceChildren(button('הקודם',()=>{page--;render()}),document.createTextNode(' עמוד '+page+' מתוך '+max+' · '+rows.length+' רשומות '),button('הבא',()=>{page++;render()}));pages.querySelector('button:first-child').disabled=page<=1;pages.querySelector('button:last-child').disabled=page>=max}
+  function render(){const term=search.value.trim().toLocaleLowerCase();let rows=allRows.filter(row=>!term||Object.values(row).some(v=>String(v??'').toLocaleLowerCase().includes(term)));if(sortKey)rows.sort((a,b)=>String(a[sortKey]??'').localeCompare(String(b[sortKey]??''),'he',{numeric:true})*sortDir);const max=Math.max(1,Math.ceil(rows.length/perPage));page=Math.min(page,max);const visible=rows.slice((page-1)*perPage,page*perPage);body.replaceChildren();for(const row of visible){const tr=document.createElement('tr');for(const key of columns){const td=document.createElement('td');if(['phone','donor_phone','receiver_phone'].includes(key)&&row[key])td.append(button(String(row[key]),()=>conversation(String(row[key]))));else if(key==='media_ids'){const ids=Array.isArray(row[key])?row[key]:[];if(!ids.length)td.textContent='—';for(const id of ids){const a=document.createElement('a');a.href='/admin/media/'+encodeURIComponent(id);a.target='_blank';a.download='';a.textContent='הורד תמונה';td.append(a,document.createElement('br'))}}else if(key==='locations'){const locations=Array.isArray(row[key])?row[key]:[];if(!locations.length)td.textContent='—';for(const location of locations)td.append(button('העתק מיקום',()=>clip(location.latitude+', '+location.longitude)),document.createElement('br'))}else td.textContent=valueFor(key,row[key]);tr.append(td)}const actions=document.createElement('td');if(tableName==='requests')actions.append(button('תמונות ומיקומים',()=>requestFiles(row.id)));tr.append(actions);body.append(tr)}if(!visible.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=columns.length+1;td.textContent='אין רשומות';tr.append(td);body.append(tr)}pages.replaceChildren(button('הקודם',()=>{page--;render()}),document.createTextNode(' עמוד '+page+' מתוך '+max+' · '+rows.length+' רשומות '),button('הבא',()=>{page++;render()}));pages.querySelector('button:first-child').disabled=page<=1;pages.querySelector('button:last-child').disabled=page>=max}
   async function load(){try{tableName=document.querySelector('#db-table').value;const r=await api('database?table='+encodeURIComponent(tableName)+'&limit=100');allRows=r.rows||[];columns=r.columns||[];dbRows=Object.fromEntries(allRows.map(x=>[x.id,x]));dbEditable=r.editable_fields||[];head.replaceChildren();const tr=document.createElement('tr');for(const key of columns){const th=document.createElement('th');th.textContent=dbLabels[key]||key;th.style.cursor='pointer';th.onclick=()=>{sortDir=sortKey===key?-sortDir:1;sortKey=key;render()};tr.append(th)}const action=document.createElement('th');action.textContent='פעולות';tr.append(action);head.append(tr);page=1;render();say('רשומות המסד נטענו','ok')}catch(err){say(err.message||'טעינת המסד נכשלה','error')}}
   search.oninput=()=>{page=1;render()};window.loadDb=load;document.querySelector('#db-load').onclick=load;
 })();
@@ -253,8 +260,17 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
   );
   await app.register(
     async (admin) => {
+      const adminRateLimiter = new AdminRateLimiter();
       admin.addHook("onRequest", async (req) => {
         if (!authorized(req, c)) throw new AppError("admin_unauthorized", 401);
+        if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+          assertAdminSameOrigin(req, c);
+          const capability = requireAdminCapability(req, "normal");
+          adminRateLimiter.check(req, String(req.headers["x-admin-token"]));
+          if ((req.method === "PATCH" || req.method === "DELETE") && req.url.startsWith("/admin/database/"))
+            throw new AppError("admin_generic_mutation_unavailable", 404, "מסד הנתונים זמין לקריאה בלבד; השתמש בפעולת אדמין named.");
+          void capability;
+        }
       });
       const wahaCall = async (path: string, init: RequestInit = {}) => {
         const headers = new Headers(init.headers);
@@ -375,27 +391,27 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
         const views = {
           requests: {
             columns: ["number","status","donor_phone","donor_name","pickup_city","pickup_address","pickup_floor","receiver_phone","receiver_name","destination_city","destination_address","destination_floor","items","quantity","needs_disassembly","requested_date","preferred_time","proposed_run_date","donor_schedule_approved_date","receiver_schedule_approved_date","run_date","represents_both_parties","closed_at","human_reason","donor_approved","receiver_approved","photos","media_ids","locations","created_at","updated_at"],
-            editableFields: ["status", "run_date", "preferred_time", "represents_both_parties", "human_reason", "donor_phone", "donor_name", "pickup_city", "pickup_address", "pickup_floor", "receiver_phone", "receiver_name", "destination_city", "destination_address", "destination_floor", "item_description", "quantity"],
+            editableFields: [],
             sql: `SELECT r.id,r.number,r.status,dc.phone AS donor_phone,d.name AS donor_name,d.settlement AS pickup_city,d.address AS pickup_address,d.floor AS pickup_floor,rc.phone AS receiver_phone,v.name AS receiver_name,v.settlement AS destination_city,v.address AS destination_address,v.floor AS destination_floor,string_agg(i.description, ', ' ORDER BY i.position) AS items,coalesce(sum(i.quantity),0)::int AS quantity,bool_or(i.needs_disassembly) AS needs_disassembly,r.earliest_run_date AS requested_date,r.preferred_time,r.proposed_run_date,d.schedule_approved_date AS donor_schedule_approved_date,v.schedule_approved_date AS receiver_schedule_approved_date,r.run_date,r.represents_both_parties,r.closed_at,r.human_reason,d.approved_at IS NOT NULL AS donor_approved,v.approved_at IS NOT NULL AS receiver_approved,(SELECT count(*)::int FROM request_media rm WHERE rm.request_id=r.id) AS photos,(SELECT coalesce(json_agg(rm.media_id ORDER BY rm.media_id),'[]'::json) FROM request_media rm WHERE rm.request_id=r.id) AS media_ids,(SELECT coalesce(json_agg(json_build_object('role',rl.role,'latitude',rl.latitude,'longitude',rl.longitude) ORDER BY rl.role),'[]'::json) FROM request_locations rl WHERE rl.request_id=r.id) AS locations,r.created_at,r.updated_at FROM requests r LEFT JOIN request_parties d ON d.request_id=r.id AND d.role='donor' LEFT JOIN contacts dc ON dc.id=d.contact_id LEFT JOIN request_parties v ON v.request_id=r.id AND v.role='receiver' LEFT JOIN contacts rc ON rc.id=v.contact_id LEFT JOIN request_items i ON i.request_id=r.id GROUP BY r.id,dc.phone,d.name,d.settlement,d.address,d.floor,d.approved_at,d.schedule_approved_date,rc.phone,v.name,v.settlement,v.address,v.floor,v.approved_at,v.schedule_approved_date ORDER BY r.number DESC LIMIT $1`,
           },
           contacts: {
             columns: ["phone", "created_at"],
-            editableFields: ["phone"],
+            editableFields: [],
             sql: "SELECT id,phone,created_at FROM contacts ORDER BY created_at DESC LIMIT $1",
           },
           conversations: {
             columns: ["phone", "mode", "session", "chat_id", "selected_request_id", "version"],
-            editableFields: ["mode", "selected_request_id"],
+            editableFields: [],
             sql: "SELECT cv.id,co.phone,cv.mode,cv.session,cv.chat_id,cv.selected_request_id,cv.version FROM conversations cv JOIN contacts co ON co.id=cv.contact_id ORDER BY cv.id DESC LIMIT $1",
           },
           messages: {
             columns: ["seq", "phone", "kind", "text", "reply", "error_code", "received_at"],
-            editableFields: ["text", "reply", "error_code"],
+            editableFields: [],
             sql: "SELECT m.id,m.seq,co.phone,m.kind,m.text,m.reply,m.error_code,m.received_at FROM messages m LEFT JOIN contacts co ON co.id=m.contact_id ORDER BY m.seq DESC LIMIT $1",
           },
           outbox: {
             columns: ["seq", "phone", "state", "text", "error_code", "created_at"],
-            editableFields: ["state", "text", "error_code"],
+            editableFields: [],
             sql: "SELECT id,seq,phone,state,text,error_code,created_at FROM outbox ORDER BY seq DESC LIMIT $1",
           },
         }[q.table];
@@ -557,7 +573,8 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
         return { ok: true };
       });
       admin.post("/database/clear-all", async (req) => {
-        z.strictObject({ confirm: z.literal(true) }).parse(req.body);
+        const capability = assertDestructiveAllowed(req, c);
+        z.strictObject({ confirm: z.literal("מחק הכל") }).parse(req.body);
         const s = runtime.requireStore();
         const deleted: Record<string, number> = {};
         await s.transaction(async (client) => {
@@ -590,13 +607,21 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           await remove("searches", "DELETE FROM searches");
           await remove("contacts", "DELETE FROM contacts");
           await client.query("UPDATE request_counter SET value=0 WHERE id=true");
+          await s.event(client, { trace_id: req.id }, "admin", "admin_test_data_cleared", {
+            operation: "clear_test_data",
+            target: "test_database",
+            result: "success",
+            actor: "admin-http",
+            capability,
+          });
         });
         runtime.log.warn({ trace_id: req.id, deleted }, "admin_database_cleared");
         return { ok: true, deleted };
       });
       admin.post("/database/clear-phone", async (req) => {
+        const capability = assertDestructiveAllowed(req, c);
         const body = z
-          .strictObject({ phone: z.string().min(3).max(40), confirm: z.literal(true) })
+          .strictObject({ phone: z.string().min(3).max(40), confirm: z.literal("מחק מספר") })
           .parse(req.body);
         const phone = canonicalPhone(body.phone);
         const s = runtime.requireStore();
@@ -655,6 +680,13 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           await remove("contact_identities", "DELETE FROM contact_identities WHERE contact_id=ANY($1::uuid[])", [ids]);
           await remove("searches", "DELETE FROM searches WHERE contact_id=ANY($1::uuid[])", [ids]);
           await remove("contacts", "DELETE FROM contacts WHERE id=ANY($1::uuid[])", [ids]);
+          await s.event(client, { trace_id: req.id }, "admin", "admin_test_phone_data_cleared", {
+            operation: "clear_test_phone_data",
+            target: phone,
+            result: "success",
+            actor: "admin-http",
+            capability,
+          });
         });
         runtime.log.warn({ trace_id: req.id, phone, deleted }, "admin_phone_data_cleared");
         return { ok: true, phone, deleted };
@@ -677,7 +709,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             "INSERT INTO app_settings(key,value,updated_at) VALUES('bot_access',$1,clock_timestamp()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=EXCLUDED.updated_at",
             [JSON.stringify(access)],
           );
-          await s.event(client, { trace_id: req.id }, "admin", "bot_access_changed", access);
+          await s.event(client, { trace_id: req.id }, "admin", "bot_access_changed", { operation: "update_bot_access", ...access, ...adminAuditFields(req) });
         });
         return { ok: true, ...access };
       });
@@ -703,7 +735,9 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           }
           await s.event(client, { trace_id: req.id }, "admin", "conversation_reset", {
             phone,
+            operation: "reset_conversation",
             conversations: conversations.rowCount,
+            ...adminAuditFields(req),
           });
         });
         return { ok: true, phone };
@@ -723,7 +757,9 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             "UPDATE conversations SET mode='bot',selected_request_id=NULL,version=version+1",
           );
           await s.event(client, { trace_id: req.id }, "admin", "all_conversations_reset", {
+            operation: "reset_all_conversations",
             conversations: result.rowCount,
+            ...adminAuditFields(req),
           });
         });
         return { ok: true };
@@ -925,7 +961,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             { trace_id: req.id },
             "admin",
             "request_resumed",
-            { reason: b.reason },
+            { reason: b.reason, operation: "resume_request", ...adminAuditFields(req) },
             r.id,
           );
           return { ok: true, request: r };
@@ -946,7 +982,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             { trace_id: req.id },
             "admin",
             "conversation_resumed",
-            { phone, reason: b.reason },
+            { operation: "resume_conversation", phone, reason: b.reason, ...adminAuditFields(req) },
           );
         });
         return { ok: true };
@@ -984,7 +1020,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             { trace_id: req.id },
             "admin",
             "coordinated",
-            { date: r.run_date, reason: b.reason },
+            { operation: "coordinate_request", date: r.run_date, reason: b.reason, ...adminAuditFields(req) },
             r.id,
           );
           for (const party of r.parties)
@@ -1068,7 +1104,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             { trace_id: req.id },
             "admin",
             "capacity_changed",
-            { date: p.date, ...b },
+            { operation: "change_transport_capacity", date: p.date, ...b, ...adminAuditFields(req) },
           );
         });
         return { ok: true };
@@ -1102,7 +1138,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             { trace_id: req.id },
             "admin",
             "location_policy_changed",
-            b,
+            { operation: "change_location_policy", ...b, ...adminAuditFields(req) },
           );
         });
         return { ok: true };
@@ -1168,7 +1204,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             { trace_id: req.id },
             "admin",
             "outbox_resolved",
-            { outbox_id: p.id, ...b },
+            { operation: "resolve_outbox", outbox_id: p.id, ...b, ...adminAuditFields(req) },
           );
         });
         return { ok: true };
@@ -1225,7 +1261,9 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           await s.event(client, { trace_id: req.id }, "admin", "job_retried", {
             queue: p.queue,
             job_id: p.id,
+            operation: "retry_job",
             reason: b.reason,
+            ...adminAuditFields(req),
           });
         });
         return { ok: true };
