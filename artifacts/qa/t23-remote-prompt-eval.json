@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "work_unit": "T23",
+  "verified_source_sha": "ede77a05c1976f66a2b9560a5fc4b07b3886e896",
+  "evaluated_at": "2026-10-04T16:35:48.205Z",
+  "kind": "remote_prompt_eval",
+  "prompt": {
+    "id": "pmpt_6a9d0c66737881938a0f60f5df9088cb0806a26699929a86",
+    "version": "23",
+    "model": "gpt-5.6-luna"
+  },
+  "synthetic_only": true,
+  "database_accessed": false,
+  "channel_accessed": false,
+  "total": 8,
+  "passed": 8,
+  "failed": 0,
+  "forbidden_operational_claims": 0,
+  "result": "PASS",
+  "cases": [
+    "donate-open-hebrew",
+    "donate-typo-hebrew",
+    "request-fridge",
+    "verification-notice",
+    "transport-freeform-no-photo",
+    "rapid-burst-donation",
+    "outside-area",
+    "human-escalation"
+  ],
+  "deployment": {
+    "attempted": true,
+    "result": "ROLLED_BACK",
+    "rollback_image": "haim-bot-core:qa-self-address-floor-20260928",
+    "blocker": "production HAIM_ADMIN_TOKEN length is 4; T22 production validation requires a strong token"
+  }
+}

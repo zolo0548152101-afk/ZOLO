@@ -181,3 +181,12 @@ Phase 3 is closed. Phase 4 has not started and must not be started without the s
 - verification: build/typecheck PASS; unit `64/64`; targeted T21/T22 `5/5`; disposable PostgreSQL integration `76/76`; Sheets importer `30/30`; regressions `26/26` and probes `12/12`; Golden `52/52`; migration/FK/checksum and secret/privacy gates PASS; backup/restore drill PASS with isolated disposable PostgreSQL 17.11 source/target, normalized distinct database identity, exact storage-key media resolution with checksum/size verification, target-side HAIM state/media/config verification, and RPO 60/RTO 30 test defaults. GitHub verification runs `37206883702` and `37206881161` passed on the exact source SHA.
 - evidence: `artifacts/qa/t21-t22-verification.json`; `docs/qa/T21_T22_OBSERVABILITY_HARDENING.md`; evidence-only handoff follows source commit.
 - safety: no deployment, production/server/SSH/EasyPanel access, live WAHA/DB, real messages, real secret rotation, real backup storage, Google API/real Sheet, or T23+ work.
+
+### Phase 5 — T23 Remote Prompt Evaluation
+
+- status: remote evaluation PASS; service deployment blocked pending explicit admin-token rotation.
+- verified source: `ede77a05c1976f66a2b9560a5fc4b07b3886e896`.
+- remote prompt: version `23`; 8/8 synthetic Hebrew/multi-message/notice cases passed; all provider response IDs were present; forbidden operational claims `0`.
+- safety: the evaluator forced `NODE_ENV=test`, `BOT_MODE=simulation`, and `DB_SCHEMA=haim_core_sim`; it did not access the HAIM database, WAHA, or any channel adapter.
+- deployment evidence: the service update automatically rolled back because its existing `HAIM_ADMIN_TOKEN` has length `4` and the T22 production validation rejects it. The rollback image `haim-bot-core:qa-self-address-floor-20260928` is healthy (`/health` 200). No persistent data or WAHA configuration changed.
+- evidence: `artifacts/qa/t23-remote-prompt-eval.json`.

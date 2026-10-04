@@ -1,60 +1,27 @@
 # CODEX LATEST HANDOFF
 
-phase: 4 / T21+T22 observability and hardening
-baseline_commit: d1cda7959bf18df9e98b26a8b0971d27970c7f28
-source_commit: 560ab5a82db838344002cbef3abbca06f63a33aa
-evidence_commit: this evidence-only handoff commit
+work_unit: T23 remote prompt evaluation
+verified_source_sha: ede77a05c1976f66a2b9560a5fc4b07b3886e896
 branch: qa-build
-ci_source_sha: 560ab5a82db838344002cbef3abbca06f63a33aa
-ci_verification_runs: 37206883702, 37206881161 (success)
-
-## Scope
-
-- T21 configurable observability signals include failed imports, retrying and
-  stale-active integrations, and configurable warning/critical transitions.
-- `/admin/metrics` sanitizes integration diagnostics before exposure.
-- T22 production/live validation requires strong optional capability tokens too;
-  empty optional tokens disable their capability and distinctness remains
-  enforced.
-- The disposable backup/restore drill proves target-side HAIM state, import
-  lineage, integration/outbox state, media bytes/metadata, and configuration;
-  it rejects non-disposable targets and runs against fresh isolated source and
-  target databases.
-- Review corrections: media is written and resolved by the exact database
-  storage key with checksum/size verification; source/target identity is
-  normalized by host, port, and database; diagnostic redaction covers
-  authorization Bearer, standalone Bearer, and key/value forms.
-
-## Gates
-
-- build/typecheck: PASS
-- unit: PASS (64/64)
-- targeted T21/T22: PASS (5/5)
-- disposable PostgreSQL integration: PASS (76/76)
-- Sheets importer: PASS (30/30)
-- regressions: PASS (26/26; 12 probes)
-- Golden: PASS (52/52)
-- migrations/FK/checksum: PASS; FK failures 0
-- backup/restore: PASS; `restored:true`, `target_verified:true`, exact storage-key file/checksum/size verified
-- CI on exact source SHA: PASS (runs 37206883702, 37206881161)
-- diff check and secret/privacy scan: PASS
+status: remote_eval_pass_deployment_blocked
 
 ## Evidence
 
-- `artifacts/qa/t21-t22-verification.json`
-- `docs/qa/T21_T22_OBSERVABILITY_HARDENING.md`
+- `artifacts/qa/t23-remote-prompt-eval.json`: PASS, 8/8 cases, 0 forbidden operational claims.
 - `docs/qa/MASTER_PROGRESS.md`
 
-## Safety and next action
+## Verified gates
 
-- production_access: false
-- server_access: false
-- ssh_access: false
-- easypanel_access: false
-- live_waha_access: false
-- live_db_access: false
-- real_messages_sent: false
-- deployment_performed: false
-- t23_started: false
+- prompt-eval contract: PASS (9/9)
+- prompt-eval config: PASS (8 cases)
+- build/typecheck: PASS
+- unit: PASS (64/64)
+- spec, probes, and prompt wiring: PASS
+- remote managed prompt: PASS (8/8); every response included a provider ID
 
-T21+T22 corrections are ready for independent review. Do not start T23.
+## Safety and blocking deployment condition
+
+- evaluation mode was synthetic only; database, WAHA, channel adapter, and real messages: false.
+- a service deployment was attempted only after image build. Swarm rolled it back automatically because the active production `HAIM_ADMIN_TOKEN` is length 4 and the T22 production policy rejects it.
+- the rollback image `haim-bot-core:qa-self-address-floor-20260928` is healthy at `/health` (200); persistent media and runtime integrations were not altered.
+- next action requires explicit approval to rotate the server-side admin token to a strong secret (stored only in the service configuration and never printed), then repeat the bounded deployment preflight.
