@@ -2,11 +2,11 @@
   "stage": "4",
   "work_unit": "T20",
   "evidence_schema_version": 1,
-  "verified_source_sha": "442c53bbaeb18146270e1d7bea2f13fd0b58c6d8",
+  "verified_source_sha": "cfecdf2e254319e8728d102acbef6c6dc267f7aa",
   "baseline_sha": "8d4b8e0dcc83e52ee3f1f6cd94452b9a8e1e6fe6",
-  "verification_started_at": "2026-10-04T09:58:35.000Z",
-  "verification_finished_at": "2026-10-04T10:00:00.000Z",
-  "node_version": "v24.19.0 host; v24.21.0 verification image",
+  "verification_started_at": "2026-10-04T10:28:00.000Z",
+  "verification_finished_at": "2026-10-04T10:42:00.000Z",
+  "node_version": "v24.21.0 verification image",
   "dependency_runtime": {
     "runtime_image": "node:24-bookworm-slim",
     "database": "PostgreSQL 17 disposable tmpfs",
@@ -22,8 +22,8 @@
   },
   "typecheck": "PASS",
   "migration_checksum": {
-    "file": "db/migrations/023_sheets_import_lifecycle.sql",
-    "sha256": "7c2a06d94f8ed5549247609f53a778c0e214f2b5f9be7da22adbeca7a584fce1"
+    "file": "db/migrations/024_sheets_import_apply_metadata.sql",
+    "sha256": "f9d732fc9a328be92919242f895939780a675634143f2d992a295c7ec5725d88"
   },
   "foreign_key_check_failures": 0,
   "secret_scan": "PASS",
@@ -52,6 +52,38 @@
   "idempotency": { "status": "PASS", "same_source_rerun_no_duplicates": true },
   "rollback": { "status": "PASS", "import_created_entities_only": true, "repeat_is_idempotent": true },
   "failure_recovery": { "status": "PASS", "review_block_and_invalid_rows_tested": true, "transaction_rollback": true },
+  "t20_numbered_requirement_matrix": [
+    { "requirement_number": 1, "assertion": "canonical 28-column header", "result": "PASS" },
+    { "requirement_number": 2, "assertion": "deterministic source hash", "result": "PASS" },
+    { "requirement_number": 3, "assertion": "deterministic row hash", "result": "PASS" },
+    { "requirement_number": 4, "assertion": "quoted comma and escaped quote", "result": "PASS" },
+    { "requirement_number": 5, "assertion": "unterminated quote fails closed", "result": "PASS" },
+    { "requirement_number": 6, "assertion": "reordered header rejected", "result": "PASS" },
+    { "requirement_number": 7, "assertion": "row width mismatch rejected", "result": "PASS" },
+    { "requirement_number": 8, "assertion": "dry-run reports validated state", "result": "PASS" },
+    { "requirement_number": 9, "assertion": "dry-run performs zero business mutations", "result": "PASS" },
+    { "requirement_number": 10, "assertion": "destination without receiver identity blocks", "result": "PASS" },
+    { "requirement_number": 11, "assertion": "required timestamps are enforced", "result": "PASS" },
+    { "requirement_number": 12, "assertion": "transport date weekday rule is enforced", "result": "PASS" },
+    { "requirement_number": 13, "assertion": "blank quantity is rejected", "result": "PASS" },
+    { "requirement_number": 14, "assertion": "quantity domain is rejected", "result": "PASS" },
+    { "requirement_number": 15, "assertion": "description over 160 is rejected without truncation", "result": "PASS" },
+    { "requirement_number": 16, "assertion": "invalid phone is rejected", "result": "PASS" },
+    { "requirement_number": 17, "assertion": "unknown status is rejected", "result": "PASS" },
+    { "requirement_number": 18, "assertion": "donor-only request mapping", "result": "PASS" },
+    { "requirement_number": 19, "assertion": "donor and receiver request mapping", "result": "PASS" },
+    { "requirement_number": 20, "assertion": "same phone links to distinct requests", "result": "PASS" },
+    { "requirement_number": 21, "assertion": "identical duplicate CSV is rejected", "result": "PASS" },
+    { "requirement_number": 22, "assertion": "conflicting duplicate request CSV is rejected", "result": "PASS" },
+    { "requirement_number": 23, "assertion": "dry-run to apply metadata is truthful", "result": "PASS" },
+    { "requirement_number": 24, "assertion": "contact and party lineage are distinct", "result": "PASS" },
+    { "requirement_number": 25, "assertion": "approval fields never become schedule approval", "result": "PASS" },
+    { "requirement_number": 26, "assertion": "receiver-only location reconciliation is optional", "result": "PASS" },
+    { "requirement_number": 27, "assertion": "coordinated import requires existing transport run", "result": "PASS" },
+    { "requirement_number": 28, "assertion": "post-apply reconciliation failure is nonzero and review_required", "result": "PASS" },
+    { "requirement_number": 29, "assertion": "mid-batch failure rolls back earlier writes", "result": "PASS" },
+    { "requirement_number": 30, "assertion": "rollback is idempotent and parser has executable no-external-network guard", "result": "PASS" }
+  ],
   "requirement_matrix": [
     { "requirement": "Exact 28-column legacy source contract", "implementation": "scripts/sheets-import-lib.mjs and config/legacy-sheets-v9-mapping.json", "executable_evidence": "exact 28-column header and deterministic source/row hashes", "result": "PASS" },
     { "requirement": "Reordered headers, quoted CSV, CRLF and malformed row rejection", "implementation": "readCsv and validateSource", "executable_evidence": "reordered header, malformed row width, quoted CSV and unterminated quote", "result": "PASS" },
@@ -121,6 +153,7 @@
   "evidence_files": [
     "artifacts/qa/t20-sheets-import-verification.json",
     "docs/qa/T20_SHEETS_IMPORT.md",
-    "db/migrations/023_sheets_import_lifecycle.sql"
+    "db/migrations/023_sheets_import_lifecycle.sql",
+    "db/migrations/024_sheets_import_apply_metadata.sql"
   ]
 }
