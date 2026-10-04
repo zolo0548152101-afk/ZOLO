@@ -89,7 +89,7 @@ async function reconciliation(client, batchId) {
     const byType = (type) => lineages.find((x) => x.entity_type === type);
     const requestLineage = byType("request");
     if (!requestLineage) { mismatches.push({ row_number: row.row_number, entity_type: "request", reason: "missing_lineage" }); continue; }
-    addExpected("request"); addExpected("contact:donor"); addExpected("party:donor"); addExpected("item"); addExpected("location_reference");
+    addExpected("request"); addExpected("contact:donor"); addExpected("party:donor"); addExpected("item");
     if (normalized.receiver) { addExpected("contact:receiver"); addExpected("party:receiver"); }
     if (normalized.mediaReference) addExpected("media_reference");
     const request = (await client.query("SELECT number,status,origin,run_date,earliest_run_date,preferred_time,represents_both_parties,closed_at,human_reason,created_at,updated_at FROM requests WHERE id=$1", [requestLineage.entity_id])).rows[0];
@@ -122,6 +122,7 @@ async function reconciliation(client, batchId) {
       if (!media || media.reference !== normalized.mediaReference) mismatches.push({ row_number: row.row_number, entity_type: "media_reference", reason: "missing_or_different_reference", expected: normalized.mediaReference, actual: media?.reference ?? null });
     }
     const expectedLocations = [normalized.donor.settlement, normalized.receiver?.settlement].filter(Boolean);
+    if (expectedLocations.length > 0) addExpected("location_reference");
     const locationLineage = byType("location_reference");
     if (expectedLocations.length > 0) {
       if (!locationLineage) mismatches.push({ row_number: row.row_number, entity_type: "location_reference", reason: "missing_lineage" });
