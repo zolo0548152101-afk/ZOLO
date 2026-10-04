@@ -15,6 +15,7 @@
     "test:regressions": "node scripts/test-regressions.mjs",
     "test:golden": "node scripts/golden-e2e.mjs",
     "test:t21-t22": "tsc -p tsconfig.tests.json && node --test dist-tests/tests/t21-t22.test.js",
+    "test:ai-eval-contract": "node --test tests/ai-eval.test.mjs",
     "test:ai": "node scripts/ai-eval.mjs",
     "check:spec": "node scripts/validate-spec.mjs",
     "check:probes": "node scripts/audit-offline-probes.mjs",

@@ -3,16 +3,28 @@ import { resolve } from "node:path";
 
 const path = resolve(process.cwd(), "config/ai-eval-cases.json");
 const cases = JSON.parse(await readFile(path, "utf8"));
-const requiredIntents = new Set(["donate", "request", "direct", "status", "verification", "outside", "escalate"]);
+const supportedManagedIntents = new Set(["donate", "request", "transport", "self_move", "cancellation", "unclear"]);
 if (!Array.isArray(cases) || cases.length < 8) throw new Error("ai_eval_requires_eight_cases");
 const ids = new Set();
 for (const row of cases) {
   if (!row.id || ids.has(row.id)) throw new Error(`invalid_or_duplicate_case:${row.id ?? "unknown"}`);
   ids.add(row.id);
   if (!(typeof row.input === "string" || Array.isArray(row.input))) throw new Error(`invalid_input:${row.id}`);
-  if (!requiredIntents.has(row.expected_intent)) throw new Error(`unsupported_expected_intent:${row.id}`);
-  if (!Array.isArray(row.expected_actions) || row.expected_actions.length === 0) throw new Error(`missing_expected_actions:${row.id}`);
-  if (row.forbidden && !Array.isArray(row.forbidden)) throw new Error(`forbidden_must_be_array:${row.id}`);
+  if (row.mode === "notice") {
+    if (row.expected_notice !== true) throw new Error(`notice_case_requires_expected_notice:${row.id}`);
+    continue;
+  }
+  if (!supportedManagedIntents.has(row.expected_intent)) throw new Error(`unsupported_expected_intent:${row.id}`);
+  if (!Array.isArray(row.expected_command_types) || row.expected_command_types.length === 0)
+    throw new Error(`missing_expected_command_types:${row.id}`);
+  if (row.expected_managed_actions && !Array.isArray(row.expected_managed_actions))
+    throw new Error(`expected_managed_actions_must_be_array:${row.id}`);
+  if (row.forbidden_managed_actions && !Array.isArray(row.forbidden_managed_actions))
+    throw new Error(`forbidden_managed_actions_must_be_array:${row.id}`);
 }
-for (const intent of requiredIntents) if (!cases.some((x) => x.expected_intent === intent)) throw new Error(`missing_intent_case:${intent}`);
-console.log(JSON.stringify({ ok: true, cases: cases.length, intents: [...new Set(cases.map((x) => x.expected_intent))], forbidden_claim_cases: cases.filter((x) => x.forbidden?.length).length, remote_call: false }, null, 2));
+if (!cases.some((row) => Array.isArray(row.input))) throw new Error("missing_multi_message_case");
+if (!cases.some((row) => row.require_direct === true)) throw new Error("missing_direct_case");
+if (!cases.some((row) => row.expected_managed_actions?.includes("needs_human"))) throw new Error("missing_escalation_case");
+if (!cases.some((row) => row.forbidden_managed_actions?.length)) throw new Error("missing_forbidden_action_case");
+if (!cases.some((row) => row.mode === "notice")) throw new Error("missing_notice_case");
+console.log(JSON.stringify({ ok: true, cases: cases.length, intents: [...new Set(cases.filter((x) => x.mode !== "notice").map((x) => x.expected_intent))], forbidden_action_cases: cases.filter((x) => x.forbidden_managed_actions?.length).length, remote_call: false }, null, 2));
