@@ -139,3 +139,15 @@ test("the checked-in remote contract has eight runnable planner cases including 
   assert.ok(cases.some((row) => Array.isArray(row.forbidden_managed_actions) && row.forbidden_managed_actions.length > 0));
   assert.ok(cases.some((row) => row.mode === "notice"));
 });
+
+test("prompt evaluation keeps direct and location eligibility expectations at their real contract boundaries", async () => {
+  const cases = JSON.parse(await readFile(new URL("../config/ai-eval-cases.json", import.meta.url), "utf8"));
+  for (const id of ["direct-no-photo", "rapid-burst-direct"]) {
+    const row = cases.find((candidate) => candidate.id === id);
+    assert.equal(row?.expected_intent, "transport");
+    assert.deepEqual(row?.expected_command_types, ["counterparty"]);
+  }
+  const outside = cases.find((candidate) => candidate.id === "outside-area");
+  assert.equal(outside?.expected_intent, "donate");
+  assert.deepEqual(outside?.expected_command_types, ["donate"]);
+});

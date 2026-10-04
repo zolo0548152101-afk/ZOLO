@@ -23,7 +23,8 @@ for (const row of cases) {
     throw new Error(`forbidden_managed_actions_must_be_array:${row.id}`);
 }
 if (!cases.some((row) => Array.isArray(row.input))) throw new Error("missing_multi_message_case");
-if (!cases.some((row) => row.require_direct === true)) throw new Error("missing_direct_case");
+if (!cases.some((row) => row.expected_intent === "transport" && row.expected_command_types?.includes("counterparty")))
+  throw new Error("missing_direct_transport_case");
 if (!cases.some((row) => row.expected_managed_actions?.includes("needs_human"))) throw new Error("missing_escalation_case");
 if (!cases.some((row) => row.forbidden_managed_actions?.length)) throw new Error("missing_forbidden_action_case");
 if (!cases.some((row) => row.mode === "notice")) throw new Error("missing_notice_case");
