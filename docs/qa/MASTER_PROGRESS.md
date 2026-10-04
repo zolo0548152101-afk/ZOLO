@@ -1,5 +1,13 @@
 # Master Progress
 
+## 2026-10-04 authenticated clear-all override
+
+- source/deployment commit: `7335b3c3efb5b2d1168220a3739017d849eeb465`.
+- added explicit `HAIM_ALLOW_ADMIN_CLEAR_ALL=true` deployment flag; the existing admin token remains required and the exact confirmation `מחק הכל` remains required.
+- deployed image: `haim-bot-core:clear-override-7335b3c`; Swarm service converged at `1/1`.
+- Docker build passed and core suite passed `64/64`; `/health` and `/ready` returned HTTP 200.
+- no clear-all request was executed during deployment.
+
 ## 2026-10-04 admin clear-all UI fix
 
 - source/deployment commit: `28007748ab5daab465ac4db3c978bca568456671`.

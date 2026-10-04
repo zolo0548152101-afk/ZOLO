@@ -1,5 +1,20 @@
 # CODEX LATEST HANDOFF
 
+work_unit: authenticated admin clear-all override
+candidate_git_sha: 7335b3c3efb5b2d1168220a3739017d849eeb465
+branch: qa-build
+status: deployed_health_verified
+deployed_image: haim-bot-core:clear-override-7335b3c
+service: whatsapp_haim-bot-core 1/1 healthy
+
+## Clear-all authorization result
+
+- added explicit deployment flag `HAIM_ALLOW_ADMIN_CLEAR_ALL=true`.
+- when enabled, clear-all accepts the authenticated normal admin token; the endpoint still requires same-origin controls, the token, and exact confirmation `מחק הכל`.
+- the endpoint remains unauthenticated only never; no token bypass was added.
+- Docker build and core tests passed `64/64`; `/health` and `/ready` returned HTTP 200.
+- no clear-all request was executed during deployment.
+
 work_unit: admin clear-all UI bug fix
 candidate_git_sha: 28007748ab5daab465ac4db3c978bca568456671
 branch: qa-build
