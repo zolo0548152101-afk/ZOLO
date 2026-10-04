@@ -1,17 +1,28 @@
 # Master Progress
 
+## 2026-10-04 reset and deployment recovery
+
+- verdict: PASS for the scoped HAIM reset and migration/deployment recovery; T24 shadow qualification remains open.
+- scope: only `haim_core`, `haim_core_jobs`, and the verified `whatsapp_haim-bot-core_haim-yahad-media` Docker volume. The service, WAHA sessions, configuration, static location data, migration history, and other server applications were preserved.
+- preserved server-only recovery snapshot: `haim-reset-20261004T170039Z.sql`, SHA-256 `7588534407c28ab1f5060ae003ebb75cc8c867fac6e83849d40bd84ff6062800`; it is not a repository artifact.
+- post-reset proof: requests, messages, conversations, contacts, media records, Outbox, integration Outbox, conversation turns, and legacy queue jobs were zero; migrations/checksums were then advanced and verified at `24/24`.
+- deployment correction: the earlier image had application code for migration 022 while the active schema ended at 021, producing an `ops` queue failure for a missing `last_attempt_at` column. Migration was applied from the service image, then candidate image `haim-bot-core:t24-611a108` was deployed and `/health` returned success.
+- post-deploy proof: zero business rows/Outbox/media records, zero failed/retry queue jobs, and zero physical media files in the verified HAIM media volume.
+- recovery regression: `611a108183feeb7966613d19f97d87196cfcac02` adds startup reconciliation for committed turns stranded as `processing`; the isolated Linux disposable suite passed, including regressions `26/26` and Golden `52/52`.
+- next exact action: replace the minimal `scripts/shadow-e2e.mjs` with four complete isolated coordination scenarios and a restart/failure scenario before beginning real WAHA contract checks.
+
 ## Current state
 
 - mode: discovery / build completion
-- phase: 3 (closed; stopped at Phase 4 boundary)
-- active_work_state: scenario (reconciled; no live request-1 message is present in DB or the inspected WAHA history)
+- phase: T24 shadow-qualification preparation
+- active_work_state: clean reset completed; no live qualification conversation has started
 - cycle_id: `qa-live-20260928t1321`
 - active_scenario: `request-1`
 - scenario_count: `6/8` in the external QA checkpoint before the transition reset; the operational DB is clean and must not be treated as evidence of an additional completed scenario
-- candidate_git_sha: `c8d243784a2c2a6b7d590a8039b3f0722754ee79` (`main`, 17 commits ahead of `origin/main`); working tree contains preserved user changes
-- running_image: `haim-bot-core:qa-self-address-floor-20260928`
+- candidate_git_sha: `611a108183feeb7966613d19f97d87196cfcac02` (`qa-build`)
+- running_image: `haim-bot-core:t24-611a108`
 - prompt_id/version: `pmpt_6a9d0c66737881938a0f60f5df9088cb0806a26699929a86` / `23` from `ENV.example`; live prompt availability/evaluation is not yet proven
-- database: remote `haim_yahad`, schema `haim_core`; operational counts reconciled to zero after the last verified clean reset
+- database: remote `haim_yahad`, schema `haim_core`; operational counts reconciled to zero after the 2026-10-04 verified clean reset; migrations/checksums `24/24`
 - WAHA: `default`, `TAL_ZOLO`, and `HAIM_YAHAD` all reported `WORKING`; identities were verified as `972584152101@c.us`, `972536662043@c.us`, and `972543414386@c.us`
 
 ## Last completed milestone

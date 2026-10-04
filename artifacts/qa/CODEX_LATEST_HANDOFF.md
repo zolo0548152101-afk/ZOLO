@@ -1,27 +1,23 @@
 # CODEX LATEST HANDOFF
 
-work_unit: T23 remote prompt evaluation
-verified_source_sha: ede77a05c1976f66a2b9560a5fc4b07b3886e896
+work_unit: T24 shadow qualification preparation
+candidate_git_sha: 611a108183feeb7966613d19f97d87196cfcac02
 branch: qa-build
-status: remote_eval_pass_deployment_blocked
+status: active
+
+## Completed recovery work
+
+- The scoped HAIM clean reset completed with a server-only snapshot and a verified zero operational state.
+- The deployed schema was corrected from migration 21 to 24; the missing integration-dispatcher column is present.
+- Image `haim-bot-core:t24-611a108` is running and healthy.
+- The physical HAIM media volume, business records, Outbox, integration Outbox, and failed/retrying queue jobs are empty.
 
 ## Evidence
 
-- `artifacts/qa/t23-remote-prompt-eval.json`: PASS, 8/8 cases, 0 forbidden operational claims.
 - `docs/qa/MASTER_PROGRESS.md`
+- server-only reset manifest `haim-reset-20261004T170039Z.json`
+- server-only reset snapshot `haim-reset-20261004T170039Z.sql`
 
-## Verified gates
+## Next action
 
-- prompt-eval contract: PASS (9/9)
-- prompt-eval config: PASS (8 cases)
-- build/typecheck: PASS
-- unit: PASS (64/64)
-- spec, probes, and prompt wiring: PASS
-- remote managed prompt: PASS (8/8); every response included a provider ID
-
-## Safety and blocking deployment condition
-
-- evaluation mode was synthetic only; database, WAHA, channel adapter, and real messages: false.
-- a service deployment was attempted only after image build. Swarm rolled it back automatically because the active production `HAIM_ADMIN_TOKEN` is length 4 and the T22 production policy rejects it.
-- the rollback image `haim-bot-core:qa-self-address-floor-20260928` is healthy at `/health` (200); persistent media and runtime integrations were not altered.
-- next action requires explicit approval to rotate the server-side admin token to a strong secret (stored only in the service configuration and never printed), then repeat the bounded deployment preflight.
+Implement and execute the complete four-scenario T24 isolated shadow coordination suite, including restart/failure evidence. No real WAHA qualification conversation has started.
