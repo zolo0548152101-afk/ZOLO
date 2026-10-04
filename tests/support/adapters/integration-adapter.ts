@@ -11,7 +11,7 @@ import { config, FakeChannel, FakePlanner, log } from "../../fixtures.js";
 import type { Mode } from "../../../src/domain/types.js";
 import { planSchema, type Plan } from "../../../src/domain/types.js";
 
-export type GoldenStep = { inbound: { text: string; fixture_image?: string; external_id?: string; action?: string; burst?: string[]; process_next?: boolean }; planner?: Plan; expect: { reply_intent_any: string[] }; forbidden_effects: string[] };
+export type GoldenStep = { inbound: { text: string; fixture_image?: string; external_id?: string; action?: string; actor_phone?: string; contacts?: { phone: string; name?: string }[]; burst?: string[]; process_next?: boolean }; planner?: Plan; expect: { reply_intent_any: string[] }; forbidden_effects: string[] };
 export type GoldenScenario = {
   id: string;
   flow: string;
@@ -155,6 +155,9 @@ export class IntegrationAdapter {
     this.channel.sent.length = 0;
     this.planner.plans.clear();
     this.planner.calls = 0;
+    await this.pool.query(
+      "INSERT INTO request_counter(id,value) VALUES(true,0) ON CONFLICT(id) DO UPDATE SET value=0",
+    );
     await this.assertReferenceFixture();
   }
 
@@ -175,7 +178,7 @@ export class IntegrationAdapter {
     // direct-handoff scenarios. Using the receiver as sender makes the domain
     // correctly classify the request as a same-person/borderline case and
     // masks the conversation contract we are trying to exercise.
-    const phone = scenario.flow === "open_donation" ? "584152101" : "536662043";
+    const phone = step.inbound.actor_phone ?? (scenario.flow === "open_donation" ? "584152101" : "536662043");
     const burst = step.inbound.burst?.length ? step.inbound.burst : [step.inbound.text];
     const image = step.inbound.fixture_image ? await readFile(step.inbound.fixture_image) : null;
     const captured = image ? await this.storage.put(image, "image") : undefined;
@@ -190,7 +193,7 @@ export class IntegrationAdapter {
         kind: image && position === burst.length - 1 ? "image" : "text",
         media_url: null,
         text,
-        contacts: [],
+        contacts: (step.inbound.contacts ?? []).map((contact) => ({ phone: contact.phone, name: contact.name ?? null })),
         location: null,
       }, "simulation" as Mode, image && position === burst.length - 1 ? captured : undefined);
       storedIds.push(stored.id);
@@ -214,7 +217,7 @@ export class IntegrationAdapter {
   }
 
   async snapshot(messageId: string, phone: string, step: number) {
-    const message = (await this.pool.query(`SELECT id,reply,processed_at,error_code,media_state,media_id,ai_plan,ai_metadata,turn_id,turn_generation FROM messages WHERE id=$1`, [messageId])).rows[0] ?? null;
+    const message = (await this.pool.query(`SELECT id,reply,processed_at,error_code,media_state,media_id,ai_plan,ai_metadata,contacts,turn_id,turn_generation FROM messages WHERE id=$1`, [messageId])).rows[0] ?? null;
     const result = (await this.pool.query<{ result: { intent?: string } | null }>("SELECT result FROM command_results WHERE message_id=$1", [messageId])).rows[0]?.result;
     const requestRows = await this.pool.query<{ id: string }>("SELECT id FROM requests ORDER BY number");
     const requests = [];
