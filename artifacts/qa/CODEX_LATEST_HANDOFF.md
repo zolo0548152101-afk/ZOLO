@@ -1,9 +1,20 @@
 # CODEX LATEST HANDOFF
 
-work_unit: T24 shadow qualification preparation
-candidate_git_sha: 611a108183feeb7966613d19f97d87196cfcac02
+work_unit: T24 shadow qualification
+candidate_git_sha: 616524f8f069454d1f24b000623bec8b9405d745
 branch: qa-build
-status: active
+status: verified_pending_publish
+
+## T24 result
+
+- isolated scenarios: `5/5` PASS.
+- direct handoff preserves separate donor/recipient identities.
+- open donation stores donor facts without inventing a recipient.
+- self-transfer stores distinct pickup and destination facts.
+- general request creates a search without a phantom request.
+- restart recovery leaves one committed request and one reply effect.
+- canonical gates: unit `64/64`, integration `77/77`, T21/T22 `5/5`, AI contract `9/9`, regressions `26/26`, Golden `52/52`, backup/restore PASS.
+- evidence file: `artifacts/qa/t24-shadow-verification.json` (handoff commit binds it to the source SHA).
 
 ## Completed recovery work
 
@@ -20,4 +31,4 @@ status: active
 
 ## Next action
 
-Implement and execute the complete four-scenario T24 isolated shadow coordination suite, including restart/failure evidence. No real WAHA qualification conversation has started.
+Commit and publish this exact verified state, deploy the matching QA image, and only then begin the separately authorized WAHA contract gate. No real WAHA qualification conversation has started.

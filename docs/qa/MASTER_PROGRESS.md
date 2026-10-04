@@ -1,15 +1,24 @@
 # Master Progress
 
+## 2026-10-04 T24 shadow qualification
+
+- verdict: PASS for isolated shadow qualification; deployment remains limited to the already-authorized QA service and real WAHA qualification has not started.
+- verification window: `2026-10-04T17:51:13Z` (completed before evidence publication).
+- scenarios: `5/5` — direct handoff with separate donor/recipient conversations, open donation, self-transfer with distinct endpoints, general request, and committed-turn restart/idempotency recovery.
+- canonical verification: unit `64/64`, integration `77/77`, T21/T22 `5/5`, AI contract `9/9`, regression registry `26/26`, Golden `52/52`, backup/restore drill PASS, T24 shadow `5/5`.
+- evidence: `artifacts/qa/t24-shadow-verification.json`.
+- next exact action: publish the verified T24 source/evidence commits, deploy the matching image to the QA service, then proceed to the authorized WAHA contract gate. No production or live external data was touched by this shadow run.
+
 ## 2026-10-04 reset and deployment recovery
 
-- verdict: PASS for the scoped HAIM reset and migration/deployment recovery; T24 shadow qualification remains open.
+- verdict: PASS for the scoped HAIM reset and migration/deployment recovery; T24 shadow qualification is now complete as recorded above.
 - scope: only `haim_core`, `haim_core_jobs`, and the verified `whatsapp_haim-bot-core_haim-yahad-media` Docker volume. The service, WAHA sessions, configuration, static location data, migration history, and other server applications were preserved.
 - preserved server-only recovery snapshot: `haim-reset-20261004T170039Z.sql`, SHA-256 `7588534407c28ab1f5060ae003ebb75cc8c867fac6e83849d40bd84ff6062800`; it is not a repository artifact.
 - post-reset proof: requests, messages, conversations, contacts, media records, Outbox, integration Outbox, conversation turns, and legacy queue jobs were zero; migrations/checksums were then advanced and verified at `24/24`.
 - deployment correction: the earlier image had application code for migration 022 while the active schema ended at 021, producing an `ops` queue failure for a missing `last_attempt_at` column. Migration was applied from the service image, then candidate image `haim-bot-core:t24-611a108` was deployed and `/health` returned success.
 - post-deploy proof: zero business rows/Outbox/media records, zero failed/retry queue jobs, and zero physical media files in the verified HAIM media volume.
 - recovery regression: `611a108183feeb7966613d19f97d87196cfcac02` adds startup reconciliation for committed turns stranded as `processing`; the isolated Linux disposable suite passed, including regressions `26/26` and Golden `52/52`.
-- next exact action: replace the minimal `scripts/shadow-e2e.mjs` with four complete isolated coordination scenarios and a restart/failure scenario before beginning real WAHA contract checks.
+- next exact action: use the T24 evidence above as the deployment gate before beginning real WAHA contract checks.
 
 ## Current state
 
@@ -19,7 +28,7 @@
 - cycle_id: `qa-live-20260928t1321`
 - active_scenario: `request-1`
 - scenario_count: `6/8` in the external QA checkpoint before the transition reset; the operational DB is clean and must not be treated as evidence of an additional completed scenario
-- candidate_git_sha: `611a108183feeb7966613d19f97d87196cfcac02` (`qa-build`)
+- candidate_git_sha: `616524f8f069454d1f24b000623bec8b9405d745` (`qa-build`)
 - running_image: `haim-bot-core:t24-611a108`
 - prompt_id/version: `pmpt_6a9d0c66737881938a0f60f5df9088cb0806a26699929a86` / `23` from `ENV.example`; live prompt availability/evaluation is not yet proven
 - database: remote `haim_yahad`, schema `haim_core`; operational counts reconciled to zero after the 2026-10-04 verified clean reset; migrations/checksums `24/24`
