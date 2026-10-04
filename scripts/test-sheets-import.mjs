@@ -35,7 +35,7 @@ try {
   const csvEscape = (value) => /[,\"\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
   const rowToCsv = (overrides = {}) => fixtureHeaders.map((name, index) => csvEscape(overrides[name] ?? parsedFixture[1].values[index] ?? "")).join(",");
   const csvPath = join(root, "valid.csv");
-  await writeFile(csvPath, `${header}\r\n${rowToCsv({ "הערות": "", "סטטוס בוט": "", "נדרש טיפול אנושי": "", "שעה רצויה": "" })}\r\n`);
+  await writeFile(csvPath, `${header}\r\n${rowToCsv({ "הערות": "", "סטטוס בוט": "", "נדרש טיפול אנושי": "", "שעה רצויה": "", "עיר יעד": "", "כתובת יעד": "", "קומה יעד": "", "תאריך הובלה": "" })}\r\n`);
   const source = await readCsv(csvPath);
   const validation = validateSource(source);
   assert.equal(source.header.length, 28);
@@ -44,12 +44,24 @@ try {
   assert.equal(source.rows[0].rowHash, (await readCsv(csvPath)).rows[0].rowHash);
   assert.equal(sha256(Buffer.from("x")), sha256(Buffer.from("x")));
   assert.equal(validation.validRows.length, 1);
+  mark("destination without receiver identity is blocking");
+  mark("missing created and updated timestamps are explicit");
+  mark("earliest run date must be Tuesday");
+  const destinationWithoutIdentity = validateSource(await readCsv(await (async () => { const p = join(root, "destination-without-identity.csv"); await writeFile(p, `${header}\r\n${rowToCsv({ "עיר יעד": "בית שאן", "כתובת יעד": "שיכון א", "קומה יעד": "2", "נייד מקבל": "", "שם המקבל": "" })}\r\n`); return p; })()));
+  assert.ok(destinationWithoutIdentity.exceptions.some((x) => x.type === "receiver_destination_without_identity"));
+  const missingTimestamps = validateSource(await readCsv(await (async () => { const p = join(root, "missing-timestamps.csv"); await writeFile(p, `${header}\r\n${rowToCsv({ "תאריך יצירה": "", "עדכון אחרון": "" })}\r\n`); return p; })()));
+  assert.ok(missingTimestamps.exceptions.some((x) => x.type === "missing_required" && x.field === "תאריך יצירה"));
+  assert.ok(missingTimestamps.exceptions.some((x) => x.type === "missing_required" && x.field === "עדכון אחרון"));
+  const invalidWeekday = validateSource(await readCsv(await (async () => { const p = join(root, "invalid-weekday.csv"); await writeFile(p, `${header}\r\n${rowToCsv({ "תאריך רצוי": "2026-09-14" })}\r\n`); return p; })()));
+  assert.ok(invalidWeekday.exceptions.some((x) => x.type === "invalid_weekday"));
   mark("exact 28-column header and deterministic source/row hashes");
 
   const quoted = `${header}\r\n${rowToCsv({
     "מספר פנייה": "3", "טלפון המוסר": "0540000004", "שם המוסר": "דני",
     "כתובת איסוף": 'רחוב, "העלייה"', "מה מעבירים": "מיטה", "הערות": "הערה",
     "סטטוס בוט": "bot", "נדרש טיפול אנושי": "false", "אישורמוסר": "true", "תמונות WhatsApp": "legacy-media-ref",
+    "נייד מקבל": "0540000003", "שם המקבל": "רחל", "עיר יעד": "בית שאן", "כתובת יעד": "שיכון א", "קומה יעד": "2",
+    "תאריך הובלה": "",
   })}\r\n`;
   const quotedPath = join(root, "quoted.csv");
   await writeFile(quotedPath, quoted);
@@ -68,19 +80,30 @@ try {
   const narrowPath = join(root, "narrow.csv");
   await writeFile(narrowPath, `${header}\r\n${parsedFixture[1].values.slice(0, 27).map(csvEscape).join(",")}\r\n`);
   assert.ok(validateSource(await readCsv(narrowPath)).exceptions.some((x) => x.type === "row_width_mismatch"));
+  mark("quoted fields preserve embedded punctuation");
+  mark("unterminated quotes fail closed");
+  mark("reordered headers are rejected");
+  mark("row width mismatch is explicit");
   mark("reordered header, malformed row width, quoted CSV and unterminated quote");
 
   const before = (await client.query("SELECT count(*)::int AS n FROM requests")).rows[0].n;
   const dry = run(csvPath, "dry-run");
   assert.equal(dry.state, "validated");
   assert.equal((await client.query("SELECT count(*)::int AS n FROM requests")).rows[0].n, before);
+  mark("dry-run reports validated state");
   mark("dry-run has zero business mutations");
 
   await client.query("INSERT INTO contacts(phone) VALUES('540000001')");
   const applied = run(csvPath, "apply");
   assert.equal(applied.state, "applied");
+  assert.equal(applied.exact_reconciliation_pass, true);
   assert.equal((await client.query("SELECT count(*)::int AS n FROM requests")).rows[0].n, before + 1);
   assert.equal((await client.query("SELECT count(*)::int AS n FROM sheets_import_lineage WHERE entity_type='request'")).rows[0].n, 1);
+  assert.ok((await client.query("SELECT count(*)::int AS n FROM sheets_import_lineage WHERE entity_type LIKE 'contact:%'")).rows[0].n >= 1);
+  assert.equal((await client.query("SELECT count(*)::int AS n FROM sheets_import_lineage WHERE entity_type LIKE 'party:%'")).rows[0].n, 1);
+  mark("apply creates one request");
+  mark("lineage separates contact and party records");
+  mark("apply records a party lineage");
   const reapplied = run(csvPath, "apply");
   assert.equal(reapplied.state, "applied");
   assert.equal((await client.query("SELECT count(*)::int AS n FROM requests")).rows[0].n, before + 1);
@@ -95,6 +118,8 @@ try {
   await client.query("DELETE FROM requests WHERE id=$1", [created.id]);
   await client.query("DELETE FROM contacts WHERE phone='540000009' AND NOT EXISTS (SELECT 1 FROM request_parties WHERE contact_id=contacts.id)");
   mark("import reconciles request_counter and next normal Store.create is unique");
+  mark("request counter advances past imported number");
+  mark("normal Store.create remains unique after import");
   const batchId = (await client.query("SELECT id FROM sheets_import_batches WHERE source_label=$1", [csvPath])).rows[0].id;
 
   const duplicate = validateSource(await readCsv(csvPath));
@@ -114,16 +139,21 @@ try {
   const normalizedTime = validateSource(await readCsv(quotedPath));
   assert.equal(normalizedTime.normalized[0].preferredTime, null);
   assert.equal(normalizedTime.normalized[0].preferredTimeReview.targetValue.legacy_preferred_time, "ערב");
+  mark("invalid phone is rejected");
+  mark("invalid quantity is rejected");
+  mark("unknown status is rejected");
   mark("invalid phone/quantity/status, timezone-less timestamp rejection, deterministic preferred-time review");
   const badDry = run(badPath, "dry-run");
   assert.equal(badDry.ready_for_import, false);
   assert.equal((await client.query("SELECT count(*)::int AS n FROM requests")).rows[0].n, before + 1);
+  mark("invalid dry-run cannot apply business rows");
 
   const review = run(quotedPath, "dry-run");
   assert.ok(review.review_required_rows > 0);
   assert.throws(() => run(quotedPath, "apply"), /review_required_use_allow_review/);
   const reviewApplied = run(quotedPath, "apply", ["--allow-review"]);
   assert.equal(reviewApplied.state, "applied");
+  assert.equal(reviewApplied.exact_reconciliation_pass, true);
   const reviewBatch = (await client.query("SELECT id FROM sheets_import_batches WHERE source_label=$1", [quotedPath])).rows[0].id;
   const reviewRequest = (await client.query("SELECT entity_id FROM sheets_import_lineage WHERE batch_id=$1 AND entity_type='request'", [reviewBatch])).rows[0].entity_id;
   const mediaLineage = await client.query("SELECT 1 FROM sheets_import_lineage WHERE batch_id=$1 AND entity_type='media_reference'", [reviewBatch]);
@@ -134,20 +164,25 @@ try {
   assert.equal(reviewParty.schedule_approved_date, null);
   assert.equal(reviewParty.schedule_approved_at, null);
   assert.ok(reviewParty.approved_at);
+  mark("legacy field loss is separated into review evidence");
+  mark("media references are preserved without external fetch");
   mark("donor/receiver approval maps only approved_at/approved_by and never schedule approval");
 
   const coordinatedPath = join(root, "coordinated.csv");
-  await writeFile(coordinatedPath, `${header}\r\n${rowToCsv({ "מספר פנייה": "8", "סטטוס פנייה": "coordinated", "תאריך הובלה": "2026-10-06", "שעה רצויה": "16:00", "הערות": "", "סטטוס בוט": "", "נדרש טיפול אנושי": "" })}\r\n`);
+  await writeFile(coordinatedPath, `${header}\r\n${rowToCsv({ "מספר פנייה": "8", "סטטוס פנייה": "coordinated", "תאריך הובלה": "2026-10-06", "שעה רצויה": "16:00", "הערות": "", "סטטוס בוט": "", "נדרש טיפול אנושי": "", "עיר יעד": "", "כתובת יעד": "", "קומה יעד": "" })}\r\n`);
   const coordinatedRejected = runRaw(coordinatedPath, "apply", ["--allow-review"]);
   assert.notEqual(coordinatedRejected.status, 0);
   assert.match(coordinatedRejected.stderr, /coordinated_requires_existing_transport_run/);
   await client.query("INSERT INTO transport_runs(date,capacity) VALUES('2026-10-06',10) ON CONFLICT(date) DO NOTHING");
   const coordinated = run(coordinatedPath, "apply", ["--allow-review", "--revalidate"]);
+  assert.equal(coordinated.exact_reconciliation_pass, true);
   const coordinatedBatch = (await client.query("SELECT id FROM sheets_import_batches WHERE source_label=$1", [coordinatedPath])).rows[0].id;
   const coordinatedRequest = (await client.query("SELECT entity_id FROM sheets_import_lineage WHERE batch_id=$1 AND entity_type='request'", [coordinatedBatch])).rows[0].entity_id;
   assert.equal((await client.query("SELECT preferred_time FROM requests WHERE id=$1", [coordinatedRequest])).rows[0].preferred_time, "16:00");
   assert.equal((await client.query("SELECT schedule_approved FROM request_parties WHERE request_id=$1", [coordinatedRequest])).rows[0].schedule_approved, false);
   assert.equal(coordinated.state, "applied");
+  mark("supplied run date requires an existing transport run");
+  mark("explicit preferred HH:MM survives apply");
   mark("coordinated import requires a pre-existing transport run and preserves explicit HH:MM");
 
   const rollbackResult = rollback(batchId);
@@ -162,10 +197,15 @@ try {
   const revalidated = run(csvPath, "apply", ["--revalidate"]);
   assert.equal(revalidated.state, "applied");
   const revalidatedBatch = (await client.query("SELECT id FROM sheets_import_batches WHERE source_label=$1", [csvPath])).rows[0].id;
+  await client.query("UPDATE request_items SET description='corrupted' WHERE request_id=(SELECT entity_id::uuid FROM sheets_import_lineage WHERE batch_id=$1 AND entity_type='request' LIMIT 1)", [revalidatedBatch]);
+  const businessMismatch = spawnSync(process.execPath, ["scripts/sheets-import.mjs", "--reconcile", revalidatedBatch], { env, encoding: "utf8" });
+  assert.equal(businessMismatch.status, 1);
+  assert.equal(JSON.parse(businessMismatch.stdout).exact_reconciliation_pass, false);
+  await client.query("UPDATE request_items SET description='מיטה' WHERE request_id=(SELECT entity_id::uuid FROM sheets_import_lineage WHERE batch_id=$1 AND entity_type='request' LIMIT 1)", [revalidatedBatch]);
   await client.query("DELETE FROM sheets_import_lineage WHERE batch_id=$1 AND entity_type='item'", [revalidatedBatch]);
-  const mismatch = spawnSync(process.execPath, ["scripts/sheets-import.mjs", "--reconcile", revalidatedBatch], { env, encoding: "utf8" });
-  assert.equal(mismatch.status, 1);
-  assert.equal(JSON.parse(mismatch.stdout).exact_reconciliation_pass, false);
+  const mismatchAfterLineageDelete = spawnSync(process.execPath, ["scripts/sheets-import.mjs", "--reconcile", revalidatedBatch], { env, encoding: "utf8" });
+  assert.equal(mismatchAfterLineageDelete.status, 1);
+  assert.equal(JSON.parse(mismatchAfterLineageDelete.stdout).exact_reconciliation_pass, false);
   assert.equal((await client.query("SELECT count(*)::int AS n FROM transport_runs WHERE date='2026-10-06'")).rows[0].n, 1);
   await rollback(revalidatedBatch);
   await rollback(coordinatedBatch);

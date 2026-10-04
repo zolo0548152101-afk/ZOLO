@@ -89,6 +89,9 @@ function parseDate(v) {
   const d = new Date(`${v}T00:00:00Z`);
   return Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v ? { error: "invalid_date" } : v;
 }
+function isTuesday(date) {
+  return date && new Date(`${date}T00:00:00Z`).getUTCDay() === 2;
+}
 export function parseTimestamp(v) {
   if (!v) return null;
   if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return `${v}T00:00:00.000Z`;
@@ -156,6 +159,11 @@ export function normalizeRow(source, rowNumber) {
   if (!donorPhone) errors.push({ type: "missing_required", row: rowNumber, field: "טלפון המוסר" });
   if (!requestNumber) errors.push({ type: "missing_required", row: rowNumber, field: "מספר פנייה" });
   if (!statusSource) errors.push({ type: "missing_required", row: rowNumber, field: "סטטוס פנייה" });
+  if (!createdAt) errors.push({ type: "missing_required", row: rowNumber, field: "תאריך יצירה" });
+  if (!updatedAt) errors.push({ type: "missing_required", row: rowNumber, field: "עדכון אחרון" });
+  if (requestedDate && !isTuesday(requestedDate)) errors.push({ type: "invalid_weekday", row: rowNumber, field: "תאריך רצוי", expected: "Tuesday" });
+  const destinationPresent = [value(source, "עיר יעד"), value(source, "כתובת יעד"), value(source, "קומה יעד")].some(Boolean);
+  if (destinationPresent && !receiverPhone) errors.push({ type: "receiver_destination_without_identity", row: rowNumber, field: "נייד מקבל" });
   if (status === "coordinated" && !runDate) errors.push({ type: "coordinated_without_run_date", row: rowNumber, field: "תאריך הובלה" });
   if (donorApproved === true && !updatedAt && !createdAt) errors.push({ type: "approval_without_source_timestamp", row: rowNumber, field: "אישורמוסר" });
   if (receiverApproved === true && !updatedAt && !createdAt) errors.push({ type: "approval_without_source_timestamp", row: rowNumber, field: "אישור מקבל" });

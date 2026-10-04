@@ -78,22 +78,70 @@ async function stage(client, source, validation) {
 async function reconciliation(client, batchId) {
   const rowResult = await client.query("SELECT row_number, row_hash, source, validation_state, applied_at FROM sheets_import_rows WHERE batch_id=$1 ORDER BY row_number", [batchId]);
   const expected = new Map();
+  const mismatches = [];
+  const addExpected = (type) => expected.set(type, (expected.get(type) ?? 0) + 1);
+  const scalar = (v) => v instanceof Date ? v.toISOString() : v == null ? null : String(v);
+  const dateScalar = (v) => v instanceof Date ? v.toISOString().slice(0, 10) : v == null ? null : String(v).slice(0, 10);
   for (const row of rowResult.rows) {
     if (row.validation_state !== "valid" || !row.applied_at) continue;
     const normalized = normalizeRow(row.source, row.row_number);
-    const types = ["request", "party:donor", "item", "location_reference"];
-    if (normalized.receiver) types.push("party:receiver");
-    if (normalized.mediaReference) types.push("media_reference");
-    for (const type of types) expected.set(type, (expected.get(type) ?? 0) + 1);
+    const lineages = (await client.query("SELECT entity_type,entity_id,created_by_import FROM sheets_import_lineage WHERE batch_id=$1 AND row_number=$2", [batchId, row.row_number])).rows;
+    const byType = (type) => lineages.find((x) => x.entity_type === type);
+    const requestLineage = byType("request");
+    if (!requestLineage) { mismatches.push({ row_number: row.row_number, entity_type: "request", reason: "missing_lineage" }); continue; }
+    addExpected("request"); addExpected("contact:donor"); addExpected("party:donor"); addExpected("item"); addExpected("location_reference");
+    if (normalized.receiver) { addExpected("contact:receiver"); addExpected("party:receiver"); }
+    if (normalized.mediaReference) addExpected("media_reference");
+    const request = (await client.query("SELECT number,status,origin,run_date,earliest_run_date,preferred_time,represents_both_parties,closed_at,human_reason,created_at,updated_at FROM requests WHERE id=$1", [requestLineage.entity_id])).rows[0];
+    const expectedRequest = { number: normalized.requestNumber, status: normalized.status, origin: normalized.origin, run_date: normalized.runDate, earliest_run_date: normalized.requestedDate, preferred_time: normalized.preferredTime, represents_both_parties: normalized.representsBoth ?? false, closed_at: normalized.closedAt, human_reason: normalized.humanReason, created_at: normalized.createdAt, updated_at: normalized.updatedAt };
+    if (!request) mismatches.push({ row_number: row.row_number, entity_type: "request", reason: "missing_business_row" });
+    else for (const [field, value] of Object.entries(expectedRequest)) {
+      const compare = field === "run_date" || field === "earliest_run_date" ? dateScalar : scalar;
+      if (compare(request[field]) !== compare(value)) mismatches.push({ row_number: row.row_number, entity_type: "request", field, expected: compare(value), actual: compare(request[field]) });
+    }
+    const donorContact = byType("contact:donor");
+    const donorParty = byType("party:donor");
+    const receiverContact = normalized.receiver ? byType("contact:receiver") : null;
+    const receiverParty = normalized.receiver ? byType("party:receiver") : null;
+    for (const [role, person, contactLineage, partyLineage] of [["donor", normalized.donor, donorContact, donorParty], ["receiver", normalized.receiver, receiverContact, receiverParty]]) {
+      if (!person) continue;
+      if (!contactLineage || !partyLineage) { mismatches.push({ row_number: row.row_number, entity_type: `party:${role}`, reason: "missing_lineage" }); continue; }
+      const contactRow = (await client.query("SELECT phone FROM contacts WHERE id=$1", [contactLineage.entity_id])).rows[0];
+      if (!contactRow) mismatches.push({ row_number: row.row_number, entity_type: `contact:${role}`, reason: "missing_business_row" });
+      else if (String(contactRow.phone) !== String(person.phone)) mismatches.push({ row_number: row.row_number, entity_type: `contact:${role}`, field: "phone", expected: person.phone, actual: contactRow.phone });
+      const party = (await client.query("SELECT contact_id,name,settlement,address,floor,approved_at,approved_by,schedule_approved FROM request_parties WHERE request_id=$1 AND role=$2", [requestLineage.entity_id, role])).rows[0];
+      const approvedAt = person.approved ? (normalized.updatedAt ?? normalized.createdAt) : null;
+      const expectedParty = { contact_id: contactLineage.entity_id, name: person.name, settlement: person.settlement, address: person.address, floor: person.floor, approved_at: approvedAt, approved_by: person.approved ? contactLineage.entity_id : null, schedule_approved: false };
+      if (!party) mismatches.push({ row_number: row.row_number, entity_type: `party:${role}`, reason: "missing_business_row" });
+      else for (const [field, value] of Object.entries(expectedParty)) if (scalar(party[field]) !== scalar(value)) mismatches.push({ row_number: row.row_number, entity_type: `party:${role}`, field, expected: scalar(value), actual: scalar(party[field]) });
+    }
+    const item = (await client.query("SELECT kind,description,quantity,needs_disassembly FROM request_items WHERE request_id=$1 AND position=0", [requestLineage.entity_id])).rows[0];
+    for (const [field, value] of Object.entries({ kind: normalized.item.kind, description: normalized.item.description.slice(0, 160), quantity: normalized.item.quantity, needs_disassembly: normalized.item.needsDisassembly })) if (!item || scalar(item[field]) !== scalar(value)) mismatches.push({ row_number: row.row_number, entity_type: "item", field, expected: scalar(value), actual: scalar(item?.[field]) });
+    if (normalized.mediaReference) {
+      const media = (await client.query("SELECT data->>'media_reference' AS reference FROM request_events WHERE request_id=$1 AND event_type='legacy_sheet_imported'", [requestLineage.entity_id])).rows[0];
+      if (!media || media.reference !== normalized.mediaReference) mismatches.push({ row_number: row.row_number, entity_type: "media_reference", reason: "missing_or_different_reference", expected: normalized.mediaReference, actual: media?.reference ?? null });
+    }
+    const locationLineage = byType("location_reference");
+    if (!locationLineage || !normalized.donor.settlement || !(await client.query("SELECT 1 FROM service_locations WHERE name=$1 AND decision='allowed'", [normalized.donor.settlement])).rowCount) mismatches.push({ row_number: row.row_number, entity_type: "location_reference", reason: "missing_or_invalid_location" });
   }
   const actualResult = await client.query("SELECT entity_type, count(*)::int AS count FROM sheets_import_lineage WHERE batch_id=$1 GROUP BY entity_type ORDER BY entity_type", [batchId]);
   const actual = Object.fromEntries(actualResult.rows.map((x) => [x.entity_type, x.count]));
   const expectedObject = Object.fromEntries([...expected.entries()].sort());
   const keys = [...new Set([...Object.keys(expectedObject), ...Object.keys(actual)])].sort();
-  const mismatches = keys.filter((key) => (expectedObject[key] ?? 0) !== (actual[key] ?? 0)).map((key) => ({ entity_type: key, expected: expectedObject[key] ?? 0, actual: actual[key] ?? 0 }));
+  for (const key of keys) if ((expectedObject[key] ?? 0) !== (actual[key] ?? 0)) mismatches.push({ entity_type: key, expected: expectedObject[key] ?? 0, actual: actual[key] ?? 0, reason: "lineage_count_mismatch" });
+  const lineageSummary = { created_contacts: 0, linked_contacts: 0, parties: 0, requests: 0, items: 0, media_references: 0, locations: 0 };
+  for (const row of actualResult.rows) {
+    if (row.entity_type === "request") lineageSummary.requests += row.count;
+    if (row.entity_type.startsWith("party:")) lineageSummary.parties += row.count;
+    if (row.entity_type === "item") lineageSummary.items += row.count;
+    if (row.entity_type === "media_reference") lineageSummary.media_references += row.count;
+    if (row.entity_type === "location_reference") lineageSummary.locations += row.count;
+  }
+  const contacts = await client.query("SELECT entity_type,created_by_import,count(*)::int AS count FROM sheets_import_lineage WHERE batch_id=$1 AND entity_type LIKE 'contact:%' GROUP BY entity_type,created_by_import", [batchId]);
+  for (const row of contacts.rows) lineageSummary[row.created_by_import ? "created_contacts" : "linked_contacts"] += row.count;
   const appliedRows = rowResult.rows.filter((x) => x.applied_at).length;
   const validRows = rowResult.rows.filter((x) => x.validation_state === "valid").length;
-  return { expected_by_entity: expectedObject, lineage_by_entity: actual, applied_rows: appliedRows, valid_rows: validRows, skipped_rows: rowResult.rows.length - appliedRows, mismatches, exact_reconciliation_pass: mismatches.length === 0 && appliedRows === validRows };
+  return { expected_by_entity: expectedObject, lineage_by_entity: actual, lineage_summary: lineageSummary, applied_rows: appliedRows, valid_rows: validRows, skipped_rows: rowResult.rows.length - appliedRows, mismatches, exact_reconciliation_pass: mismatches.length === 0 && appliedRows === validRows };
 }
 async function location(client, value, row, field) {
   if (!value) return null;
@@ -116,6 +164,10 @@ async function applyBatch(client, batchId, source, validation) {
     if (!["validated", "review_required", "apply_ready"].includes(locked.rows[0].state)) throw new Error(`invalid_batch_state:${locked.rows[0].state}`);
     const ready = await client.query("UPDATE sheets_import_batches SET state='apply_ready' WHERE id=$1 AND state IN ('validated','review_required','apply_ready')", [batchId]);
     if (ready.rowCount !== 1) throw new Error("batch_not_apply_ready");
+    for (const row of validation.validRows) if (row.runDate) {
+      const run = await client.query("SELECT date FROM transport_runs WHERE date=$1", [row.runDate]);
+      if (!run.rowCount) throw new Error(`${row.status === "coordinated" ? "coordinated_requires_existing_transport_run" : "missing_transport_run"}:${row.rowNumber}:${row.runDate}`);
+    }
     for (const row of validation.validRows) {
       const existingLineage = await client.query("SELECT entity_id FROM sheets_import_lineage WHERE batch_id=$1 AND row_number=$2 AND entity_type='request'", [batchId, row.rowNumber]);
       if (existingLineage.rowCount) continue;
@@ -153,9 +205,9 @@ async function applyBatch(client, batchId, source, validation) {
       );
       const event = await client.query("INSERT INTO request_events(request_id,trace_id,actor,event_type,data) VALUES($1,$2,'legacy_import','legacy_sheet_imported',$3) RETURNING id", [requestId, randomUUID(), json({ batch_id: batchId, source_row_number: row.rowNumber, source_row_hash: row.rowHash, media_reference: row.mediaReference, source: row.source })]);
       const lineages = [
-        ["request", requestId, true], ["party:donor", donor.id, donor.created], ["item", requestId, true],
+        ["request", requestId, true], ["contact:donor", donor.id, donor.created], ["party:donor", `${requestId}:donor`, true], ["item", requestId, true],
       ];
-      if (receiver) lineages.push(["party:receiver", receiver.id, receiver.created]);
+      if (receiver) lineages.push(["contact:receiver", receiver.id, receiver.created], ["party:receiver", `${requestId}:receiver`, true]);
       if (row.mediaReference) lineages.push(["media_reference", `${requestId}:${row.mediaReference}`, true]);
       if (row.donor.settlement || row.receiver?.settlement) lineages.push(["location_reference", requestId, false]);
       for (const [entityType, entityId, created] of lineages)
@@ -187,7 +239,7 @@ async function rollback(client, batchId) {
       await client.query("DELETE FROM request_parties WHERE request_id=ANY($1::uuid[])", [requests]);
       await client.query("DELETE FROM requests WHERE id=ANY($1::uuid[])", [requests]);
     }
-    for (const row of (await client.query("SELECT entity_id FROM sheets_import_lineage WHERE batch_id=$1 AND entity_type LIKE 'party:%' AND created_by_import=true", [batchId])).rows)
+    for (const row of (await client.query("SELECT entity_id FROM sheets_import_lineage WHERE batch_id=$1 AND entity_type LIKE 'contact:%' AND created_by_import=true", [batchId])).rows)
       await client.query("DELETE FROM contacts c WHERE c.id=$1 AND NOT EXISTS (SELECT 1 FROM request_parties p WHERE p.contact_id=c.id) AND NOT EXISTS (SELECT 1 FROM searches s WHERE s.contact_id=c.id)", [row.entity_id]);
     await client.query("DELETE FROM sheets_import_lineage WHERE batch_id=$1", [batchId]);
     await client.query("UPDATE sheets_import_batches SET state='rolled_back',rolled_back_at=clock_timestamp(),completed_at=clock_timestamp() WHERE id=$1", [batchId]);

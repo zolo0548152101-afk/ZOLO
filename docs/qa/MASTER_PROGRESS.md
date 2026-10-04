@@ -161,11 +161,10 @@ Phase 3 is closed. Phase 4 has not started and must not be started without the s
 
 ### Phase 4 — T20 Legacy Sheets Import and Reconciliation
 
-- status: review correction complete; independent review requested; T21+ not started.
+- status: correction implemented and locally verified; independent review requested; T21+ not started.
 - authorized baseline: `8d4b8e0dcc83e52ee3f1f6cd94452b9a8e1e6fe6`.
-- source commit: `f36a5f0002ad3d7c1e16e3c16763098142791c78`.
-- implementation: canonical quote-aware CSV parser, exact 28-column mapping, deterministic source/row hashes, strict timezone-aware normalization, status/party/item/location/media mapping, independent field-level loss review, locked staging/apply/revalidate/rollback lifecycle, lineage reconciliation, request-counter monotonicity, idempotency and failure-safe rollback. Coordinated imports require an existing transport run and never invent capacity.
-- verification: unit `64/64`; disposable PostgreSQL integration `76/76`; T20 importer `9/9` named cases; regressions `26/26`; Golden `52/52`; typecheck, migration/FK/checksum, mapping, diff and secret gates PASS.
+- correction scope: actual business-row reconciliation (not counts only), Tuesday/missing-timestamp/destination-identity validation, consistent supplied-run FK preflight, separate contact/party lineage, importer-owned-contact rollback, and a 30-row executable case matrix.
+- verification: unit `64/64`; disposable PostgreSQL integration `76/76`; T20 importer `30/30` executable cases; regressions `26/26`; Golden `52/52`; typecheck, migration/FK/checksum, mapping, diff and secret gates PASS.
 - migration: `db/migrations/023_sheets_import_lifecycle.sql`; SHA-256 `7c2a06d94f8ed5549247609f53a778c0e214f2b5f9be7da22adbeca7a584fce1`; foreign-key failures `0`.
-- evidence: `artifacts/qa/t20-sheets-import-verification.json` (bound to source SHA); `docs/qa/T20_SHEETS_IMPORT.md`; requirement and executable-case matrices are included in the evidence artifact.
+- evidence: `artifacts/qa/t20-sheets-import-verification.json` (bound to the exact correction source SHA); `docs/qa/T20_SHEETS_IMPORT.md`; requirement and 30-row executable-case matrices are included in the evidence artifact.
 - safety: no Google/API access, no server/SSH/EasyPanel, no live WAHA/DB, no external calls, no deployment, no real messages, no PR merge; T21+ not started.
