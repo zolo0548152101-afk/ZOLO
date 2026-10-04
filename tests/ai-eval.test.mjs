@@ -1,14 +1,27 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
-import { evaluationConfigEnv, evaluateCases } from "../scripts/ai-eval.mjs";
+import { evaluationConfigEnv, evaluateCases, writeEvalEvidence } from "../scripts/ai-eval.mjs";
 
 test("remote evaluation always isolates its configuration from production runtime validation", () => {
   const env = evaluationConfigEnv({ NODE_ENV: "production", BOT_MODE: "live", DB_SCHEMA: "haim_core" });
   assert.equal(env.NODE_ENV, "test");
   assert.equal(env.BOT_MODE, "simulation");
   assert.equal(env.DB_SCHEMA, "haim_core_sim");
+});
+
+test("remote evaluation creates its evidence directory in a production runtime image", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "haim-ai-eval-"));
+  const evidencePath = join(directory, "nested", "t23-remote-prompt-eval.json");
+  try {
+    await writeEvalEvidence(evidencePath, { ok: true, total: 8 });
+    assert.deepEqual(JSON.parse(await readFile(evidencePath, "utf8")), { ok: true, total: 8 });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("remote evaluator preserves burst history and accepts the compatible planner contract", async () => {
