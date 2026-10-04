@@ -2,10 +2,10 @@
   "stage": "4",
   "work_unit": "T20",
   "evidence_schema_version": 1,
-  "verified_source_sha": "dd9aae0ed91aa8e3341f179c077c763c9926ab4c",
+  "verified_source_sha": "f36a5f0002ad3d7c1e16e3c16763098142791c78",
   "baseline_sha": "8d4b8e0dcc83e52ee3f1f6cd94452b9a8e1e6fe6",
-  "verification_started_at": "2026-10-04T08:54:00.000Z",
-  "verification_finished_at": "2026-10-04T09:00:44.3468348Z",
+  "verification_started_at": "2026-10-04T09:34:00.000Z",
+  "verification_finished_at": "2026-10-04T09:36:46.200Z",
   "node_version": "v24.19.0 host; v24.21.0 verification image",
   "dependency_runtime": {
     "runtime_image": "node:24-bookworm-slim",
@@ -16,7 +16,7 @@
   "test_totals": {
     "unit": { "passed": 64, "total": 64 },
     "integration": { "passed": 76, "total": 76 },
-    "t20_import": { "passed": 30, "total": 30 },
+    "t20_import": { "passed": 9, "total": 9 },
     "regressions": { "passed": 26, "total": 26 },
     "golden": { "passed": 52, "total": 52 }
   },
@@ -52,6 +52,34 @@
   "idempotency": { "status": "PASS", "same_source_rerun_no_duplicates": true },
   "rollback": { "status": "PASS", "import_created_entities_only": true, "repeat_is_idempotent": true },
   "failure_recovery": { "status": "PASS", "review_block_and_invalid_rows_tested": true, "transaction_rollback": true },
+  "requirement_matrix": [
+    { "requirement": "Exact 28-column legacy source contract", "implementation": "scripts/sheets-import-lib.mjs and config/legacy-sheets-v9-mapping.json", "executable_evidence": "exact 28-column header and deterministic source/row hashes", "result": "PASS" },
+    { "requirement": "Reordered headers, quoted CSV, CRLF and malformed row rejection", "implementation": "readCsv and validateSource", "executable_evidence": "reordered header, malformed row width, quoted CSV and unterminated quote", "result": "PASS" },
+    { "requirement": "Dry-run cannot mutate business data", "implementation": "sheets-import.mjs dry-run path", "executable_evidence": "dry-run has zero business mutations", "result": "PASS" },
+    { "requirement": "Request numbers remain unique after import", "implementation": "transactional GREATEST reconciliation of request_counter after apply", "executable_evidence": "import reconciles request_counter and next normal Store.create is unique", "result": "PASS" },
+    { "requirement": "Invalid phone, quantity and status are blocking", "implementation": "source validation and schema constraints", "executable_evidence": "invalid phone/quantity/status case", "result": "PASS" },
+    { "requirement": "Timestamps are timezone-explicit and persisted", "implementation": "parseTimestamp plus requests.created_at/updated_at mapping", "executable_evidence": "timezone-less rejection and persistence assertions", "result": "PASS" },
+    { "requirement": "Preferred time is deterministic and reviewable", "implementation": "parsePreferredTime", "executable_evidence": "explicit HH:MM and deterministic preferred-time review", "result": "PASS" },
+    { "requirement": "Party approval is distinct from schedule approval", "implementation": "approved_at/approved_by only; schedule fields false/null", "executable_evidence": "donor/receiver approval never sets schedule approval", "result": "PASS" },
+    { "requirement": "Human review does not become human_reason", "implementation": "legacy_human_review field review mapping", "executable_evidence": "field-review mapping and apply review gate", "result": "PASS" },
+    { "requirement": "Lifecycle states are locked and revalidation is explicit", "implementation": "FOR UPDATE state validation and --revalidate", "executable_evidence": "invalid lifecycle fails closed and explicit revalidate resumes", "result": "PASS" },
+    { "requirement": "Coordinated imports cannot invent transport runs or capacity", "implementation": "existing transport_runs lock/requirement", "executable_evidence": "coordinated import requires pre-existing run and preserves explicit HH:MM", "result": "PASS" },
+    { "requirement": "Lineage reconciliation detects corruption", "implementation": "expected-vs-actual entity lineage comparison", "executable_evidence": "deliberate reconciliation corruption is detected", "result": "PASS" },
+    { "requirement": "Rollback removes importer-owned effects and is idempotent", "implementation": "lineage-scoped rollback transaction", "executable_evidence": "rollback idempotency and preservation of pre-existing transport run", "result": "PASS" },
+    { "requirement": "Importer has no external effects", "implementation": "local parser/DB-only execution and disposable guard", "executable_evidence": "external_calls=false and no live systems touched", "result": "PASS" },
+    { "requirement": "Legacy mapping validator is portable", "implementation": "--file option and fixture-based package script", "executable_evidence": "legacy mapping validator PASS without personal Windows path", "result": "PASS" }
+  ],
+  "executable_case_matrix": [
+    { "case": "exact 28-column header and deterministic source/row hashes", "result": "PASS" },
+    { "case": "reordered header, malformed row width, quoted CSV and unterminated quote", "result": "PASS" },
+    { "case": "dry-run has zero business mutations", "result": "PASS" },
+    { "case": "request_counter reconciliation and next Store.create uniqueness", "result": "PASS" },
+    { "case": "invalid phone/quantity/status, timezone-less timestamp rejection, preferred-time review", "result": "PASS" },
+    { "case": "donor/receiver approval maps only approved_at/approved_by", "result": "PASS" },
+    { "case": "coordinated import requires pre-existing transport run and preserves HH:MM", "result": "PASS" },
+    { "case": "invalid lifecycle, explicit revalidate and deliberate reconciliation corruption", "result": "PASS" },
+    { "case": "idempotent rollback removes importer-owned effects and preserves transport", "result": "PASS" }
+  ],
   "blockers": [],
   "architecture_deviations": [],
   "safety": {
