@@ -1,0 +1,62 @@
+{
+  "stage": "4",
+  "work_unit": "T19",
+  "title": "durable integration outbox dispatcher",
+  "evidence_schema_version": 1,
+  "baseline_sha": "cea4609dbfffe22070148eea652f0c1db8642edb",
+  "source_sha": "97e34c77bdd6729d93bc14db0a5328938930fa5c",
+  "verification_started_at": "2026-10-04T10:20:00+03:00",
+  "verification_finished_at": "2026-10-04T10:50:18+03:00",
+  "runtime": {
+    "node": "24-bookworm-slim / Node 24",
+    "postgres": "17-alpine",
+    "host": "disposable Docker PostgreSQL",
+    "external_calls": false
+  },
+  "gates": {
+    "build": "PASS",
+    "unit": { "passed": 64, "total": 64 },
+    "integration": { "passed": 72, "total": 72, "failed": 0, "cancelled": 0 },
+    "regressions": { "passed": 26, "total": 26, "probes": 12 },
+    "golden": { "passed": 52, "total": 52 },
+    "spec": "PASS",
+    "offline_probes": { "passed": 12, "external_calls": false },
+    "prompt_wiring": "PASS",
+    "migration": "PASS",
+    "foreign_key_check_failures": 0,
+    "schema_checksums": "PASS",
+    "diff_check": "PASS",
+    "secret_scan": "PASS"
+  },
+  "dispatcher_contract": {
+    "states": ["pending", "active", "delivered", "dead_letter"],
+    "max_attempts": 3,
+    "ambiguous_delivery": "dead_letter_without_retry",
+    "idempotency": "stable integration:<integration>:<event_id> key and claim-once transition",
+    "ordering": "per-integration event_id predecessor gate",
+    "adapter_boundary": "versioned IntegrationAdapter with AbortSignal and no provider implementation",
+    "schema_version": 1,
+    "replay": "normal-admin, reason-required, terminal-only, attempts reset",
+    "observability": "admin metrics plus replay audit event",
+    "transaction_io": "adapter invocation occurs after durable claim transaction completes",
+    "enabled_only": true,
+    "restart_recovery": "stale active rows return to pending and due pending rows are re-enqueued"
+  },
+  "safety": {
+    "production_access": false,
+    "server_access": false,
+    "ssh_access": false,
+    "easypanel_access": false,
+    "live_waha_access": false,
+    "live_db_access": false,
+    "real_messages_sent": false,
+    "real_external_integration_calls": false,
+    "deployment_performed": false,
+    "pr2_merged": false,
+    "t20_started": false
+  },
+  "blockers": [],
+  "known_limits": [
+    "No live external provider adapter was invoked; the adapter boundary is verified with a deterministic in-process fake adapter."
+  ]
+}
