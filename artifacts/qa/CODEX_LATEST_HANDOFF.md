@@ -1,40 +1,37 @@
 # CODEX LATEST HANDOFF
 
-phase: 4 / T20 legacy Sheets import and reconciliation
-baseline_commit: 8d4b8e0dcc83e52ee3f1f6cd94452b9a8e1e6fe6
-source_commit: 43d16978ac09ede1ad0db5ea5581d668c8d8c21b
+phase: 4 / T21+T22 observability and hardening
+baseline_commit: d1cda7959bf18df9e98b26a8b0971d27970c7f28
+source_commit: 585757b5041c50d6666f371ae93930215aa37aa0
 evidence_commit: pending (this file is committed in the evidence-only handoff)
 branch: qa-build
-push_success_before_handoff: pending
+push_success_before_handoff: true
 working_tree_before_handoff: clean after source commit
 
 ## Scope
 
-- Canonical parser for the exact 28-column legacy export with quote-aware CSV, CRLF/LF, deterministic source/row SHA-256 hashes, strict phones, booleans, integers, dates, statuses, locations and item mapping.
-- Field-level loss review for legacy notes, bot status, human-treatment flag and WhatsApp media references; media is preserved as a reference only and never fetched.
-- Disposable PostgreSQL staging lifecycle: `staged`, `validated`, `apply_ready`, `applied`, `failed`, `review_required`, `rolled_back`.
-- Apply maps requests, donor/receiver parties, items, approved locations, events and lineage; reruns are idempotent and reconciliation is explicit.
-- Rollback removes only import-created entities, preserves pre-existing contacts and is idempotent. Apply/rollback require the disposable database guard.
+- T21 operational signal model and `/admin/metrics` surface for backlog, age, retry, terminal, stale-lease, FIFO, prompt and Sheets-import failure classes.
+- Configurable test/operator SLO semantics with bounded diagnostics and documented actions.
+- T22 fail-closed production/live admin-token validation, capability separation, rate/same-origin controls, recursive audit redaction, and secret-rotation simulation.
+- Disposable-only PostgreSQL/media/configuration backup manifest and restore drill with checksum validation and explicit RPO/RTO test defaults.
 
 ## Gates
 
 - build/typecheck: PASS
 - unit: PASS (64/64)
+- targeted T21/T22 tests: PASS (3/3)
 - disposable PostgreSQL integration: PASS (76/76; 0 failed; 0 cancelled)
-- T20 importer/negative tests: PASS (30/30 exact original acceptance requirements; plus missing-header, no-location reconciliation, duplicate CSVs, same-phone distinct requests, and importer-flow no-external-network guard)
 - regressions: PASS (26/26; 12 probes)
 - Golden: PASS (52/52)
-- spec, prompt wiring, probes, locations, legacy mapping: PASS
-- migrations/FK/checksum: PASS; FK failures 0; migration SHA-256 `023=7c2a06d94f8ed5549247609f53a778c0e214f2b5f9be7da22adbeca7a584fce1`, `024=f9d732fc9a328be92919242f895939780a675634143f2d992a295c7ec5725d88`
-- diff check: PASS
-- secret scan: PASS
+- spec: PASS (4 scenarios / 34 invariants); prompt wiring: PASS
+- migrations/FK/checksum: PASS; FK failures 0
+- backup/restore drill: PASS; PostgreSQL 15.19 disposable source/target, manifest with PostgreSQL/media/configuration checksums
+- diff check: PASS; secret/privacy scan: PASS
 
 ## Evidence
 
-- `artifacts/qa/t20-sheets-import-verification.json`
-- `docs/qa/T20_SHEETS_IMPORT.md`
-- `db/migrations/023_sheets_import_lifecycle.sql`
-- `db/migrations/024_sheets_import_apply_metadata.sql`
+- `artifacts/qa/t21-t22-verification.json`
+- `docs/qa/T21_T22_OBSERVABILITY_HARDENING.md`
 - `docs/qa/MASTER_PROGRESS.md`
 
 ## Safety and next action
@@ -47,8 +44,10 @@ working_tree_before_handoff: clean after source commit
 - live_db_access: false
 - real_messages_sent: false
 - real_external_integration_calls: false
+- real_secret_rotation: false
+- real_backup_storage_access: false
 - deployment_performed: false
 - pr2_merged: false
-- t21_started: false
+- t23_started: false
 
-T20 source and evidence are ready for independent review. Wait for the exact-SHA reviewer directive on PR #2. Do not start T21.
+T21+T22 source and evidence are ready for independent review. Wait for the exact-SHA reviewer directive on PR #2. Do not start T23.

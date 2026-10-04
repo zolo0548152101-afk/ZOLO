@@ -169,3 +169,14 @@ Phase 3 is closed. Phase 4 has not started and must not be started without the s
 - migrations: `db/migrations/023_sheets_import_lifecycle.sql` SHA-256 `7c2a06d94f8ed5549247609f53a778c0e214f2b5f9be7da22adbeca7a584fce1`; `db/migrations/024_sheets_import_apply_metadata.sql` SHA-256 `f9d732fc9a328be92919242f895939780a675634143f2d992a295c7ec5725d88`; foreign-key failures `0`.
 - evidence: `artifacts/qa/t20-sheets-import-verification.json` (bound to the exact correction source SHA); `docs/qa/T20_SHEETS_IMPORT.md`; the exact original 1–30 acceptance matrix is included in the evidence artifact, with additional low-level assertions kept separately.
 - safety: no Google/API access, no server/SSH/EasyPanel, no live WAHA/DB, no external calls, no deployment, no real messages, no PR merge; T21+ not started.
+
+### Phase 4 — T21/T22 Observability and Hardening
+
+- status: implementation complete; canonical disposable gates passed; independent review requested.
+- authorized baseline: `d1cda7959bf18df9e98b26a8b0971d27970c7f28`.
+- verified source commit: `585757b5041c50d6666f371ae93930215aa37aa0`.
+- T21: `/admin/metrics` now exposes bounded operational signals for inbox/outbox backlog and age, uncertain/retrying/dead-letter delivery, stale leases, FIFO blockers, prompt failures, and Sheets review-required batches. SLO defaults and operator actions are documented as configurable test/operator defaults.
+- T22: production/live admin token strength is fail-closed; capability tokens remain distinct; admin audit fields are recursively redacted; mutation rate/same-origin controls remain enforced; rotation overlap is simulation-only; backup drill requires disposable local targets and verifies PostgreSQL/media/configuration manifest components.
+- verification: build/typecheck PASS; unit `64/64`; targeted T21/T22 `3/3`; disposable PostgreSQL integration `76/76`; regressions `26/26` and probes `12/12`; Golden `52/52`; spec `4/34`; prompt wiring, migration/FK/checksum, diff and secret/privacy gates PASS; backup/restore drill PASS with disposable PostgreSQL 15.19 and RPO 60/RTO 30 test defaults.
+- evidence: `artifacts/qa/t21-t22-verification.json`; `docs/qa/T21_T22_OBSERVABILITY_HARDENING.md`.
+- safety: no deployment, production/server/SSH/EasyPanel access, live WAHA/DB, real messages, real secret rotation, real backup storage, Google API/real Sheet, or T23+ work.
