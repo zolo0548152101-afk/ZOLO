@@ -151,10 +151,10 @@ Phase 3 is closed. Phase 4 has not started and must not be started without the s
 
 ### Phase 4 — T19 Integration Outbox Dispatcher
 
-- status: source implementation and verification complete; independent review requested; T20 not started.
-- baseline commit: `cea4609dbfffe22070148eea652f0c1db8642edb`.
-- source commit: `97e34c77bdd6729d93bc14db0a5328938930fa5c`.
-- implementation: durable `pending`/`active`/`delivered`/`dead_letter` state machine; stale-active recovery; bounded retry with retryable/terminal/ambiguous classification; stable idempotency keys; atomic claim and per-integration ordering; versioned event envelope; enabled-only enqueue; adapter boundary with timeout signal; normal-admin terminal replay; metrics and audit observability.
-- verification: build PASS; unit `64/64`; disposable PostgreSQL integration `72/72`; regressions `26/26` with `12` probes; Golden `52/52`; spec, prompt wiring, migration, FK/checksum, diff and secret gates PASS.
+- status: correction complete; independent review requested; T20 not started.
+- authorized baseline commit: `42858e597656fcc452d0a66ca09f52bb1ea7af9b`.
+- source commit: `570d97af357e1c284b81a456b681315194346afa`.
+- implementation: durable `pending`/`active`/`delivered`/`dead_letter` state machine; stale-active lease recovery plus periodic due-pending recovery; bounded retry with retryable/terminal/ambiguous classification; stable idempotency keys; atomic claim and per-integration ordering; versioned event envelope with delivery keys; enabled-only enqueue; adapter boundary with timeout signal; same-transaction normal-admin terminal replay scheduling; bounded metrics/details and operations stuck/dead-letter signal.
+- verification: build PASS; unit `64/64`; disposable PostgreSQL integration `76/76`; regressions `26/26` with `12` probes; Golden `52/52`; spec, prompt wiring, migration, FK/checksum, diff and secret gates PASS.
 - evidence: `artifacts/qa/t19-integration-dispatcher-verification.json`.
 - safety: no deployment, production/server/SSH/EasyPanel access, live WAHA/DB, real messages, or external integration calls; T20 not started.

@@ -3,10 +3,10 @@
   "work_unit": "T19",
   "title": "durable integration outbox dispatcher",
   "evidence_schema_version": 1,
-  "baseline_sha": "cea4609dbfffe22070148eea652f0c1db8642edb",
-  "source_sha": "97e34c77bdd6729d93bc14db0a5328938930fa5c",
-  "verification_started_at": "2026-10-04T10:20:00+03:00",
-  "verification_finished_at": "2026-10-04T10:50:18+03:00",
+  "baseline_sha": "42858e597656fcc452d0a66ca09f52bb1ea7af9b",
+  "source_sha": "570d97af357e1c284b81a456b681315194346afa",
+  "verification_started_at": "2026-10-04T11:27:00+03:00",
+  "verification_finished_at": "2026-10-04T11:32:45+03:00",
   "runtime": {
     "node": "24-bookworm-slim / Node 24",
     "postgres": "17-alpine",
@@ -16,7 +16,7 @@
   "gates": {
     "build": "PASS",
     "unit": { "passed": 64, "total": 64 },
-    "integration": { "passed": 72, "total": 72, "failed": 0, "cancelled": 0 },
+    "integration": { "passed": 76, "total": 76, "failed": 0, "cancelled": 0 },
     "regressions": { "passed": 26, "total": 26, "probes": 12 },
     "golden": { "passed": 52, "total": 52 },
     "spec": "PASS",
@@ -37,10 +37,12 @@
     "adapter_boundary": "versioned IntegrationAdapter with AbortSignal and no provider implementation",
     "schema_version": 1,
     "replay": "normal-admin, reason-required, terminal-only, attempts reset",
-    "observability": "admin metrics plus replay audit event",
+    "observability": "bounded admin metrics/details plus operations stuck/dead-letter signal and replay audit event",
     "transaction_io": "adapter invocation occurs after durable claim transaction completes",
     "enabled_only": true,
-    "restart_recovery": "stale active rows return to pending and due pending rows are re-enqueued"
+    "restart_recovery": "stale active rows return to pending and eligible due pending rows are re-enqueued by startup and periodic recovery",
+    "queue_trigger_safety": "replay schedules its target in the same transaction; periodic recovery schedules due rows only after predecessor ordering is satisfied",
+    "event_delivery_key": "explicit envelope delivery_keys map is projected into IntegrationEvent.deliveryKey and matches adapter idempotency options"
   },
   "safety": {
     "production_access": false,

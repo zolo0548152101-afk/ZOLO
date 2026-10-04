@@ -1,8 +1,8 @@
 # CODEX LATEST HANDOFF
 
 phase: 4 / T19 integration outbox dispatcher
-baseline_commit: cea4609dbfffe22070148eea652f0c1db8642edb
-source_commit: 97e34c77bdd6729d93bc14db0a5328938930fa5c
+baseline_commit: 42858e597656fcc452d0a66ca09f52bb1ea7af9b
+source_commit: 570d97af357e1c284b81a456b681315194346afa
 evidence_commit: pending (this file is committed in the evidence-only handoff)
 branch: qa-build
 push_success_before_handoff: pending
@@ -12,15 +12,15 @@ working_tree_before_handoff: clean
 
 - Durable integration outbox state machine: pending, active, delivered, dead_letter.
 - Bounded retry with retryable, terminal, retry-exhausted, and ambiguous delivery classes.
-- Stable idempotency key, atomic claim, duplicate-safe dispatch, per-integration event ordering, and stale-active recovery.
+- Stable idempotency key, atomic claim, duplicate-safe dispatch, per-integration event ordering, stale-active recovery, and periodic due-pending recovery without restart.
 - Versioned event envelope and adapter boundary with AbortSignal; no provider or live external call.
-- Enabled-only enqueue, terminal-only normal-admin replay with reason and audit event, and admin metrics.
+- Enabled-only enqueue, terminal-only normal-admin replay with reason/audit and same-transaction queue scheduling, and bounded metrics/operations visibility.
 
 ## Gates
 
 - build: PASS
 - unit: PASS (64/64)
-- disposable PostgreSQL integration: PASS (72/72; 0 failed; 0 cancelled)
+- disposable PostgreSQL integration: PASS (76/76; 0 failed; 0 cancelled)
 - regressions: PASS (26/26; 12 probes)
 - Golden: PASS (52/52)
 - spec: PASS
@@ -32,6 +32,7 @@ working_tree_before_handoff: clean
 ## Evidence
 
 - `artifacts/qa/t19-integration-dispatcher-verification.json`
+- `docs/qa/CODEX_EXECUTION_POLICY.md`
 - `docs/qa/MASTER_PROGRESS.md`
 - `src/application/integration-port.ts`
 - `src/application/runtime.ts`
