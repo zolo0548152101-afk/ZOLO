@@ -157,6 +157,7 @@ export class Runtime {
         // A deployment or a worker restart must never strand an accepted
         // WhatsApp message or an outbound reply in the database. Rebuild the
         // lightweight queue jobs from durable state before declaring ready.
+        await this.reconcileCompletedTurns();
         const recoverIdentity = await this.pool.query<{ id: string }>(
           `SELECT id FROM messages
             WHERE contact_id IS NULL AND processed_at IS NULL
@@ -223,6 +224,28 @@ export class Runtime {
     } finally {
       this.initializing = false;
     }
+  }
+
+  /**
+   * A process can stop after the message commit but before the turn terminal
+   * state is written. Once every durable message in a turn is already
+   * processed, replaying it is both unnecessary and unsafe; close the turn
+   * before startup recovery inspects pending messages.
+   */
+  async reconcileCompletedTurns(): Promise<number> {
+    const result = await this.pool.query(
+      `UPDATE conversation_turns t
+          SET status='completed', completed_at=COALESCE(completed_at, clock_timestamp())
+        WHERE t.status IN ('pending','processing')
+          AND EXISTS (SELECT 1 FROM turn_messages tm WHERE tm.turn_id=t.id)
+          AND NOT EXISTS (
+            SELECT 1
+              FROM turn_messages tm
+              JOIN messages m ON m.id=tm.message_id
+             WHERE tm.turn_id=t.id AND m.processed_at IS NULL
+          )`,
+    );
+    return result.rowCount ?? 0;
   }
 
   async deliverIntegration(id: string): Promise<void> {

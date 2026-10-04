@@ -1380,6 +1380,24 @@ test("quiet-window admission durably links every message in one turn", async () 
   );
   assert.equal(remaining.rows[0]!.n, 0);
 });
+test("startup recovery completes a stranded processing turn after all of its messages were committed", async () => {
+  const message = await enqueue(phone(), "יש לי מקרר למסירה");
+  await engine.processNext(message.id);
+  await pool.query(
+    `UPDATE conversation_turns
+        SET status='processing',completed_at=NULL
+      WHERE id=(SELECT turn_id FROM messages WHERE id=$1)`,
+    [message.id],
+  );
+  const recovering = new Runtime(cfg, log, { pool, planner: ai, channel, storage });
+  await recovering.reconcileCompletedTurns();
+  const turn = await pool.query<{ status: string; completed_at: Date | null }>(
+    "SELECT status,completed_at FROM conversation_turns WHERE id=(SELECT turn_id FROM messages WHERE id=$1)",
+    [message.id],
+  );
+  assert.equal(turn.rows[0]!.status, "completed");
+  assert.ok(turn.rows[0]!.completed_at);
+});
 test("a newer message supersedes an in-flight AI turn without an old reply", async () => {
   const p = phone(),
     first = await enqueue(p, "פריט מיוחד למסירה", [donate()]);
