@@ -76,8 +76,10 @@ export function adminAuditRecord(
 }
 
 export function assertDestructiveAllowed(req: FastifyRequest, c: Config): AdminCapability {
-  const capability = requireAdminCapability(req, "destructive");
-  if (c.NODE_ENV === "production" || c.BOT_MODE === "live")
+  const capability = c.HAIM_ALLOW_ADMIN_CLEAR_ALL
+    ? requireAdminCapability(req, "normal")
+    : requireAdminCapability(req, "destructive");
+  if (!c.HAIM_ALLOW_ADMIN_CLEAR_ALL && (c.NODE_ENV === "production" || c.BOT_MODE === "live"))
     throw new AppError("destructive_admin_forbidden", 403, "פעולה הרסנית חסומה בסביבת production/live.");
   return capability;
 }
