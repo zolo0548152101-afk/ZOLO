@@ -172,11 +172,11 @@ Phase 3 is closed. Phase 4 has not started and must not be started without the s
 
 ### Phase 4 — T21/T22 Observability and Hardening
 
-- status: implementation complete; canonical disposable gates passed; independent review requested.
+- status: review corrections complete; source and evidence-only handoff pushed; independent review requested.
 - authorized baseline: `d1cda7959bf18df9e98b26a8b0971d27970c7f28`.
-- verified source commit: `585757b5041c50d6666f371ae93930215aa37aa0`.
+- verified source commit: `616cde7a4d523929deb17fd96758e2d6270dd324`.
 - T21: `/admin/metrics` now exposes bounded operational signals for inbox/outbox backlog and age, uncertain/retrying/dead-letter delivery, stale leases, FIFO blockers, prompt failures, and Sheets review-required batches. SLO defaults and operator actions are documented as configurable test/operator defaults.
 - T22: production/live admin token strength is fail-closed; capability tokens remain distinct; admin audit fields are recursively redacted; mutation rate/same-origin controls remain enforced; rotation overlap is simulation-only; backup drill requires disposable local targets and verifies PostgreSQL/media/configuration manifest components.
-- verification: build/typecheck PASS; unit `64/64`; targeted T21/T22 `3/3`; disposable PostgreSQL integration `76/76`; regressions `26/26` and probes `12/12`; Golden `52/52`; spec `4/34`; prompt wiring, migration/FK/checksum, diff and secret/privacy gates PASS; backup/restore drill PASS with disposable PostgreSQL 15.19 and RPO 60/RTO 30 test defaults.
-- evidence: `artifacts/qa/t21-t22-verification.json`; `docs/qa/T21_T22_OBSERVABILITY_HARDENING.md`.
+- verification: build/typecheck PASS; unit `64/64`; targeted T21/T22 `4/4`; disposable PostgreSQL integration `76/76`; Sheets importer `30/30`; regressions `26/26` and probes `12/12`; Golden `52/52`; migration/FK/checksum and secret/privacy gates PASS; backup/restore drill PASS with isolated disposable PostgreSQL 17.11 source/target, target-side HAIM state/media/config verification, and RPO 60/RTO 30 test defaults. GitHub verification runs `37204416130` and `37204413644` passed on the exact source SHA.
+- evidence: `artifacts/qa/t21-t22-verification.json`; `docs/qa/T21_T22_OBSERVABILITY_HARDENING.md`; evidence-only handoff follows source commit.
 - safety: no deployment, production/server/SSH/EasyPanel access, live WAHA/DB, real messages, real secret rotation, real backup storage, Google API/real Sheet, or T23+ work.

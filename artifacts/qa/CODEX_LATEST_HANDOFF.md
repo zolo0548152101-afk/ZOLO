@@ -2,31 +2,38 @@
 
 phase: 4 / T21+T22 observability and hardening
 baseline_commit: d1cda7959bf18df9e98b26a8b0971d27970c7f28
-source_commit: 585757b5041c50d6666f371ae93930215aa37aa0
-evidence_commit: pending (this file is committed in the evidence-only handoff)
+source_commit: 616cde7a4d523929deb17fd96758e2d6270dd324
+evidence_commit: this evidence-only handoff commit
 branch: qa-build
-push_success_before_handoff: true
-working_tree_before_handoff: clean after source commit
+ci_source_sha: 616cde7a4d523929deb17fd96758e2d6270dd324
+ci_verification_runs: 37204416130, 37204413644 (success)
 
 ## Scope
 
-- T21 operational signal model and `/admin/metrics` surface for backlog, age, retry, terminal, stale-lease, FIFO, prompt and Sheets-import failure classes.
-- Configurable test/operator SLO semantics with bounded diagnostics and documented actions.
-- T22 fail-closed production/live admin-token validation, capability separation, rate/same-origin controls, recursive audit redaction, and secret-rotation simulation.
-- Disposable-only PostgreSQL/media/configuration backup manifest and restore drill with checksum validation and explicit RPO/RTO test defaults.
+- T21 configurable observability signals include failed imports, retrying and
+  stale-active integrations, and configurable warning/critical transitions.
+- `/admin/metrics` sanitizes integration diagnostics before exposure.
+- T22 production/live validation requires strong optional capability tokens too;
+  empty optional tokens disable their capability and distinctness remains
+  enforced.
+- The disposable backup/restore drill proves target-side HAIM state, import
+  lineage, integration/outbox state, media bytes/metadata, and configuration;
+  it rejects non-disposable targets and runs against fresh isolated source and
+  target databases.
 
 ## Gates
 
 - build/typecheck: PASS
 - unit: PASS (64/64)
-- targeted T21/T22 tests: PASS (3/3)
-- disposable PostgreSQL integration: PASS (76/76; 0 failed; 0 cancelled)
+- targeted T21/T22: PASS (4/4)
+- disposable PostgreSQL integration: PASS (76/76)
+- Sheets importer: PASS (30/30)
 - regressions: PASS (26/26; 12 probes)
 - Golden: PASS (52/52)
-- spec: PASS (4 scenarios / 34 invariants); prompt wiring: PASS
 - migrations/FK/checksum: PASS; FK failures 0
-- backup/restore drill: PASS; PostgreSQL 15.19 disposable source/target, manifest with PostgreSQL/media/configuration checksums
-- diff check: PASS; secret/privacy scan: PASS
+- backup/restore: PASS; `restored:true`, `target_verified:true`
+- CI on exact source SHA: PASS (runs 37204416130, 37204413644)
+- diff check and secret/privacy scan: PASS
 
 ## Evidence
 
@@ -43,11 +50,7 @@ working_tree_before_handoff: clean after source commit
 - live_waha_access: false
 - live_db_access: false
 - real_messages_sent: false
-- real_external_integration_calls: false
-- real_secret_rotation: false
-- real_backup_storage_access: false
 - deployment_performed: false
-- pr2_merged: false
 - t23_started: false
 
-T21+T22 source and evidence are ready for independent review. Wait for the exact-SHA reviewer directive on PR #2. Do not start T23.
+T21+T22 corrections are ready for independent review. Do not start T23.

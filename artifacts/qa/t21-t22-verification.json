@@ -1,72 +1,66 @@
 {
   "schema_version": 1,
   "work_unit": "PHASE-4-T21-T22-OBSERVABILITY-HARDENING",
-  "verified_source_sha": "585757b5041c50d6666f371ae93930215aa37aa0",
-  "verification_started_at": "2026-10-04T12:22:38.2117087Z",
-  "verification_finished_at": "2026-10-04T12:25:06.1865905Z",
+  "verified_source_sha": "616cde7a4d523929deb17fd96758e2d6270dd324",
+  "verification_started_at": "2026-10-04T12:45:00Z",
+  "verification_finished_at": "2026-10-04T13:03:40Z",
   "runtime": {
     "local_node": "v24.19.0",
     "verification_node": "v24.21.0",
-    "postgres_disposable": "15.19",
+    "postgres_disposable": "17.11",
     "live_access": false
   },
   "t21_observability": {
     "status": "PASS",
     "operator_surface": "/admin/metrics",
     "signals": [
-      "inbox_backlog",
-      "outbox_backlog",
-      "uncertain_delivery",
-      "retrying_delivery",
-      "dead_letter",
-      "stale_lease",
-      "fifo_blocker",
-      "prompt_failure",
-      "sheets_review_required"
+      "inbox_backlog", "outbox_backlog", "uncertain_delivery",
+      "outbox_retrying_delivery", "integration_retrying_delivery",
+      "integration_stale_active", "dead_letter", "stale_lease",
+      "fifo_blocker", "prompt_failure", "sheets_review_required",
+      "sheets_import_failed"
     ],
+    "configurable_threshold_transitions": "PASS",
+    "failed_import_and_integration_states": "PASS",
+    "diagnostic_redaction": "PASS",
     "bounded_context_bytes": 512,
-    "synthetic_fault_injection": "3/3 PASS",
-    "slo_semantics_documented": true,
     "observe_only": true
   },
   "t22_hardening": {
     "status": "PASS",
-    "strong_admin_token_validation": true,
-    "capability_separation": true,
+    "strong_admin_and_optional_capability_tokens": "PASS",
+    "capability_separation": "PASS",
     "rate_limit_and_same_origin": "PASS",
     "recursive_secret_redaction": "PASS",
-    "rotation_simulation": "PASS",
+    "integration_error_redaction": "PASS",
     "backup_restore_drill": {
       "status": "PASS",
       "disposable_only": true,
+      "isolated_source_target": true,
+      "target_proof": "local_postgresql_host_explicit_disposable_database_and_application_name",
+      "target_state_verification": "PASS",
+      "media_content_and_metadata": "PASS",
+      "configuration_metadata": "PASS",
       "rpo_minutes_tested": 60,
       "rto_minutes_tested": 30,
-      "components": [
-        { "name": "postgres", "sha256": "3fa47804a0cbb9f3de72cf89cf1f38d1c09a78334def1335f87d604aa6623d34", "bytes": 874 },
-        { "name": "media", "sha256": "366805399a25424ab09d47ff372b895216c62f14c5dab2b6468a67351e4db7ee", "bytes": 1549 },
-        { "name": "configuration", "sha256": "5315cfdbd1afe719d7ca91dbf04a7a55ef0f1e56fb1c22d9a0f55c4f5a29113b", "bytes": 1403 }
-      ]
-    },
-    "negative_paths": [
-      "missing_component",
-      "invalid_checksum",
-      "invalid_path",
-      "wrong_or_missing_admin_token"
-    ]
+      "negative_safety_probe": "PASS"
+    }
   },
   "gates": {
     "build_typecheck": "PASS",
     "unit": "64/64 PASS",
-    "t21_t22_targeted": "3/3 PASS",
+    "t21_t22_targeted": "4/4 PASS",
     "integration": "76/76 PASS",
+    "sheets_import": "30/30 PASS",
     "regressions": "26/26 PASS",
     "offline_probes": "12/12 PASS",
     "golden": "52/52 PASS",
-    "spec": "4 scenarios / 34 invariants PASS",
-    "prompt_wiring": "PASS",
     "migration_fk_checksum": "PASS; FK failures 0",
-    "diff_check": "PASS",
-    "secret_privacy_scan": "PASS"
+    "backup_restore": "PASS; restored=true and target_verified=true",
+    "ci_verification_sha": "616cde7a4d523929deb17fd96758e2d6270dd324",
+    "ci_verification_runs": [37204416130, 37204413644],
+    "secret_privacy_scan": "PASS",
+    "diff_check": "PASS"
   },
   "blockers": [],
   "safety": {
