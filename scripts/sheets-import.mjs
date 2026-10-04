@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readCsv, validateSource } from "./sheets-import-lib.mjs";
+import { readCsv, validateSource, normalizeRow } from "./sheets-import-lib.mjs";
 import pg from "pg";
 
 const args = process.argv.slice(2);
@@ -8,12 +8,14 @@ const file = get("--file");
 const label = get("--source-label") ?? file;
 const mode = get("--mode") ?? "dry-run";
 const rollbackId = get("--rollback");
+const reconcileId = get("--reconcile");
 const allowReview = args.includes("--allow-review");
-if (!file && !rollbackId) throw new Error("Usage: node scripts/sheets-import.mjs --file <csv> --source-label <label> --mode dry-run|apply [--allow-review] | --rollback <batch-id>");
+const revalidate = args.includes("--revalidate");
+if (!file && !rollbackId && !reconcileId) throw new Error("Usage: node scripts/sheets-import.mjs --file <csv> --source-label <label> --mode dry-run|apply [--allow-review] [--revalidate] | --rollback <batch-id> | --reconcile <batch-id>");
 if (!rollbackId && !["dry-run", "apply"].includes(mode)) throw new Error("invalid_mode");
 if ((mode === "apply" || rollbackId) && process.env.T20_DISPOSABLE !== "true") throw new Error("disposable_database_guard_required");
 const databaseUrl = process.env.TEST_DATABASE_URL;
-if ((mode === "apply" || rollbackId) && !databaseUrl) throw new Error("TEST_DATABASE_URL_required");
+if ((mode === "apply" || rollbackId || reconcileId) && !databaseUrl) throw new Error("TEST_DATABASE_URL_required");
 
 function json(value) { return JSON.stringify(value ?? {}); }
 function reportBase(source, validation) {
@@ -33,14 +35,26 @@ async function connect() {
 async function stage(client, source, validation) {
   await client.query("BEGIN");
   try {
-    const b = await client.query(
-      `INSERT INTO sheets_import_batches(source_label,source_hash,mode,row_count,error_count,state)
-       VALUES($1,$2,$3,$4,$5,$6)
-       ON CONFLICT(source_label,source_hash) DO UPDATE SET mode=EXCLUDED.mode,row_count=EXCLUDED.row_count,error_count=EXCLUDED.error_count
-       RETURNING id`,
-      [label, source.sourceHash, mode === "dry-run" ? "dry_run" : "apply", source.rows.length, validation.blocking.length, validation.blocking.length ? "review_required" : validation.reviewRows.length ? "review_required" : "validated"],
-    );
-    const batchId = b.rows[0].id;
+    const current = await client.query("SELECT id,state FROM sheets_import_batches WHERE source_label=$1 AND source_hash=$2 FOR UPDATE", [label, source.sourceHash]);
+    const nextState = validation.blocking.length || validation.reviewRows.length ? "review_required" : "validated";
+    let batchId;
+    if (current.rowCount) {
+      batchId = current.rows[0].id;
+      if (revalidate) {
+        if (!["failed", "rolled_back"].includes(current.rows[0].state)) throw new Error(`revalidate_not_allowed:${current.rows[0].state}`);
+        await client.query("UPDATE sheets_import_batches SET mode=$2,row_count=$3,error_count=$4,state=$5,applied_at=NULL,rolled_back_at=NULL,completed_at=NULL,rollback_error=NULL WHERE id=$1", [batchId, mode === "dry-run" ? "dry_run" : "apply", source.rows.length, validation.blocking.length, nextState]);
+        await client.query("DELETE FROM sheets_import_rows WHERE batch_id=$1", [batchId]);
+        await client.query("DELETE FROM sheets_import_field_reviews WHERE batch_id=$1", [batchId]);
+      }
+    } else {
+      const b = await client.query(
+        `INSERT INTO sheets_import_batches(source_label,source_hash,mode,row_count,error_count,state)
+         VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,
+        [label, source.sourceHash, mode === "dry-run" ? "dry_run" : "apply", source.rows.length, validation.blocking.length, nextState],
+      );
+      batchId = b.rows[0].id;
+    }
+    if (current.rowCount && !revalidate) { await client.query("COMMIT"); return batchId; }
     for (const row of validation.normalized) {
       const state = row.errors.some((e) => e.type === "duplicate_source_row") ? "duplicate" : row.errors.length ? "invalid" : "valid";
       await client.query(
@@ -62,15 +76,24 @@ async function stage(client, source, validation) {
   } catch (e) { await client.query("ROLLBACK"); throw e; }
 }
 async function reconciliation(client, batchId) {
-  const byEntity = await client.query("SELECT entity_type, count(*)::int AS count FROM sheets_import_lineage WHERE batch_id=$1 GROUP BY entity_type ORDER BY entity_type", [batchId]);
-  const rows = await client.query("SELECT count(*) FILTER (WHERE applied_at IS NOT NULL)::int AS applied, count(*) FILTER (WHERE validation_state <> 'valid')::int AS skipped FROM sheets_import_rows WHERE batch_id=$1", [batchId]);
-  const applied = rows.rows[0] ?? { applied: 0, skipped: 0 };
-  return {
-    lineage_by_entity: Object.fromEntries(byEntity.rows.map((x) => [x.entity_type, x.count])),
-    applied_rows: applied.applied,
-    skipped_rows: applied.skipped,
-    exact_reconciliation_pass: true,
-  };
+  const rowResult = await client.query("SELECT row_number, row_hash, source, validation_state, applied_at FROM sheets_import_rows WHERE batch_id=$1 ORDER BY row_number", [batchId]);
+  const expected = new Map();
+  for (const row of rowResult.rows) {
+    if (row.validation_state !== "valid" || !row.applied_at) continue;
+    const normalized = normalizeRow(row.source, row.row_number);
+    const types = ["request", "party:donor", "item", "location_reference"];
+    if (normalized.receiver) types.push("party:receiver");
+    if (normalized.mediaReference) types.push("media_reference");
+    for (const type of types) expected.set(type, (expected.get(type) ?? 0) + 1);
+  }
+  const actualResult = await client.query("SELECT entity_type, count(*)::int AS count FROM sheets_import_lineage WHERE batch_id=$1 GROUP BY entity_type ORDER BY entity_type", [batchId]);
+  const actual = Object.fromEntries(actualResult.rows.map((x) => [x.entity_type, x.count]));
+  const expectedObject = Object.fromEntries([...expected.entries()].sort());
+  const keys = [...new Set([...Object.keys(expectedObject), ...Object.keys(actual)])].sort();
+  const mismatches = keys.filter((key) => (expectedObject[key] ?? 0) !== (actual[key] ?? 0)).map((key) => ({ entity_type: key, expected: expectedObject[key] ?? 0, actual: actual[key] ?? 0 }));
+  const appliedRows = rowResult.rows.filter((x) => x.applied_at).length;
+  const validRows = rowResult.rows.filter((x) => x.validation_state === "valid").length;
+  return { expected_by_entity: expectedObject, lineage_by_entity: actual, applied_rows: appliedRows, valid_rows: validRows, skipped_rows: rowResult.rows.length - appliedRows, mismatches, exact_reconciliation_pass: mismatches.length === 0 && appliedRows === validRows };
 }
 async function location(client, value, row, field) {
   if (!value) return null;
@@ -87,7 +110,12 @@ async function applyBatch(client, batchId, source, validation) {
   if (validation.reviewRows.length && !allowReview) throw new Error("review_required_use_allow_review");
   await client.query("BEGIN");
   try {
-    await client.query("UPDATE sheets_import_batches SET state='apply_ready' WHERE id=$1 AND state IN ('validated','review_required')", [batchId]);
+    const locked = await client.query("SELECT state FROM sheets_import_batches WHERE id=$1 FOR UPDATE", [batchId]);
+    if (!locked.rowCount) throw new Error("batch_not_found");
+    if (locked.rows[0].state === "applied") { await client.query("COMMIT"); return; }
+    if (!["validated", "review_required", "apply_ready"].includes(locked.rows[0].state)) throw new Error(`invalid_batch_state:${locked.rows[0].state}`);
+    const ready = await client.query("UPDATE sheets_import_batches SET state='apply_ready' WHERE id=$1 AND state IN ('validated','review_required','apply_ready')", [batchId]);
+    if (ready.rowCount !== 1) throw new Error("batch_not_apply_ready");
     for (const row of validation.validRows) {
       const existingLineage = await client.query("SELECT entity_id FROM sheets_import_lineage WHERE batch_id=$1 AND row_number=$2 AND entity_type='request'", [batchId, row.rowNumber]);
       if (existingLineage.rowCount) continue;
@@ -95,26 +123,29 @@ async function applyBatch(client, batchId, source, validation) {
       if (conflict.rowCount) throw new Error(`conflicting_existing_request_number:${row.rowNumber}:${row.requestNumber}`);
       const donorSettlement = await location(client, row.donor.settlement, row.rowNumber, "עיר איסוף");
       const receiverSettlement = row.receiver ? await location(client, row.receiver.settlement, row.rowNumber, "עיר יעד") : null;
-      if (row.status === "coordinated") await client.query("INSERT INTO transport_runs(date,capacity) VALUES($1,10) ON CONFLICT(date) DO NOTHING", [row.runDate]);
+      if (row.status === "coordinated") {
+        const run = await client.query("SELECT date FROM transport_runs WHERE date=$1 FOR UPDATE", [row.runDate]);
+        if (!run.rowCount) throw new Error(`coordinated_requires_existing_transport_run:${row.rowNumber}:${row.runDate}`);
+      }
       const donor = await contact(client, row.donor.phone);
       const receiver = row.receiver ? await contact(client, row.receiver.phone) : null;
       const requestId = randomUUID();
       await client.query(
-        `INSERT INTO requests(id,number,status,origin,run_date,earliest_run_date,preferred_time,represents_both_parties,closed_at,human_reason)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [requestId, row.requestNumber, row.status, row.origin, row.runDate, row.requestedDate, row.preferredTime, row.representsBoth ?? false, row.closedAt, row.humanReason],
+        `INSERT INTO requests(id,number,status,origin,run_date,earliest_run_date,preferred_time,represents_both_parties,closed_at,human_reason,created_at,updated_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [requestId, row.requestNumber, row.status, row.origin, row.runDate, row.requestedDate, row.preferredTime, row.representsBoth ?? false, row.closedAt, row.humanReason, row.createdAt, row.updatedAt],
       );
       const approvedAt = (approved, date) => approved ? (date ?? null) : null;
       await client.query(
         `INSERT INTO request_parties(request_id,role,contact_id,name,settlement,address,floor,approved_at,approved_by,schedule_approved,schedule_approved_date,schedule_approved_at)
-         VALUES($1,'donor',$2,$3,$4,$5,$6,$7,$8,$9,$10::date,$11::timestamptz)`,
-        [requestId, donor.id, row.donor.name, donorSettlement, row.donor.address, row.donor.floor, approvedAt(row.donor.approved, row.updatedAt ?? row.createdAt), row.donor.approved ? donor.id : null, row.donor.approved, row.donor.approved ? row.runDate : null, approvedAt(row.donor.approved, row.updatedAt ?? row.createdAt)],
+         VALUES($1,'donor',$2,$3,$4,$5,$6,$7,$8,false,NULL,NULL)`,
+        [requestId, donor.id, row.donor.name, donorSettlement, row.donor.address, row.donor.floor, approvedAt(row.donor.approved, row.updatedAt ?? row.createdAt), row.donor.approved ? donor.id : null],
       );
       if (receiver)
         await client.query(
           `INSERT INTO request_parties(request_id,role,contact_id,name,settlement,address,floor,approved_at,approved_by,schedule_approved,schedule_approved_date,schedule_approved_at)
-           VALUES($1,'receiver',$2,$3,$4,$5,$6,$7,$8,$9,$10::date,$11::timestamptz)`,
-          [requestId, receiver.id, row.receiver.name, receiverSettlement, row.receiver.address, row.receiver.floor, approvedAt(row.receiver.approved, row.updatedAt ?? row.createdAt), row.receiver.approved ? receiver.id : null, row.receiver.approved, row.receiver.approved ? row.runDate : null, approvedAt(row.receiver.approved, row.updatedAt ?? row.createdAt)],
+           VALUES($1,'receiver',$2,$3,$4,$5,$6,$7,$8,false,NULL,NULL)`,
+          [requestId, receiver.id, row.receiver.name, receiverSettlement, row.receiver.address, row.receiver.floor, approvedAt(row.receiver.approved, row.updatedAt ?? row.createdAt), row.receiver.approved ? receiver.id : null],
         );
       await client.query(
         `INSERT INTO request_items(request_id,position,kind,description,quantity,needs_disassembly) VALUES($1,0,$2,$3,$4,$5)`,
@@ -132,6 +163,7 @@ async function applyBatch(client, batchId, source, validation) {
       await client.query("UPDATE sheets_import_rows SET applied_at=clock_timestamp() WHERE batch_id=$1 AND row_number=$2", [batchId, row.rowNumber]);
       void event;
     }
+    await client.query("UPDATE request_counter SET value=GREATEST(value,(SELECT COALESCE(MAX(number),0) FROM requests)) WHERE id=true");
     await client.query("UPDATE sheets_import_batches SET state='applied',applied_at=clock_timestamp(),completed_at=clock_timestamp() WHERE id=$1", [batchId]);
     await client.query("COMMIT");
   } catch (e) {
@@ -164,9 +196,20 @@ async function rollback(client, batchId) {
   } catch (e) { await client.query("ROLLBACK"); throw e; }
 }
 
+async function reconcileOnly(client, batchId) {
+  const batch = await client.query("SELECT state FROM sheets_import_batches WHERE id=$1", [batchId]);
+  if (!batch.rowCount) throw new Error("batch_not_found");
+  const result = await reconciliation(client, batchId);
+  console.log(JSON.stringify({ batch_id: batchId, state: batch.rows[0].state, ...result }, null, 2));
+  if (!result.exact_reconciliation_pass) process.exitCode = 1;
+}
+
 if (rollbackId) {
   const client = await connect();
   try { console.log(JSON.stringify(await rollback(client, rollbackId), null, 2)); } finally { await client.end(); }
+} else if (reconcileId) {
+  const client = await connect();
+  try { await reconcileOnly(client, reconcileId); } finally { await client.end(); }
 } else {
   const source = await readCsv(file);
   const validation = validateSource(source);

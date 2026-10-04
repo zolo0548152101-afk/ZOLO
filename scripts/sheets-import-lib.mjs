@@ -89,10 +89,17 @@ function parseDate(v) {
   const d = new Date(`${v}T00:00:00Z`);
   return Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v ? { error: "invalid_date" } : v;
 }
-function parseTimestamp(v) {
+export function parseTimestamp(v) {
   if (!v) return null;
-  const d = new Date(v.includes("T") ? v : `${v}T00:00:00Z`);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return `${v}T00:00:00.000Z`;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(v)) return { error: "invalid_timestamp" };
+  const d = new Date(v);
   return Number.isNaN(d.getTime()) ? { error: "invalid_timestamp" } : d.toISOString();
+}
+function parsePreferredTime(v) {
+  if (!v) return { value: null, review: null };
+  if (/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) return { value: v, review: null };
+  return { value: null, review: { field: "שעה רצויה", sourceValue: v, targetValue: { legacy_preferred_time: v }, transformRule: "preserve_unsupported_legacy_time_for_review", preservedCompletely: true, reviewRequired: true, reason: "only explicit HH:MM is a current preferred-time value" } };
 }
 function parsePhone(v) {
   if (!v) return null;
@@ -141,6 +148,8 @@ export function normalizeRow(source, rowNumber) {
   const receiverApproved = parsedOrNull(parseBool(value(source, "אישור מקבל")), errors, rowNumber, "אישור מקבל");
   const representsBoth = parsedOrNull(parseBool(value(source, "מייצג את שני הצדדים")), errors, rowNumber, "מייצג את שני הצדדים");
   const needsDisassembly = parsedOrNull(parseBool(value(source, "פירוק נדרש")), errors, rowNumber, "פירוק נדרש");
+  const preferred = parsePreferredTime(value(source, "שעה רצויה"));
+  const legacyHumanReview = parsedOrNull(parseBool(value(source, "נדרש טיפול אנושי")), errors, rowNumber, "נדרש טיפול אנושי");
   const description = value(source, "מה מעבירים");
   const itemKind = KIND_MAP.get(description ?? "") ?? (description ? "other" : null);
   if (!description) errors.push({ type: "missing_required", row: rowNumber, field: "מה מעבירים" });
@@ -154,8 +163,9 @@ export function normalizeRow(source, rowNumber) {
   const reviews = [];
   for (const field of LOSS_REVIEW_FIELDS) {
     const raw = value(source, field);
-    if (raw) reviews.push({ field, sourceValue: raw, targetValue: field === "הערות" || field === "נדרש טיפול אנושי" ? { human_reason: raw } : { legacy_bot_status: raw }, transformRule: "preserved_in_source_and_review_evidence", preservedCompletely: true, reviewRequired: true, reason: "legacy field is not a 1:1 business semantic" });
+    if (raw) reviews.push({ field, sourceValue: raw, targetValue: field === "הערות" ? { human_reason: raw } : field === "נדרש טיפול אנושי" ? { legacy_human_review: legacyHumanReview } : { legacy_bot_status: raw }, transformRule: "preserved_in_source_and_review_evidence", preservedCompletely: true, reviewRequired: true, reason: "legacy field is not a 1:1 business semantic" });
   }
+  if (preferred.review) reviews.push(preferred.review);
   const mediaReference = value(source, "תמונות WhatsApp");
   if (mediaReference) reviews.push({ field: "תמונות WhatsApp", sourceValue: mediaReference, targetValue: { media_reference: mediaReference }, transformRule: "preserve_reference_without_fetch", preservedCompletely: true, reviewRequired: true, reason: "external media retrieval is not permitted" });
   return {
@@ -163,8 +173,8 @@ export function normalizeRow(source, rowNumber) {
     donor: { phone: donorPhone, name: value(source, "שם המוסר"), settlement: value(source, "עיר איסוף"), address: value(source, "כתובת איסוף"), floor: donorFloor, approved: donorApproved },
     receiver: receiverPhone ? { phone: receiverPhone, name: value(source, "שם המקבל"), settlement: value(source, "עיר יעד"), address: value(source, "כתובת יעד"), floor: receiverFloor, approved: receiverApproved } : null,
     item: { description, kind: itemKind, quantity, needsDisassembly },
-    status, requestedDate, runDate, preferredTime: value(source, "שעה רצויה"), representsBoth, createdAt, updatedAt, closedAt,
-    humanReason: value(source, "הערות") ?? value(source, "נדרש טיפול אנושי"), mediaReference, reviews, errors,
+    status, requestedDate, runDate, preferredTime: preferred.value, preferredTimeReview: preferred.review, representsBoth, createdAt, updatedAt, closedAt,
+    humanReason: value(source, "הערות"), legacyHumanReview, mediaReference, reviews, errors,
   };
 }
 
@@ -173,7 +183,9 @@ export function validateSource(sourceFile) {
   if (!sourceFile.headerOk) exceptions.push({ type: "header_mismatch", expected: sourceFile.expected, actual: sourceFile.header });
   const normalized = sourceFile.rows.map((row) => {
     if (row.values.length !== sourceFile.expected.length) {
-      return { rowNumber: row.rowNumber, rowHash: row.rowHash, source: row.source, errors: [{ type: "row_width_mismatch", row: row.rowNumber, expected: sourceFile.expected.length, actual: row.values.length }], reviews: [] };
+      const error = { type: "row_width_mismatch", row: row.rowNumber, expected: sourceFile.expected.length, actual: row.values.length };
+      exceptions.push(error);
+      return { rowNumber: row.rowNumber, rowHash: row.rowHash, source: row.source, errors: [error], reviews: [] };
     }
     const item = normalizeRow(row.source, row.rowNumber);
     exceptions.push(...item.errors);

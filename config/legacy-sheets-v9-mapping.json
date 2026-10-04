@@ -21,7 +21,7 @@
     { "source": "שעה רצויה", "target": "requests.preferred_time", "status": "mapped" },
     { "source": "הערות", "target": "requests.human_reason", "status": "mapped_with_loss_review" },
     { "source": "סטטוס בוט", "target": "request_events.payload.bot_status", "status": "mapped_with_loss_review" },
-    { "source": "נדרש טיפול אנושי", "target": "requests.human_reason", "status": "mapped_with_loss_review" },
+    { "source": "נדרש טיפול אנושי", "target": "sheets_import_field_reviews.legacy_human_review", "status": "mapped_with_loss_review" },
     { "source": "תאריך יצירה", "target": "requests.created_at", "status": "mapped" },
     { "source": "עדכון אחרון", "target": "requests.updated_at", "status": "mapped" },
     { "source": "אישורמוסר", "target": "request_parties[donor].approved_at", "status": "mapped" },

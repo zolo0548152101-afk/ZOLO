@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pg from "pg";
-import { parseCsv, readCsv, validateSource, sha256 } from "./sheets-import-lib.mjs";
+import { parseCsv, readCsv, validateSource, sha256, parseTimestamp } from "./sheets-import-lib.mjs";
+const { Store } = await import("../dist/infrastructure/store.js");
 
 const url = process.env.TEST_DATABASE_URL;
 if (!url) throw new Error("TEST_DATABASE_URL_required");
@@ -12,10 +13,19 @@ const root = await mkdtemp(join(tmpdir(), "haim-sheets-") );
 const client = new pg.Client({ connectionString: url, options: "-c search_path=haim_core_test,public" });
 await client.connect();
 const env = { ...process.env, TEST_DATABASE_URL: url, T20_DISPOSABLE: "true", DB_SCHEMA: "haim_core_test" };
+const cases = [];
+const mark = (name) => cases.push(name);
 const run = (file, mode, extra = []) => {
   const output = execFileSync(process.execPath, ["scripts/sheets-import.mjs", "--file", file, "--source-label", file, "--mode", mode, ...extra], { env, encoding: "utf8" });
   return JSON.parse(output.trim());
 };
+const runRaw = (file, mode, extra = []) => {
+  const result = spawnSync(process.execPath, ["scripts/sheets-import.mjs", "--file", file, "--source-label", file, "--mode", mode, ...extra], { env, encoding: "utf8" });
+  let json = null;
+  try { json = JSON.parse(result.stdout.trim()); } catch { /* expected for thrown CLI errors */ }
+  return { ...result, json };
+};
+const rollback = (id) => JSON.parse(execFileSync(process.execPath, ["scripts/sheets-import.mjs", "--rollback", id], { env, encoding: "utf8" }).trim());
 try {
   const fixture = await readFile("tests/fixtures/sheets-v9-small.csv", "utf8");
   const header = fixture.split(/\r?\n/, 1)[0];
@@ -25,7 +35,7 @@ try {
   const csvEscape = (value) => /[,\"\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
   const rowToCsv = (overrides = {}) => fixtureHeaders.map((name, index) => csvEscape(overrides[name] ?? parsedFixture[1].values[index] ?? "")).join(",");
   const csvPath = join(root, "valid.csv");
-  await writeFile(csvPath, `${header}\r\n${rowToCsv({ "הערות": "", "סטטוס בוט": "", "נדרש טיפול אנושי": "" })}\r\n`);
+  await writeFile(csvPath, `${header}\r\n${rowToCsv({ "הערות": "", "סטטוס בוט": "", "נדרש טיפול אנושי": "", "שעה רצויה": "" })}\r\n`);
   const source = await readCsv(csvPath);
   const validation = validateSource(source);
   assert.equal(source.header.length, 28);
@@ -34,11 +44,12 @@ try {
   assert.equal(source.rows[0].rowHash, (await readCsv(csvPath)).rows[0].rowHash);
   assert.equal(sha256(Buffer.from("x")), sha256(Buffer.from("x")));
   assert.equal(validation.validRows.length, 1);
+  mark("exact 28-column header and deterministic source/row hashes");
 
   const quoted = `${header}\r\n${rowToCsv({
     "מספר פנייה": "3", "טלפון המוסר": "0540000004", "שם המוסר": "דני",
     "כתובת איסוף": 'רחוב, "העלייה"', "מה מעבירים": "מיטה", "הערות": "הערה",
-    "סטטוס בוט": "bot", "נדרש טיפול אנושי": "false", "תמונות WhatsApp": "legacy-media-ref",
+    "סטטוס בוט": "bot", "נדרש טיפול אנושי": "false", "אישורמוסר": "true", "תמונות WhatsApp": "legacy-media-ref",
   })}\r\n`;
   const quotedPath = join(root, "quoted.csv");
   await writeFile(quotedPath, quoted);
@@ -51,11 +62,19 @@ try {
   assert.equal((await readCsv(wrongHeaderPath)).headerOk, false);
   const malformed = validateSource(await readCsv(join(root, "wrong-header.csv")));
   assert.ok(malformed.exceptions.some((x) => x.type === "header_mismatch"));
+  const reorderedPath = join(root, "reordered.csv");
+  await writeFile(reorderedPath, `${fixtureHeaders.slice().reverse().join(",")}\r\n${rowToCsv()}\r\n`);
+  assert.equal((await readCsv(reorderedPath)).headerOk, false);
+  const narrowPath = join(root, "narrow.csv");
+  await writeFile(narrowPath, `${header}\r\n${parsedFixture[1].values.slice(0, 27).map(csvEscape).join(",")}\r\n`);
+  assert.ok(validateSource(await readCsv(narrowPath)).exceptions.some((x) => x.type === "row_width_mismatch"));
+  mark("reordered header, malformed row width, quoted CSV and unterminated quote");
 
   const before = (await client.query("SELECT count(*)::int AS n FROM requests")).rows[0].n;
   const dry = run(csvPath, "dry-run");
   assert.equal(dry.state, "validated");
   assert.equal((await client.query("SELECT count(*)::int AS n FROM requests")).rows[0].n, before);
+  mark("dry-run has zero business mutations");
 
   await client.query("INSERT INTO contacts(phone) VALUES('540000001')");
   const applied = run(csvPath, "apply");
@@ -66,6 +85,16 @@ try {
   assert.equal(reapplied.state, "applied");
   assert.equal((await client.query("SELECT count(*)::int AS n FROM requests")).rows[0].n, before + 1);
   assert.equal((await client.query("SELECT count(*)::int AS n FROM contacts WHERE phone='540000001'")).rows[0].n, 1);
+  const counter = Number((await client.query("SELECT value FROM request_counter WHERE id=true")).rows[0].value);
+  assert.ok(counter >= 1);
+  const store = new Store(null, null, {});
+  const created = await store.create(client, [{ kind: "bed", description: "מונה", quantity: 1, free: null, working: null, needsDisassembly: false, wardrobeSmallWhole: null, ovenType: null, evacuation: null }], [{ role: "donor", phone: "0540000009", name: "מונה", settlement: "בית שאן", address: "שיכון א", floor: 1, floor_note_shown: false, approved_at: null, approved_by: null, schedule_approved: false, schedule_approved_date: null, schedule_approved_at: null }], "donation");
+  assert.ok(created.number > counter);
+  await client.query("DELETE FROM request_items WHERE request_id=$1", [created.id]);
+  await client.query("DELETE FROM request_parties WHERE request_id=$1", [created.id]);
+  await client.query("DELETE FROM requests WHERE id=$1", [created.id]);
+  await client.query("DELETE FROM contacts WHERE phone='540000009' AND NOT EXISTS (SELECT 1 FROM request_parties WHERE contact_id=contacts.id)");
+  mark("import reconciles request_counter and next normal Store.create is unique");
   const batchId = (await client.query("SELECT id FROM sheets_import_batches WHERE source_label=$1", [csvPath])).rows[0].id;
 
   const duplicate = validateSource(await readCsv(csvPath));
@@ -79,6 +108,13 @@ try {
   assert.ok(bad.exceptions.some((x) => x.type === "invalid_phone"));
   assert.ok(bad.exceptions.some((x) => x.type === "invalid_quantity"));
   assert.ok(bad.exceptions.some((x) => x.type === "unknown_status"));
+  assert.deepEqual(parseTimestamp("2026-09-10T10:00:00"), { error: "invalid_timestamp" });
+  assert.equal(parseTimestamp("2026-09-10"), "2026-09-10T00:00:00.000Z");
+  assert.equal(parseTimestamp("2026-09-10T10:00:00+03:00"), "2026-09-10T07:00:00.000Z");
+  const normalizedTime = validateSource(await readCsv(quotedPath));
+  assert.equal(normalizedTime.normalized[0].preferredTime, null);
+  assert.equal(normalizedTime.normalized[0].preferredTimeReview.targetValue.legacy_preferred_time, "ערב");
+  mark("invalid phone/quantity/status, timezone-less timestamp rejection, deterministic preferred-time review");
   const badDry = run(badPath, "dry-run");
   assert.equal(badDry.ready_for_import, false);
   assert.equal((await client.query("SELECT count(*)::int AS n FROM requests")).rows[0].n, before + 1);
@@ -93,14 +129,50 @@ try {
   const mediaLineage = await client.query("SELECT 1 FROM sheets_import_lineage WHERE batch_id=$1 AND entity_type='media_reference'", [reviewBatch]);
   assert.equal(mediaLineage.rowCount, 1);
   assert.equal((await client.query("SELECT data->>'media_reference' AS ref FROM request_events WHERE request_id=$1", [reviewRequest])).rows[0].ref, "legacy-media-ref");
+  const reviewParty = (await client.query("SELECT schedule_approved,schedule_approved_date,schedule_approved_at,approved_at FROM request_parties WHERE request_id=$1 AND role='donor'", [reviewRequest])).rows[0];
+  assert.equal(reviewParty.schedule_approved, false);
+  assert.equal(reviewParty.schedule_approved_date, null);
+  assert.equal(reviewParty.schedule_approved_at, null);
+  assert.ok(reviewParty.approved_at);
+  mark("donor/receiver approval maps only approved_at/approved_by and never schedule approval");
 
-  const rollback = JSON.parse(execFileSync(process.execPath, ["scripts/sheets-import.mjs", "--rollback", batchId], { env, encoding: "utf8" }).trim());
-  assert.equal(rollback.state, "rolled_back");
+  const coordinatedPath = join(root, "coordinated.csv");
+  await writeFile(coordinatedPath, `${header}\r\n${rowToCsv({ "מספר פנייה": "8", "סטטוס פנייה": "coordinated", "תאריך הובלה": "2026-10-06", "שעה רצויה": "16:00", "הערות": "", "סטטוס בוט": "", "נדרש טיפול אנושי": "" })}\r\n`);
+  const coordinatedRejected = runRaw(coordinatedPath, "apply", ["--allow-review"]);
+  assert.notEqual(coordinatedRejected.status, 0);
+  assert.match(coordinatedRejected.stderr, /coordinated_requires_existing_transport_run/);
+  await client.query("INSERT INTO transport_runs(date,capacity) VALUES('2026-10-06',10) ON CONFLICT(date) DO NOTHING");
+  const coordinated = run(coordinatedPath, "apply", ["--allow-review", "--revalidate"]);
+  const coordinatedBatch = (await client.query("SELECT id FROM sheets_import_batches WHERE source_label=$1", [coordinatedPath])).rows[0].id;
+  const coordinatedRequest = (await client.query("SELECT entity_id FROM sheets_import_lineage WHERE batch_id=$1 AND entity_type='request'", [coordinatedBatch])).rows[0].entity_id;
+  assert.equal((await client.query("SELECT preferred_time FROM requests WHERE id=$1", [coordinatedRequest])).rows[0].preferred_time, "16:00");
+  assert.equal((await client.query("SELECT schedule_approved FROM request_parties WHERE request_id=$1", [coordinatedRequest])).rows[0].schedule_approved, false);
+  assert.equal(coordinated.state, "applied");
+  mark("coordinated import requires a pre-existing transport run and preserves explicit HH:MM");
+
+  const rollbackResult = rollback(batchId);
+  assert.equal(rollbackResult.state, "rolled_back");
   assert.equal((await client.query("SELECT count(*)::int AS n FROM requests WHERE number=1")).rows[0].n, 0);
   assert.equal((await client.query("SELECT count(*)::int AS n FROM contacts WHERE phone='540000001'")).rows[0].n, 1);
-  const rollbackAgain = JSON.parse(execFileSync(process.execPath, ["scripts/sheets-import.mjs", "--rollback", batchId], { env, encoding: "utf8" }).trim());
+  const rollbackAgain = rollback(batchId);
   assert.equal(rollbackAgain.idempotent, true);
-  console.log(JSON.stringify({ ok: true, tests: 30, source_hash: source.sourceHash, dry_run_business_mutations: 0, lineage_verified: true, rollback_verified: true, external_calls: false }));
+  const invalidLifecycle = runRaw(csvPath, "apply");
+  assert.notEqual(invalidLifecycle.status, 0);
+  assert.match(invalidLifecycle.stderr, /invalid_batch_state:rolled_back/);
+  const revalidated = run(csvPath, "apply", ["--revalidate"]);
+  assert.equal(revalidated.state, "applied");
+  const revalidatedBatch = (await client.query("SELECT id FROM sheets_import_batches WHERE source_label=$1", [csvPath])).rows[0].id;
+  await client.query("DELETE FROM sheets_import_lineage WHERE batch_id=$1 AND entity_type='item'", [revalidatedBatch]);
+  const mismatch = spawnSync(process.execPath, ["scripts/sheets-import.mjs", "--reconcile", revalidatedBatch], { env, encoding: "utf8" });
+  assert.equal(mismatch.status, 1);
+  assert.equal(JSON.parse(mismatch.stdout).exact_reconciliation_pass, false);
+  assert.equal((await client.query("SELECT count(*)::int AS n FROM transport_runs WHERE date='2026-10-06'")).rows[0].n, 1);
+  await rollback(revalidatedBatch);
+  await rollback(coordinatedBatch);
+  await client.query("DELETE FROM transport_runs WHERE date='2026-10-06'");
+  mark("invalid lifecycle fails closed, explicit revalidate resumes, reconciliation detects deliberate corruption");
+  mark("rollback is idempotent, removes import-created effects, and preserves pre-existing transport run");
+  console.log(JSON.stringify({ ok: true, tests: cases.length, passed: cases.length, cases, source_hash: source.sourceHash, dry_run_business_mutations: 0, lineage_verified: true, rollback_verified: true, external_calls: false }));
 } finally {
   await client.end();
   await rm(root, { recursive: true, force: true });

@@ -26,7 +26,7 @@
     "sheets:stage": "node scripts/sheets-stage.mjs",
     "sheets:reconcile": "node scripts/sheets-reconcile.mjs",
     "sheets:import": "node scripts/sheets-import.mjs",
-    "check:legacy-mapping": "node scripts/validate-legacy-mapping.mjs \"C:/Users/זולו/Downloads/HAIM_YAHAD_AppsScript_V9-MATCHING.gs\"",
+    "check:legacy-mapping": "node scripts/validate-legacy-mapping.mjs --file tests/fixtures/legacy-sheets-v9-source.gs",
     "check:ai-eval": "node scripts/validate-ai-eval.mjs",
     "check:prompt-wiring": "node scripts/validate-prompt-wiring.mjs",
     "check": "npm run build && npm test",
