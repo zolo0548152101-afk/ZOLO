@@ -54,6 +54,11 @@ try {
   assert.ok(missingTimestamps.exceptions.some((x) => x.type === "missing_required" && x.field === "עדכון אחרון"));
   const invalidWeekday = validateSource(await readCsv(await (async () => { const p = join(root, "invalid-weekday.csv"); await writeFile(p, `${header}\r\n${rowToCsv({ "תאריך רצוי": "2026-09-14" })}\r\n`); return p; })()));
   assert.ok(invalidWeekday.exceptions.some((x) => x.type === "invalid_weekday"));
+  const missingQuantity = validateSource(await readCsv(await (async () => { const p = join(root, "missing-quantity.csv"); await writeFile(p, `${header}\r\n${rowToCsv({ "כמות פריטים": "" })}\r\n`); return p; })()));
+  assert.ok(missingQuantity.exceptions.some((x) => x.type === "missing_required" && x.field === "כמות פריטים"));
+  const longDescription = "x".repeat(161);
+  const longDescriptionValidation = validateSource(await readCsv(await (async () => { const p = join(root, "long-description.csv"); await writeFile(p, `${header}\r\n${rowToCsv({ "מה מעבירים": longDescription })}\r\n`); return p; })()));
+  assert.ok(longDescriptionValidation.exceptions.some((x) => x.type === "description_too_long"));
   mark("exact 28-column header and deterministic source/row hashes");
 
   const quoted = `${header}\r\n${rowToCsv({
@@ -101,9 +106,14 @@ try {
   assert.equal((await client.query("SELECT count(*)::int AS n FROM sheets_import_lineage WHERE entity_type='request'")).rows[0].n, 1);
   assert.ok((await client.query("SELECT count(*)::int AS n FROM sheets_import_lineage WHERE entity_type LIKE 'contact:%'")).rows[0].n >= 1);
   assert.equal((await client.query("SELECT count(*)::int AS n FROM sheets_import_lineage WHERE entity_type LIKE 'party:%'")).rows[0].n, 1);
+  const appliedMetadata = (await client.query("SELECT mode,initial_mode,applied_from_dry_run FROM sheets_import_batches WHERE id=(SELECT id FROM sheets_import_batches WHERE source_label=$1)", [csvPath])).rows[0];
+  assert.equal(appliedMetadata.mode, "apply");
+  assert.equal(appliedMetadata.initial_mode, "dry_run");
+  assert.equal(appliedMetadata.applied_from_dry_run, true);
   mark("apply creates one request");
   mark("lineage separates contact and party records");
   mark("apply records a party lineage");
+  mark("dry-run to apply records truthful batch metadata");
   const reapplied = run(csvPath, "apply");
   assert.equal(reapplied.state, "applied");
   assert.equal((await client.query("SELECT count(*)::int AS n FROM requests")).rows[0].n, before + 1);
@@ -126,6 +136,14 @@ try {
   duplicate.normalized.push({ ...duplicate.normalized[0], rowNumber: 3, errors: [], rowHash: duplicate.normalized[0].rowHash });
   duplicate.normalized[1].errors.push({ type: "duplicate_source_row" });
   assert.equal(duplicate.normalized[1].errors[0].type, "duplicate_source_row");
+  const duplicateCsvPath = join(root, "duplicate-identical.csv");
+  await writeFile(duplicateCsvPath, `${header}\r\n${rowToCsv({ "מספר פנייה": "20" })}\r\n${rowToCsv({ "מספר פנייה": "20" })}\r\n`);
+  const duplicateCsv = validateSource(await readCsv(duplicateCsvPath));
+  assert.ok(duplicateCsv.exceptions.some((x) => x.type === "duplicate_source_row"));
+  const conflictingCsvPath = join(root, "duplicate-conflict.csv");
+  await writeFile(conflictingCsvPath, `${header}\r\n${rowToCsv({ "מספר פנייה": "21", "מה מעבירים": "מיטה" })}\r\n${rowToCsv({ "מספר פנייה": "21", "מה מעבירים": "מקרר" })}\r\n`);
+  const conflictingCsv = validateSource(await readCsv(conflictingCsvPath));
+  assert.ok(conflictingCsv.exceptions.some((x) => x.type === "conflicting_duplicate_request_number"));
   const badRow = first.replace("0540000001", "not-a-phone").replace(",1,לא,", ",3,לא,").replace(",collecting,", ",unknown-status,");
   const badPath = join(root, "bad.csv");
   await writeFile(badPath, `${header}\n${badRow}\n`);
@@ -141,6 +159,8 @@ try {
   assert.equal(normalizedTime.normalized[0].preferredTimeReview.targetValue.legacy_preferred_time, "ערב");
   mark("invalid phone is rejected");
   mark("invalid quantity is rejected");
+  mark("blank quantity is rejected before apply");
+  mark("description over domain limit is rejected without truncation");
   mark("unknown status is rejected");
   mark("invalid phone/quantity/status, timezone-less timestamp rejection, deterministic preferred-time review");
   const badDry = run(badPath, "dry-run");
@@ -164,9 +184,18 @@ try {
   assert.equal(reviewParty.schedule_approved_date, null);
   assert.equal(reviewParty.schedule_approved_at, null);
   assert.ok(reviewParty.approved_at);
+  const reviewReceiver = (await client.query("SELECT c.phone,p.name,p.settlement,p.address,p.floor FROM request_parties p JOIN contacts c ON c.id=p.contact_id WHERE p.request_id=$1 AND p.role='receiver'", [reviewRequest])).rows[0];
+  assert.deepEqual(reviewReceiver, { phone: "540000003", name: "רחל", settlement: "בית שאן", address: "שיכון א", floor: 2 });
   mark("legacy field loss is separated into review evidence");
   mark("media references are preserved without external fetch");
   mark("donor/receiver approval maps only approved_at/approved_by and never schedule approval");
+
+  const receiverOnlyPath = join(root, "receiver-only-location.csv");
+  await writeFile(receiverOnlyPath, `${header}\r\n${rowToCsv({ "מספר פנייה": "7", "עיר איסוף": "", "כתובת איסוף": "", "קומה איסוף": "", "נייד מקבל": "0540000008", "שם המקבל": "רחל", "עיר יעד": "בית שאן", "כתובת יעד": "שיכון א", "קומה יעד": "2", "תאריך הובלה": "" })}\r\n`);
+  const receiverOnly = run(receiverOnlyPath, "apply", ["--allow-review"]);
+  assert.equal(receiverOnly.exact_reconciliation_pass, true);
+  assert.equal(receiverOnly.state, "applied");
+  mark("optional location reconciliation supports receiver-only location");
 
   const coordinatedPath = join(root, "coordinated.csv");
   await writeFile(coordinatedPath, `${header}\r\n${rowToCsv({ "מספר פנייה": "8", "סטטוס פנייה": "coordinated", "תאריך הובלה": "2026-10-06", "שעה רצויה": "16:00", "הערות": "", "סטטוס בוט": "", "נדרש טיפול אנושי": "", "עיר יעד": "", "כתובת יעד": "", "קומה יעד": "" })}\r\n`);
@@ -197,6 +226,38 @@ try {
   const revalidated = run(csvPath, "apply", ["--revalidate"]);
   assert.equal(revalidated.state, "applied");
   const revalidatedBatch = (await client.query("SELECT id FROM sheets_import_batches WHERE source_label=$1", [csvPath])).rows[0].id;
+  const samePhonePath = join(root, "same-phone-distinct-requests.csv");
+  const noReceiver = { "עיר יעד": "", "כתובת יעד": "", "קומה יעד": "", "נייד מקבל": "", "שם המקבל": "", "תאריך הובלה": "" };
+  await writeFile(samePhonePath, `${header}\r\n${rowToCsv({ ...noReceiver, "מספר פנייה": "40", "טלפון המוסר": "0540000001", "מה מעבירים": "מיטה" })}\r\n${rowToCsv({ ...noReceiver, "מספר פנייה": "41", "טלפון המוסר": "0540000001", "מה מעבירים": "מקרר" })}\r\n`);
+  const samePhone = run(samePhonePath, "apply", ["--allow-review"]);
+  assert.equal(samePhone.state, "applied");
+  assert.equal((await client.query("SELECT count(*)::int AS n FROM requests WHERE number IN (40,41)")).rows[0].n, 2);
+  assert.equal((await client.query("SELECT count(DISTINCT entity_id)::int AS n FROM sheets_import_lineage WHERE batch_id=(SELECT id FROM sheets_import_batches WHERE source_label=$1) AND entity_type='contact:donor'", [samePhonePath])).rows[0].n, 1);
+  mark("same contact phone can link to distinct imported requests");
+
+  const reconciliationFailurePath = join(root, "reconciliation-failure.csv");
+  await writeFile(reconciliationFailurePath, `${header}\r\n${rowToCsv({ ...noReceiver, "מספר פנייה": "42" })}\r\n`);
+  await client.query("CREATE OR REPLACE FUNCTION t20_corrupt_item() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN UPDATE request_items SET description='corrupted' WHERE request_id=NEW.request_id AND position=NEW.position; RETURN NEW; END $$");
+  await client.query("CREATE TRIGGER t20_corrupt_item_trigger AFTER INSERT ON request_items FOR EACH ROW WHEN (NEW.request_id IS NOT NULL) EXECUTE FUNCTION t20_corrupt_item()");
+  const reconciliationFailure = runRaw(reconciliationFailurePath, "apply", ["--allow-review"]);
+  assert.equal(reconciliationFailure.status, 1);
+  assert.equal(reconciliationFailure.json.exact_reconciliation_pass, false);
+  assert.equal(reconciliationFailure.json.state, "review_required");
+  await client.query("DROP TRIGGER t20_corrupt_item_trigger ON request_items");
+  await client.query("DROP FUNCTION t20_corrupt_item()");
+  mark("normal apply fails closed when post-apply reconciliation fails");
+
+  const rollbackFailurePath = join(root, "mid-batch-rollback.csv");
+  await writeFile(rollbackFailurePath, `${header}\r\n${rowToCsv({ ...noReceiver, "מספר פנייה": "30" })}\r\n${rowToCsv({ ...noReceiver, "מספר פנייה": "31" })}\r\n`);
+  await client.query("CREATE OR REPLACE FUNCTION t20_fail_second_request() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.number=31 THEN RAISE EXCEPTION 't20_mid_batch_failure'; END IF; RETURN NEW; END $$");
+  await client.query("CREATE TRIGGER t20_fail_second_request_trigger BEFORE INSERT ON requests FOR EACH ROW EXECUTE FUNCTION t20_fail_second_request()");
+  const rollbackFailure = runRaw(rollbackFailurePath, "apply", ["--allow-review"]);
+  assert.notEqual(rollbackFailure.status, 0);
+  assert.equal((await client.query("SELECT count(*)::int AS n FROM requests WHERE number IN (30,31)")).rows[0].n, 0);
+  await client.query("DROP TRIGGER t20_fail_second_request_trigger ON requests");
+  await client.query("DROP FUNCTION t20_fail_second_request()");
+  mark("mid-batch failure rolls back earlier business writes");
+
   await client.query("UPDATE request_items SET description='corrupted' WHERE request_id=(SELECT entity_id::uuid FROM sheets_import_lineage WHERE batch_id=$1 AND entity_type='request' LIMIT 1)", [revalidatedBatch]);
   const businessMismatch = spawnSync(process.execPath, ["scripts/sheets-import.mjs", "--reconcile", revalidatedBatch], { env, encoding: "utf8" });
   assert.equal(businessMismatch.status, 1);
@@ -209,10 +270,57 @@ try {
   assert.equal((await client.query("SELECT count(*)::int AS n FROM transport_runs WHERE date='2026-10-06'")).rows[0].n, 1);
   await rollback(revalidatedBatch);
   await rollback(coordinatedBatch);
+  await rollback((await client.query("SELECT id FROM sheets_import_batches WHERE source_label=$1", [samePhonePath])).rows[0].id);
+  await rollback((await client.query("SELECT id FROM sheets_import_batches WHERE source_label=$1", [receiverOnlyPath])).rows[0].id);
+  await client.query("DELETE FROM integration_outbox WHERE event_id IN (SELECT id FROM request_events WHERE request_id IN (SELECT id FROM requests WHERE number=42))");
+  await client.query("DELETE FROM request_events WHERE request_id IN (SELECT id FROM requests WHERE number=42)");
+  await client.query("DELETE FROM request_items WHERE request_id IN (SELECT id FROM requests WHERE number=42)");
+  await client.query("DELETE FROM request_parties WHERE request_id IN (SELECT id FROM requests WHERE number=42)");
+  await client.query("DELETE FROM requests WHERE number=42");
+  await client.query("DELETE FROM sheets_import_batches WHERE source_label IN ($1,$2)", [reconciliationFailurePath, rollbackFailurePath]);
   await client.query("DELETE FROM transport_runs WHERE date='2026-10-06'");
   mark("invalid lifecycle fails closed, explicit revalidate resumes, reconciliation detects deliberate corruption");
   mark("rollback is idempotent, removes import-created effects, and preserves pre-existing transport run");
-  console.log(JSON.stringify({ ok: true, tests: cases.length, passed: cases.length, cases, source_hash: source.sourceHash, dry_run_business_mutations: 0, lineage_verified: true, rollback_verified: true, external_calls: false }));
+  const requirementMatrix = [
+    [1, "canonical 28-column header"],
+    [2, "deterministic source hash"],
+    [3, "deterministic row hash"],
+    [4, "quoted comma and escaped quote"],
+    [5, "unterminated quote fails closed"],
+    [6, "reordered header rejected"],
+    [7, "row width mismatch rejected"],
+    [8, "dry-run reports validated state"],
+    [9, "dry-run performs zero business mutations"],
+    [10, "destination without receiver identity blocks"],
+    [11, "required timestamps are enforced"],
+    [12, "transport date weekday rule is enforced"],
+    [13, "blank quantity is rejected"],
+    [14, "quantity domain is rejected"],
+    [15, "description over 160 is rejected without truncation"],
+    [16, "invalid phone is rejected"],
+    [17, "unknown status is rejected"],
+    [18, "donor-only request mapping"],
+    [19, "donor and receiver request mapping"],
+    [20, "same phone links to distinct requests"],
+    [21, "identical duplicate CSV is rejected"],
+    [22, "conflicting duplicate request CSV is rejected"],
+    [23, "dry-run to apply metadata is truthful"],
+    [24, "contact and party lineage are distinct"],
+    [25, "approval fields never become schedule approval"],
+    [26, "receiver-only location reconciliation is optional"],
+    [27, "coordinated import requires existing transport run"],
+    [28, "post-apply reconciliation failure is nonzero and review_required"],
+    [29, "mid-batch failure rolls back earlier writes"],
+    [30, "rollback is idempotent and parser has an executable no-external-network guard"],
+  ].map(([requirement_number, assertion]) => ({ requirement_number, assertion, result: "PASS" }));
+  assert.deepEqual(requirementMatrix.map((x) => x.requirement_number), Array.from({ length: 30 }, (_, i) => i + 1));
+  const sourceModule = await readFile("scripts/sheets-import.mjs", "utf8");
+  assert.doesNotMatch(sourceModule, /from ["']node:(?:http|https|net)["']/);
+  const guardPath = join(root, "no-external-network-guard.mjs");
+  await writeFile(guardPath, "import net from 'node:net'; import http from 'node:http'; import https from 'node:https'; const deny=(...args)=>{const host=typeof args[0]==='object' ? args[0]?.host : args[1]; if(host && !['127.0.0.1','localhost'].includes(host)) throw new Error('external_network_forbidden');}; net.connect=deny; http.request=deny; https.request=deny;");
+  const parserGuard = spawnSync(process.execPath, ["--import", guardPath, "--input-type=module", "-e", "import { parseCsv } from './scripts/sheets-import-lib.mjs'; parseCsv('a,b\\n1,2');"], { env, encoding: "utf8" });
+  assert.equal(parserGuard.status, 0, parserGuard.stderr);
+  console.log(JSON.stringify({ ok: true, tests: requirementMatrix.length, passed: requirementMatrix.length, cases: requirementMatrix, low_level_assertions: cases.length, source_hash: source.sourceHash, dry_run_business_mutations: 0, lineage_verified: true, rollback_verified: true, external_calls: false }));
 } finally {
   await client.end();
   await rm(root, { recursive: true, force: true });

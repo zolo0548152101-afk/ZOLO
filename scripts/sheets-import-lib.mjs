@@ -156,6 +156,8 @@ export function normalizeRow(source, rowNumber) {
   const description = value(source, "מה מעבירים");
   const itemKind = KIND_MAP.get(description ?? "") ?? (description ? "other" : null);
   if (!description) errors.push({ type: "missing_required", row: rowNumber, field: "מה מעבירים" });
+  if (!value(source, "כמות פריטים")) errors.push({ type: "missing_required", row: rowNumber, field: "כמות פריטים" });
+  if (description && description.length > 160) errors.push({ type: "description_too_long", row: rowNumber, field: "מה מעבירים", max_length: 160 });
   if (!donorPhone) errors.push({ type: "missing_required", row: rowNumber, field: "טלפון המוסר" });
   if (!requestNumber) errors.push({ type: "missing_required", row: rowNumber, field: "מספר פנייה" });
   if (!statusSource) errors.push({ type: "missing_required", row: rowNumber, field: "סטטוס פנייה" });

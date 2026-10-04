@@ -48,8 +48,8 @@ async function stage(client, source, validation) {
       }
     } else {
       const b = await client.query(
-        `INSERT INTO sheets_import_batches(source_label,source_hash,mode,row_count,error_count,state)
-         VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,
+        `INSERT INTO sheets_import_batches(source_label,source_hash,mode,initial_mode,row_count,error_count,state)
+         VALUES($1,$2,$3,$3,$4,$5,$6) RETURNING id`,
         [label, source.sourceHash, mode === "dry-run" ? "dry_run" : "apply", source.rows.length, validation.blocking.length, nextState],
       );
       batchId = b.rows[0].id;
@@ -116,13 +116,19 @@ async function reconciliation(client, batchId) {
       else for (const [field, value] of Object.entries(expectedParty)) if (scalar(party[field]) !== scalar(value)) mismatches.push({ row_number: row.row_number, entity_type: `party:${role}`, field, expected: scalar(value), actual: scalar(party[field]) });
     }
     const item = (await client.query("SELECT kind,description,quantity,needs_disassembly FROM request_items WHERE request_id=$1 AND position=0", [requestLineage.entity_id])).rows[0];
-    for (const [field, value] of Object.entries({ kind: normalized.item.kind, description: normalized.item.description.slice(0, 160), quantity: normalized.item.quantity, needs_disassembly: normalized.item.needsDisassembly })) if (!item || scalar(item[field]) !== scalar(value)) mismatches.push({ row_number: row.row_number, entity_type: "item", field, expected: scalar(value), actual: scalar(item?.[field]) });
+    for (const [field, value] of Object.entries({ kind: normalized.item.kind, description: normalized.item.description, quantity: normalized.item.quantity, needs_disassembly: normalized.item.needsDisassembly })) if (!item || scalar(item[field]) !== scalar(value)) mismatches.push({ row_number: row.row_number, entity_type: "item", field, expected: scalar(value), actual: scalar(item?.[field]) });
     if (normalized.mediaReference) {
       const media = (await client.query("SELECT data->>'media_reference' AS reference FROM request_events WHERE request_id=$1 AND event_type='legacy_sheet_imported'", [requestLineage.entity_id])).rows[0];
       if (!media || media.reference !== normalized.mediaReference) mismatches.push({ row_number: row.row_number, entity_type: "media_reference", reason: "missing_or_different_reference", expected: normalized.mediaReference, actual: media?.reference ?? null });
     }
+    const expectedLocations = [normalized.donor.settlement, normalized.receiver?.settlement].filter(Boolean);
     const locationLineage = byType("location_reference");
-    if (!locationLineage || !normalized.donor.settlement || !(await client.query("SELECT 1 FROM service_locations WHERE name=$1 AND decision='allowed'", [normalized.donor.settlement])).rowCount) mismatches.push({ row_number: row.row_number, entity_type: "location_reference", reason: "missing_or_invalid_location" });
+    if (expectedLocations.length > 0) {
+      if (!locationLineage) mismatches.push({ row_number: row.row_number, entity_type: "location_reference", reason: "missing_lineage" });
+      for (const settlement of expectedLocations)
+        if (!(await client.query("SELECT 1 FROM service_locations WHERE name=$1 AND decision='allowed'", [settlement])).rowCount)
+          mismatches.push({ row_number: row.row_number, entity_type: "location_reference", reason: "missing_or_invalid_location", expected: settlement });
+    } else if (locationLineage) mismatches.push({ row_number: row.row_number, entity_type: "location_reference", reason: "unexpected_location_lineage" });
   }
   const actualResult = await client.query("SELECT entity_type, count(*)::int AS count FROM sheets_import_lineage WHERE batch_id=$1 GROUP BY entity_type ORDER BY entity_type", [batchId]);
   const actual = Object.fromEntries(actualResult.rows.map((x) => [x.entity_type, x.count]));
@@ -201,7 +207,7 @@ async function applyBatch(client, batchId, source, validation) {
         );
       await client.query(
         `INSERT INTO request_items(request_id,position,kind,description,quantity,needs_disassembly) VALUES($1,0,$2,$3,$4,$5)`,
-        [requestId, row.item.kind, row.item.description.slice(0, 160), row.item.quantity, row.item.needsDisassembly],
+        [requestId, row.item.kind, row.item.description, row.item.quantity, row.item.needsDisassembly],
       );
       const event = await client.query("INSERT INTO request_events(request_id,trace_id,actor,event_type,data) VALUES($1,$2,'legacy_import','legacy_sheet_imported',$3) RETURNING id", [requestId, randomUUID(), json({ batch_id: batchId, source_row_number: row.rowNumber, source_row_hash: row.rowHash, media_reference: row.mediaReference, source: row.source })]);
       const lineages = [
@@ -216,7 +222,7 @@ async function applyBatch(client, batchId, source, validation) {
       void event;
     }
     await client.query("UPDATE request_counter SET value=GREATEST(value,(SELECT COALESCE(MAX(number),0) FROM requests)) WHERE id=true");
-    await client.query("UPDATE sheets_import_batches SET state='applied',applied_at=clock_timestamp(),completed_at=clock_timestamp() WHERE id=$1", [batchId]);
+    await client.query("UPDATE sheets_import_batches SET state='applied',mode='apply',applied_from_dry_run=(initial_mode='dry_run'),applied_at=clock_timestamp(),completed_at=clock_timestamp() WHERE id=$1", [batchId]);
     await client.query("COMMIT");
   } catch (e) {
     await client.query("ROLLBACK");
@@ -272,8 +278,13 @@ if (rollbackId) {
     try {
       const batchId = await stage(client, source, validation);
       if (mode === "apply") await applyBatch(client, batchId, source, validation);
+      const reconciliationResult = await reconciliation(client, batchId);
+      if (mode === "apply" && !reconciliationResult.exact_reconciliation_pass) {
+        await client.query("UPDATE sheets_import_batches SET state='review_required',rollback_error=$2,completed_at=clock_timestamp() WHERE id=$1", [batchId, "post_apply_reconciliation_failed"]);
+        process.exitCode = 1;
+      }
       const state = (await client.query("SELECT state FROM sheets_import_batches WHERE id=$1", [batchId])).rows[0]?.state;
-      console.log(JSON.stringify({ mode, batch_id: batchId, ...report, ...(await reconciliation(client, batchId)), state, ready_for_import: validation.blocking.length === 0 }, null, 2));
+      console.log(JSON.stringify({ mode, batch_id: batchId, ...report, ...reconciliationResult, state, ready_for_import: validation.blocking.length === 0 }, null, 2));
     } finally { await client.end(); }
   }
 }
