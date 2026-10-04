@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { canonicalPhone, DEFAULT_TRANSPORT_CAPACITY } from "./domain/policies.js";
+import { validateAdminSecret } from "./application/security.js";
 const flag = z.enum(["true", "false"]).transform((v) => v === "true");
 const schemas = z.enum([
   "haim_core",
@@ -89,6 +90,8 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
   ].filter(Boolean);
   if (new Set(adminCapabilityTokens).size !== adminCapabilityTokens.length)
     throw new Error("admin_capability_credentials_must_be_distinct");
+  if ((c.NODE_ENV === "production" || c.BOT_MODE === "live") && !validateAdminSecret(c.HAIM_ADMIN_TOKEN))
+    throw new Error("admin_token_too_weak");
   if (c.BOT_MODE === "live" && c.DB_SCHEMA !== "haim_core")
     throw new Error("live_requires_haim_core");
   if (

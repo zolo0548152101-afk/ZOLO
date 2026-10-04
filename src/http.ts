@@ -21,6 +21,7 @@ import {
 } from "./domain/policies.js";
 import { parseWebhook, verifyHmac } from "./infrastructure/webhook.js";
 import { QUEUES } from "./infrastructure/queue.js";
+import { buildOperationalSignals, type OperationalSnapshot } from "./application/observability.js";
 const uuid = z.uuid();
 const reason = z.string().trim().min(3).max(500);
 const isTuesdayDate = (value: string) => {
@@ -357,6 +358,13 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
         const outbox = await s.pool.query(
           "SELECT state,count(*)::int count FROM outbox GROUP BY state",
         );
+        const outboxAge = await s.pool.query<{ count: number; oldest_age_seconds: number; uncertain_count: number; retrying_count: number }>(
+          `SELECT count(*) FILTER (WHERE state IN ('pending','sending','uncertain','failed'))::int AS count,
+                  coalesce(extract(epoch FROM clock_timestamp()-min(created_at) FILTER (WHERE state IN ('pending','sending','uncertain','failed'))),0)::int AS oldest_age_seconds,
+                  count(*) FILTER (WHERE state='uncertain')::int AS uncertain_count,
+                  count(*) FILTER (WHERE state='failed')::int AS retrying_count
+             FROM outbox`,
+        );
         const queues = [];
         for (const q of QUEUES) {
           const stats = await s.queue.boss.getQueueStats(q);
@@ -368,6 +376,25 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
         const ai = await s.pool.query(
           `SELECT count(*)::int AS calls,percentile_cont(0.95) WITHIN GROUP(ORDER BY (ai_metadata->>'elapsed_ms')::numeric) AS p95_ms FROM messages WHERE ai_metadata IS NOT NULL`,
         );
+        const staleLeases = await s.pool.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM conversation_turns WHERE status IN ('pending','processing') AND deadline_at IS NOT NULL AND deadline_at < clock_timestamp()",
+        );
+        const promptFailures = await s.pool.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM messages WHERE error_code ILIKE 'openai%' OR error_code ILIKE 'planner%' OR error_code ILIKE '%prompt%'",
+        );
+        const sheetsReviewRequired = await s.pool.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM sheets_import_batches WHERE state='review_required'",
+        );
+        const snapshot: OperationalSnapshot = {
+          inbox: { count: Number(inbox.rows[0]?.pending ?? 0), oldestAgeSeconds: Number(inbox.rows[0]?.oldest_age_seconds ?? 0) },
+          outbox: { count: Number(outboxAge.rows[0]?.count ?? 0), oldestAgeSeconds: Number(outboxAge.rows[0]?.oldest_age_seconds ?? 0), uncertainCount: Number(outboxAge.rows[0]?.uncertain_count ?? 0) },
+          retryingDeliveries: Number(outboxAge.rows[0]?.retrying_count ?? 0),
+          deadLetter: (await s.pool.query<{ count: number }>("SELECT count(*)::int AS count FROM integration_outbox WHERE state='dead_letter'")).rows[0]?.count ?? 0,
+          staleLeases: staleLeases.rows[0]?.count ?? 0,
+          fifoBlockers: Object.values(blocked).reduce((sum, value) => sum + value, 0),
+          promptFailures: promptFailures.rows[0]?.count ?? 0,
+          sheetsReviewRequired: sheetsReviewRequired.rows[0]?.count ?? 0,
+        };
         return {
           ok: true,
           inbox: inbox.rows[0],
@@ -393,6 +420,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           queues,
           blocked,
           ai: ai.rows[0],
+          observability: buildOperationalSignals(snapshot),
         };
       });
       admin.post("/integrations/:id/replay", async (req) => {

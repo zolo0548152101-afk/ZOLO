@@ -1,6 +1,7 @@
 import type { FastifyRequest } from "fastify";
 import type { Config } from "../config.js";
 import { AppError } from "../domain/types.js";
+import { redactSecrets } from "./security.js";
 
 export type AdminCapability = "read-only" | "normal" | "destructive";
 const rank: Record<AdminCapability, number> = { "read-only": 0, normal: 1, destructive: 2 };
@@ -64,14 +65,14 @@ export function adminAuditRecord(
   result = "success",
   extra: Record<string, unknown> = {},
 ): Record<string, unknown> {
-  return {
+  return redactSecrets({
     operation,
     timestamp: new Date().toISOString(),
     ...adminAuditFields(req),
     target,
     result,
     ...extra,
-  };
+  }) as Record<string, unknown>;
 }
 
 export function assertDestructiveAllowed(req: FastifyRequest, c: Config): AdminCapability {

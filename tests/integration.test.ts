@@ -1215,9 +1215,11 @@ test("integration dispatcher is durable, ordered, bounded, and replayable", asyn
   assert.ok(replayJobs.some((job) => (job.data as { id: string }).id === retry.id));
   const metrics = await app.inject({ method: "GET", url: "/admin/metrics", headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN } });
   assert.equal(metrics.statusCode, 200);
-  const metricsBody = metrics.json() as { integrations: Array<Record<string, unknown>>; integration_details: Array<Record<string, unknown>> };
+  const metricsBody = metrics.json() as { integrations: Array<Record<string, unknown>>; integration_details: Array<Record<string, unknown>>; observability: { status: string; signals: Array<{ code: string; context_json: string }> } };
   assert.ok(metricsBody.integrations.some((row) => row.integration === name && "pending_count" in row && "oldest_pending_age_seconds" in row && "dead_letter_count" in row));
   assert.ok(metricsBody.integration_details.some((row) => row.integration === name && "last_error" in row && "attempts" in row));
+  assert.ok(["healthy", "warning", "critical"].includes(metricsBody.observability.status));
+  assert.ok(metricsBody.observability.signals.every((signal) => signal.context_json.length <= 512));
   const audit = await pool.query<{ data: Record<string, unknown> }>("SELECT data FROM request_events WHERE event_type='integration_delivery_replayed' ORDER BY id DESC LIMIT 1");
   assert.equal(audit.rows[0]!.data.operation, "replay_integration_delivery");
   assert.equal(audit.rows[0]!.data.result, "success");
