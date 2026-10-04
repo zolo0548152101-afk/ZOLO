@@ -152,6 +152,10 @@ export async function writeEvalEvidence(filePath, evidence) {
   await writeFile(filePath, `${JSON.stringify(evidence, null, 2)}\n`);
 }
 
+export function resolveEvalEvidencePath(env) {
+  return env.AI_EVAL_EVIDENCE_PATH || "/tmp/haim-t23-remote-prompt-eval.json";
+}
+
 async function main() {
   if (process.env.RUN_PAID_AI_EVAL !== "true")
     throw new Error("Set RUN_PAID_AI_EVAL=true to approve API charges");
@@ -170,7 +174,7 @@ async function main() {
       prompt: { id: c.OPENAI_PROMPT_ID, version: c.OPENAI_PROMPT_VERSION, model: c.OPENAI_MODEL },
       synthetic_only: true, database_accessed: false, channel_accessed: false,
     };
-    await writeEvalEvidence(resolve(process.cwd(), "artifacts/qa/t23-remote-prompt-eval.json"), evidence);
+    await writeEvalEvidence(resolveEvalEvidencePath(process.env), evidence);
     console.log(JSON.stringify({ ok: evidence.ok, total: evidence.total, passed: evidence.passed, forbidden_operational_claims: evidence.forbidden_operational_claims }, null, 2));
     if (!evidence.ok || evidence.forbidden_operational_claims !== 0) process.exitCode = 1;
   } finally {

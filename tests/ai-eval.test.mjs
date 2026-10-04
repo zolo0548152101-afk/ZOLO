@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { evaluationConfigEnv, evaluateCases, writeEvalEvidence } from "../scripts/ai-eval.mjs";
+import { evaluationConfigEnv, evaluateCases, resolveEvalEvidencePath, writeEvalEvidence } from "../scripts/ai-eval.mjs";
 
 test("remote evaluation always isolates its configuration from production runtime validation", () => {
   const env = evaluationConfigEnv({ NODE_ENV: "production", BOT_MODE: "live", DB_SCHEMA: "haim_core" });
@@ -22,6 +22,11 @@ test("remote evaluation creates its evidence directory in a production runtime i
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("remote evaluation defaults evidence to a writable runtime path and honors an explicit path", () => {
+  assert.equal(resolveEvalEvidencePath({}), "/tmp/haim-t23-remote-prompt-eval.json");
+  assert.equal(resolveEvalEvidencePath({ AI_EVAL_EVIDENCE_PATH: "/var/tmp/custom.json" }), "/var/tmp/custom.json");
 });
 
 test("remote evaluator preserves burst history and accepts the compatible planner contract", async () => {
