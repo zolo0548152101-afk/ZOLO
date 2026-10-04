@@ -13,7 +13,9 @@ import {
 } from "../src/application/security.js";
 import { readConfig } from "../src/config.js";
 import {
+  assertDistinctDatabaseIdentity,
   createBackupManifest,
+  normalizeDatabaseIdentity,
   validateBackupManifest,
   type BackupComponent,
 } from "../src/application/backup.js";
@@ -86,7 +88,19 @@ test("T22 redaction removes secrets recursively and admin secrets are strong", (
     authorization: "[REDACTED]",
     nested: { password: "[REDACTED]", message: "safe" },
   });
-  assert.equal(redactDiagnosticText("adapter failed authorization=Bearer-top-secret token=private-value"), "adapter failed authorization=[REDACTED] token=[REDACTED]");
+  for (const diagnostic of [
+    "authorization: Bearer top-secret",
+    "Bearer naked-secret",
+    "adapter failed authorization=Bearer-top-secret token=private-value",
+  ]) {
+    const redactedDiagnostic = redactDiagnosticText(diagnostic)!;
+    assert.ok(!redactedDiagnostic.includes("top-secret"));
+    assert.ok(!redactedDiagnostic.includes("naked-secret"));
+    assert.ok(!redactedDiagnostic.includes("private-value"));
+  }
+  assert.equal(redactDiagnosticText("authorization: Bearer top-secret"), "authorization: [REDACTED]");
+  assert.equal(redactDiagnosticText("Bearer naked-secret"), "[REDACTED]");
+  assert.equal(redactDiagnosticText("authorization=Bearer-top-secret token=private-value"), "authorization= [REDACTED] token= [REDACTED]");
   assert.equal(validateAdminSecret("short"), false);
   const current = "A7!current-secret-rotation-2026-01";
   const next = "B8@next-secret-rotation-2026-02!!";
@@ -150,4 +164,16 @@ test("T22 backup manifest requires every component and verifies checksums", asyn
   });
   assert.equal(validateBackupManifest(manifest).ok, true);
   assert.equal(validateBackupManifest({ ...manifest, components: components.slice(0, 2) }).ok, false);
+});
+
+test("T22 backup drill compares normalized database identity before destructive restore", () => {
+  assert.deepEqual(normalizeDatabaseIdentity("postgres://postgres@POSTGRES/haim_core_test?application_name=haim-qa-backup-restore"), {
+    host: "postgres",
+    port: 5432,
+    database: "haim_core_test",
+  });
+  assert.throws(() => assertDistinctDatabaseIdentity(
+    "postgres://postgres@postgres/haim_core_test?application_name=haim-qa-backup-restore",
+    "postgres://postgres@postgres/haim_core_test?application_name=haim-qa-backup-restore&connect_timeout=5",
+  ), /distinct_disposable_database_identity/);
 });

@@ -4,7 +4,8 @@ import pg from "pg";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, stat, readdir, readFile, writeFile, copyFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
+import { assertDistinctDatabaseIdentity } from "../dist/application/backup.js";
 
 const { Pool } = pg;
 const [source, target] = process.argv.slice(2);
@@ -32,7 +33,7 @@ function proveDisposableTarget(value, label) {
 
 const sourceTarget = proveDisposableTarget(source, "source");
 const targetTarget = proveDisposableTarget(target, "target");
-if (source === target) throw new Error("backup_restore_requires_distinct_disposable_local_targets");
+assertDistinctDatabaseIdentity(source, target);
 
 const run = (cmd, args) => new Promise((resolveRun, reject) => {
   const child = spawn(cmd, args, { stdio: "inherit", shell: false });
@@ -65,10 +66,10 @@ const fixed = {
 };
 
 async function seedSource(pool) {
-  const fixturePath = join(resolve(mediaRoot), "backup-drill-fixture.jpg");
   const fixture = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0xff, 0xd9]);
-  await writeFile(fixturePath, fixture);
   const fixtureKey = `${sha256Bytes(fixture)}.jpg`;
+  const fixturePath = join(resolve(mediaRoot), fixtureKey);
+  await writeFile(fixturePath, fixture);
   const trace = "00000000-0000-4000-8000-000000000601";
   const values = [fixed.contactA, fixed.contactB, fixed.request, fixed.message, fixed.media, fixed.batch, trace, fixtureKey, sha256Bytes(fixture), fixture.byteLength];
   const statements = [
@@ -117,7 +118,7 @@ async function snapshot(pool) {
     ["request", `SELECT count(*)::int AS n FROM ${s}.requests WHERE id=$1 AND number=991001`, [fixed.request]],
     ["parties", `SELECT count(*)::int AS n FROM ${s}.request_parties WHERE request_id=$1`, [fixed.request]],
     ["items", `SELECT count(*)::int AS n FROM ${s}.request_items WHERE request_id=$1`, [fixed.request]],
-    ["media", `SELECT checksum,size_bytes FROM ${s}.media WHERE id=$1`, [fixed.media]],
+    ["media", `SELECT storage_key,checksum,size_bytes FROM ${s}.media WHERE id=$1`, [fixed.media]],
     ["request_media", `SELECT count(*)::int AS n FROM ${s}.request_media WHERE request_id=$1 AND media_id=$2`, [fixed.request, fixed.media]],
     ["import_batch", `SELECT count(*)::int AS n FROM ${s}.sheets_import_batches WHERE id=$1 AND state='review_required'`, [fixed.batch]],
     ["import_lineage", `SELECT count(*)::int AS n FROM ${s}.sheets_import_lineage WHERE batch_id=$1 AND entity_id=$2`, [fixed.batch, fixed.request]],
@@ -158,7 +159,8 @@ try {
   await targetPool.query(`DROP SCHEMA IF EXISTS ${ident(`${schema}_jobs`)} CASCADE`);
   await run("pg_restore", ["--clean", "--if-exists", "--no-owner", "--dbname", target, dump]);
   await run("pg_restore", ["--list", dump]);
-  const restoreVerification = { state: assertSnapshot(expectedState, await snapshot(targetPool)) };
+  const restoredState = await snapshot(targetPool);
+  const restoreVerification = { state: assertSnapshot(expectedState, restoredState) };
   const restoredConfig = JSON.parse(await readFile(configCopy, "utf8"));
   if (JSON.stringify(restoredConfig) !== JSON.stringify(sourceConfig)) throw new Error("restored_configuration_mismatch");
   const mediaRows = [];
@@ -172,9 +174,23 @@ try {
   const restoredMediaRows = [];
   for (const path of await filesUnder(restoredMediaRoot)) restoredMediaRows.push({ path: relative(restoredMediaRoot, path), sha256: await sha256(path), bytes: (await stat(path)).size });
   if (JSON.stringify(mediaRows) !== JSON.stringify(restoredMediaRows)) throw new Error("restored_media_content_mismatch");
-  restoreVerification.media = { source: mediaRows, restored: restoredMediaRows, content_match: true };
+  const restoredMedia = restoredState.media;
+  if (!restoredMedia?.storage_key) throw new Error("restored_media_storage_key_missing");
+  const restoredMediaPath = resolve(restoredMediaRoot, restoredMedia.storage_key);
+  if (!restoredMediaPath.startsWith(`${resolve(restoredMediaRoot)}${sep}`) || !(await stat(restoredMediaPath).catch(() => null))) throw new Error("restored_media_storage_key_file_missing");
+  const restoredMediaBytes = await readFile(restoredMediaPath);
+  if (sha256Bytes(restoredMediaBytes) !== restoredMedia.checksum || restoredMediaBytes.byteLength !== Number(restoredMedia.size_bytes))
+    throw new Error(`restored_media_storage_key_file_mismatch:${JSON.stringify({
+      storage_key: restoredMedia.storage_key,
+      checksum: restoredMedia.checksum,
+      actual_checksum: sha256Bytes(restoredMediaBytes),
+      size_bytes: restoredMedia.size_bytes,
+      actual_size_bytes: restoredMediaBytes.byteLength,
+      restored_media_path: restoredMediaPath,
+    })}`);
+  restoreVerification.media = { storage_key: restoredMedia.storage_key, source: mediaRows, restored: restoredMediaRows, content_match: true, storage_key_resolved: true };
   restoreVerification.configuration = { valid: true, exact_match: true };
-  restoreVerification.target_proof = { application_name: appName, database_name_contract: true, sentinel: "fixed-fixture-v1" };
+  restoreVerification.target_proof = { application_name: appName, database_name_contract: true, source_database: sourceTarget.database, target_database: targetTarget.database, distinct_database_identity: true };
   const { createBackupManifest, validateBackupManifest } = await import("../dist/application/backup.js");
   const components = [
     { name: "postgres", path: "postgres.dump", sha256: await sha256(dump), bytes: (await stat(dump)).size },

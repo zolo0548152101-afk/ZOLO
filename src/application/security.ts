@@ -1,5 +1,9 @@
 const SECRET_KEY = /(token|secret|password|authorization|cookie|api[_-]?key|private[_-]?key|credential)/i;
-const SECRET_VALUE = /\b(bearer|token|secret|password|authorization|cookie|api[_-]?key|private[_-]?key|credential)\b\s*[:=]\s*[^\s,;]+/gi;
+const DIAGNOSTIC_SECRET_PATTERNS = [
+  /\b(authorization|proxy-authorization)\b\s*[:=]\s*bearer\s+[^\s,;]+/gi,
+  /\bbearer\s+[^\s,;]+/gi,
+  /\b(bearer|token|secret|password|authorization|cookie|api[_-]?key|private[_-]?key|credential)\b\s*[:=]\s*[^\s,;]+/gi,
+];
 
 export function redactSecrets(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redactSecrets);
@@ -11,7 +15,10 @@ export function redactSecrets(value: unknown): unknown {
 
 export function redactDiagnosticText(value: string | null | undefined): string | null {
   if (value == null) return null;
-  return value.replace(SECRET_VALUE, (match) => `${match.slice(0, match.search(/[:=]/) + 1)}[REDACTED]`).slice(0, 160);
+  return DIAGNOSTIC_SECRET_PATTERNS.reduce((text, pattern) => text.replace(pattern, (match) => {
+    const separator = match.search(/[:=]/);
+    return separator >= 0 ? `${match.slice(0, separator + 1)} [REDACTED]` : "[REDACTED]";
+  }), value).slice(0, 160);
 }
 
 export function validateAdminSecret(value: string): boolean {

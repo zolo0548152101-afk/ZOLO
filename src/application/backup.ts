@@ -11,6 +11,24 @@ export type BackupManifest = {
 
 const REQUIRED = new Set<BackupComponentName>(["postgres", "media", "configuration"]);
 
+export type DatabaseIdentity = { host: string; port: number; database: string };
+
+export function normalizeDatabaseIdentity(value: string): DatabaseIdentity {
+  const parsed = new URL(value);
+  return {
+    host: parsed.hostname.toLowerCase(),
+    port: parsed.port ? Number(parsed.port) : 5432,
+    database: decodeURIComponent(parsed.pathname.replace(/^\//, "")),
+  };
+}
+
+export function assertDistinctDatabaseIdentity(source: string, target: string): void {
+  const sourceIdentity = normalizeDatabaseIdentity(source);
+  const targetIdentity = normalizeDatabaseIdentity(target);
+  if (sourceIdentity.host === targetIdentity.host && sourceIdentity.port === targetIdentity.port && sourceIdentity.database === targetIdentity.database)
+    throw new Error("backup_restore_requires_distinct_disposable_database_identity");
+}
+
 export async function createBackupManifest(
   components: BackupComponent[],
   options: Pick<BackupManifest, "consistency" | "rpo_minutes" | "rto_minutes">,

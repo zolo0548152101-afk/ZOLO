@@ -36,9 +36,17 @@ identifiers and missing proof of disposability.
 
 The drill seeds and verifies contacts, request/parties/item, message/media and
 request-media linkage, integration/event/outbox state, Sheets import batch and
-lineage, media bytes/metadata, and configuration metadata. It dumps the source,
-restores into a clean disposable target, verifies target-side state and exact
-media/config checksums, and prints `restored:true` only after those checks pass.
+lineage, media bytes/metadata, and configuration metadata. The seeded media is
+written at the exact database `storage_key`; the restore then resolves that key
+under the restored media root and verifies file existence, checksum, and byte
+size against the restored database row. It dumps the source, restores into a
+clean disposable target, verifies target-side state and exact media/config
+checksums, and prints `restored:true` only after those checks pass.
+
+Source and target are rejected when their normalized database identity matches
+(host, effective port, and database name), even if their connection URLs differ
+syntactically. Target proof reports the explicit disposable database identity
+contract; it does not claim a sentinel that was not written to the target.
 
 Test-only defaults are RPO 60 minutes and RTO 30 minutes; these are not
 production commitments.
