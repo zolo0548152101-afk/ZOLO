@@ -1,5 +1,16 @@
 # Master Progress
 
+## 2026-10-04 T25 canary qualification gate
+
+- source commit: `084293b82aa1cb1c72947a9d5661fcef0d26835b`.
+- `npm run test:t25-canary`: `6/6` PASS.
+- `npm run check:t25-release`: PASS in default `shadow` mode; the gate performs no external side effects.
+- allowlist is normalized and fail-closed to the two authorized test recipients only: `0584152101`, `0536662043`; bot identity `0543414386` is not a recipient.
+- four flow classes are covered by the qualification contract: direct, open donation, self-transfer, open request.
+- rollback contract preserves inbox/outbox/provider receipts/snapshot/evidence and forbids destructive deletion.
+- live canary/WAHA/server/deployment was not run; it requires a separate explicit operational authorization and independent review.
+- evidence: `artifacts/qa/t25-canary-verification.json`, `docs/qa/T25_CANARY_CUTOVER.md`.
+
 ## 2026-10-04 T24 publication, deployment, and post-deploy reset
 
 - source commit: `616524f8f069454d1f24b000623bec8b9405d745`; evidence handoff: `e599be591f6c2670698690b66522f3923bc235a9`.

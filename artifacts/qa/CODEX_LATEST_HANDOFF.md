@@ -1,5 +1,25 @@
 # CODEX LATEST HANDOFF
 
+work_unit: T25 canary qualification gate
+candidate_git_sha: 084293b82aa1cb1c72947a9d5661fcef0d26835b
+branch: qa-build
+status: shadow_gate_verified
+
+## T25 result
+
+- `npm run test:t25-canary`: `6/6` PASS.
+- `npm run check:t25-release`: PASS in safe `shadow` mode.
+- allowlist normalization accepts local/972 forms and rejects any identity outside `0584152101`, `0536662043`.
+- four required flow classes are explicitly gated: direct, open donation, self-transfer, and open request.
+- delivery/status/reconciliation evidence is required for every flow; any gap fails qualification.
+- rollback preserves inbox/outbox/provider receipts/snapshot/evidence and performs no destructive deletion.
+- no live canary, WAHA send, server mutation, or deployment was performed in T25.
+- evidence file: `artifacts/qa/t25-canary-verification.json`.
+
+## T25 boundary
+
+Live canary traffic remains a separate high-risk operational action requiring explicit release authorization, fresh snapshot/dependency evidence, and independent review. This commit implements and verifies the fail-closed shadow qualification gate only.
+
 work_unit: T24 shadow qualification
 candidate_git_sha: 616524f8f069454d1f24b000623bec8b9405d745
 branch: qa-build
