@@ -202,20 +202,7 @@ export class Runtime {
             ]);
           });
         }
-        await this.pool.query(
-          `UPDATE integration_outbox
-              SET state='pending'
-            WHERE state='active'
-              AND last_attempt_at < clock_timestamp()-interval '${INTEGRATION_ACTIVE_TIMEOUT_SECONDS} seconds'`,
-        );
-        const recoverIntegrations = await this.pool.query<{ id: string; integration: string }>(
-          "SELECT id,integration FROM integration_outbox WHERE state='pending' AND (next_attempt_at IS NULL OR next_attempt_at<=clock_timestamp()) ORDER BY event_id LIMIT 500",
-        );
-        for (const row of recoverIntegrations.rows) {
-          await store.transaction(async (c) => {
-            await queue.send(c, "integration", { id: row.id }, row.integration);
-          });
-        }
+        await this.recoverIntegrationQueue();
         await this.beat();
         this.heartbeat = setInterval(
           () =>
@@ -281,7 +268,7 @@ export class Runtime {
     const adapter = this.adapters.get(item.integration);
     if (!adapter) {
       await this.pool.query(
-        "UPDATE integration_outbox SET state='dead_letter',last_error='adapter_not_registered',terminal_at=clock_timestamp() WHERE id=$1 AND state='active'",
+        "UPDATE integration_outbox SET state='dead_letter',last_error='adapter_not_registered',error_class='terminal',terminal_at=clock_timestamp() WHERE id=$1 AND state='active'",
         [id],
       );
       this.log.error({ code: "integration_adapter_missing", integration: item.integration, outbox_id: id });
@@ -301,7 +288,8 @@ export class Runtime {
         {
           id: item.event_id,
           type: item.event_type,
-          schemaVersion: Number(event.schema_version ?? item.schema_version),
+              schemaVersion: Number(event.schema_version ?? item.schema_version),
+              deliveryKey: (event.delivery_keys as Record<string, string> | undefined)?.[item.integration] ?? item.idempotency_key,
           requestId: item.request_id,
           occurredAt: item.occurred_at,
           data: event.payload ?? item.data,
@@ -331,11 +319,39 @@ export class Runtime {
       throw new RetryableError(code);
     }
   }
+  async recoverIntegrationQueue(): Promise<void> {
+    if (!this.queue) return;
+    await this.pool.query(
+      `UPDATE integration_outbox
+          SET state='pending'
+        WHERE state='active'
+          AND (last_attempt_at IS NULL OR last_attempt_at < clock_timestamp()-interval '${INTEGRATION_ACTIVE_TIMEOUT_SECONDS} seconds')`,
+    );
+    const rows = await this.pool.query<{ id: string; integration: string }>(
+      `SELECT io.id,io.integration
+         FROM integration_outbox io
+        WHERE io.state='pending'
+          AND (io.next_attempt_at IS NULL OR io.next_attempt_at<=clock_timestamp())
+          AND NOT EXISTS (
+            SELECT 1 FROM integration_outbox prior
+             WHERE prior.integration=io.integration
+               AND prior.event_id<io.event_id
+               AND prior.state<>'delivered'
+          )
+        ORDER BY io.event_id
+        LIMIT 500`,
+    );
+    for (const row of rows.rows)
+      await this.store?.transaction((c) =>
+        this.queue!.send(c, "integration", { id: row.id }, `integration:${row.integration}:${row.id}`),
+      );
+  }
   private async beat(): Promise<void> {
     await this.pool.query(
       "INSERT INTO worker_heartbeats(id) VALUES($1) ON CONFLICT(id) DO UPDATE SET updated_at=clock_timestamp()",
       [this.workerId],
     );
+    await this.recoverIntegrationQueue();
   }
   async check(): Promise<void> {
     if (!this.ready || !this.engine || !this.queue?.started)
@@ -387,11 +403,21 @@ export class Runtime {
     const failedMedia = await this.pool.query<{ n: number }>(
       "SELECT count(*)::int n FROM messages WHERE media_state='pending' AND received_at<clock_timestamp()-interval '60 seconds'",
     );
+    const integrations = await this.pool.query<{ n: number; dead: number; stuck: number }>(
+      `SELECT count(*)::int n,
+              count(*) FILTER (WHERE state='dead_letter')::int dead,
+              count(*) FILTER (WHERE state='active' AND last_attempt_at < clock_timestamp()-interval '60 seconds')::int stuck
+         FROM integration_outbox
+        WHERE state='dead_letter'
+           OR (state='active' AND last_attempt_at < clock_timestamp()-interval '60 seconds')
+           OR (state='pending' AND created_at < clock_timestamp()-interval '60 seconds')`,
+    );
     if (
       Object.values(blocked).some((v) => v > 0) ||
       uncertain.rows[0]!.n > 0 ||
       formatting.rows[0]!.n > 0 ||
-      failedMedia.rows[0]!.n > 0
+      failedMedia.rows[0]!.n > 0 ||
+      integrations.rows[0]!.n > 0
     ) {
       this.log.error({
         code: "operations_attention",
@@ -399,6 +425,7 @@ export class Runtime {
         uncertain: uncertain.rows[0]!.n,
         notice_formatting_overdue: formatting.rows[0]!.n,
         media_overdue: failedMedia.rows[0]!.n,
+        integrations: integrations.rows[0],
       });
       await store.transaction((c) =>
         store.outbound(
@@ -406,7 +433,7 @@ export class Runtime {
           { trace_id: randomUUID(), mode: this.config.BOT_MODE },
           {
             phone: this.config.ADMIN_PHONE,
-          text: `נדרשת בדיקת מערכת חיים יחד.\nתורים חסומים: ${JSON.stringify(blocked)}\nשליחות לא ודאיות: ${uncertain.rows[0]!.n}\nניסוח הודעות תקוע: ${formatting.rows[0]!.n}\nקבצים בהמתנה מעל דקה: ${failedMedia.rows[0]!.n}\nיש לבדוק במסך הניהול. אם WhatsApp אינו זמין, ההתראה נשמרת בלוג וב־admin API.`,
+          text: `נדרשת בדיקת מערכת חיים יחד.\nתורים חסומים: ${JSON.stringify(blocked)}\nשליחות לא ודאיות: ${uncertain.rows[0]!.n}\nניסוח הודעות תקוע: ${formatting.rows[0]!.n}\nקבצים בהמתנה מעל דקה: ${failedMedia.rows[0]!.n}\nאינטגרציות תקועות/סופיות: ${integrations.rows[0]!.n} (dead-letter: ${integrations.rows[0]!.dead}, active תקוע: ${integrations.rows[0]!.stuck})\nיש לבדוק במסך הניהול. אם WhatsApp אינו זמין, ההתראה נשמרת בלוג וב־admin API.`,
           },
           `ops:${now.toISOString().slice(0, 13)}`,
         ),

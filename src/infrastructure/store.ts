@@ -549,11 +549,17 @@ export class Store {
     );
     const eventId = e.rows[0]!.id;
     const payload = data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : { value: data };
+    const enabled = await c.query<{ name: string }>(
+      "SELECT name FROM integrations WHERE enabled=true ORDER BY name",
+    );
+    const deliveryKeys = Object.fromEntries(
+      enabled.rows.map(({ name }) => [name, `integration:${name}:${eventId}`]),
+    );
     await c.query(
       `UPDATE request_events
           SET data=$2
         WHERE id=$1`,
-      [eventId, JSON.stringify({ ...payload, event_id: eventId, event_type: type, schema_version: 1, request_id: requestId, occurred_at: new Date().toISOString(), payload })],
+      [eventId, JSON.stringify({ ...payload, event_id: eventId, event_type: type, schema_version: 1, request_id: requestId, occurred_at: new Date().toISOString(), delivery_keys: deliveryKeys, payload })],
     );
     const integrations = await c.query<{ id: string; integration: string }>(
       `INSERT INTO integration_outbox(event_id,integration,idempotency_key)
@@ -562,7 +568,7 @@ export class Store {
       [eventId],
     );
     for (const row of integrations.rows)
-      await this.queue.send(c, "integration", { id: row.id }, row.integration);
+      await this.queue.send(c, "integration", { id: row.id }, `integration:${row.integration}:${row.id}`);
   }
   async outbound(
     c: pg.PoolClient,

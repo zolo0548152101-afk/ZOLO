@@ -5,6 +5,7 @@ export interface IntegrationEvent {
   id: string;
   type: string;
   schemaVersion: number;
+  deliveryKey: string;
   requestId: string | null;
   occurredAt: string;
   data: unknown;

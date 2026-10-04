@@ -1141,6 +1141,7 @@ test("integration dispatcher is durable, ordered, bounded, and replayable", asyn
     name,
     async deliver(event, options) {
       assert.equal(event.schemaVersion, 1);
+      assert.equal((event as unknown as { deliveryKey: string }).deliveryKey, options.idempotencyKey);
       assert.match(options.idempotencyKey, new RegExp(`^integration:${name}:`));
       if (mode === "retry") throw new IntegrationDeliveryError("temporary_adapter_failure", true);
       if (mode === "terminal") throw new IntegrationDeliveryError("permanent_adapter_failure", false);
@@ -1164,6 +1165,8 @@ test("integration dispatcher is durable, ordered, bounded, and replayable", asyn
 
   mode = "retry";
   const retry = await emit("dispatcher_retry");
+  for (const job of await q.boss.fetch("integration"))
+    if ((job.data as { id: string }).id === retry.id) await q.boss.complete("integration", job.id);
   await assert.rejects(dispatcher.deliverIntegration(retry.id), /temporary_adapter_failure/);
   const retryRow = await pool.query<{ state: string; attempts: number; last_error: string }>("SELECT state,attempts,last_error FROM integration_outbox WHERE id=$1", [retry.id]);
   assert.deepEqual(retryRow.rows[0], { state: "pending", attempts: 1, last_error: "temporary_adapter_failure" });
@@ -1192,6 +1195,13 @@ test("integration dispatcher is durable, ordered, bounded, and replayable", asyn
   assert.equal(delivered.at(-1), blocked.idempotency_key);
 
   await pool.query("UPDATE integration_outbox SET state='dead_letter',error_class='terminal',terminal_at=clock_timestamp() WHERE id=$1", [retry.id]);
+  const readonlyReplay = await app.inject({
+    method: "POST",
+    url: `/admin/integrations/${retry.id}/replay`,
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_READONLY_TOKEN },
+    payload: { reason: "read only must not replay" },
+  });
+  assert.equal(readonlyReplay.statusCode, 401);
   const replay = await app.inject({
     method: "POST",
     url: `/admin/integrations/${retry.id}/replay`,
@@ -1201,11 +1211,126 @@ test("integration dispatcher is durable, ordered, bounded, and replayable", asyn
   assert.equal(replay.statusCode, 200);
   const replayRow = await pool.query<{ state: string; idempotency_key: string; attempts: number }>("SELECT state,idempotency_key,attempts FROM integration_outbox WHERE id=$1", [retry.id]);
   assert.deepEqual(replayRow.rows[0], { state: "pending", idempotency_key: retry.idempotency_key, attempts: 0 });
+  const replayJobs = await q.boss.fetch("integration");
+  assert.ok(replayJobs.some((job) => (job.data as { id: string }).id === retry.id));
+  const metrics = await app.inject({ method: "GET", url: "/admin/metrics", headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN } });
+  assert.equal(metrics.statusCode, 200);
+  const metricsBody = metrics.json() as { integrations: Array<Record<string, unknown>>; integration_details: Array<Record<string, unknown>> };
+  assert.ok(metricsBody.integrations.some((row) => row.integration === name && "pending_count" in row && "oldest_pending_age_seconds" in row && "dead_letter_count" in row));
+  assert.ok(metricsBody.integration_details.some((row) => row.integration === name && "last_error" in row && "attempts" in row));
   const audit = await pool.query<{ data: Record<string, unknown> }>("SELECT data FROM request_events WHERE event_type='integration_delivery_replayed' ORDER BY id DESC LIMIT 1");
   assert.equal(audit.rows[0]!.data.operation, "replay_integration_delivery");
   assert.equal(audit.rows[0]!.data.result, "success");
+  await pool.query("UPDATE integration_outbox SET state='delivered',delivered_at=clock_timestamp() WHERE id=$1", [retry.id]);
+  const deliveredReplay = await app.inject({
+    method: "POST",
+    url: `/admin/integrations/${retry.id}/replay`,
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+    payload: { reason: "delivered must not replay" },
+  });
+  assert.equal(deliveredReplay.statusCode, 409);
   await pool.query("DELETE FROM integration_outbox WHERE integration=$1", [name]);
   await pool.query("DELETE FROM request_events WHERE event_type LIKE 'dispatcher_%' OR event_type='integration_delivery_replayed'");
+  await pool.query("DELETE FROM integrations WHERE name=$1", [name]);
+});
+test("disabled integrations are never dispatched", async () => {
+  const name = `disabled-${counter}`;
+  await pool.query("INSERT INTO integrations(name,enabled) VALUES($1,false)", [name]);
+  const trace = randomUUID();
+  await s.transaction((c) => s.event(c, { trace_id: trace }, "test", "disabled_dispatch", {}));
+  const row = await pool.query("SELECT 1 FROM integration_outbox io JOIN request_events e ON e.id=io.event_id WHERE e.trace_id=$1 AND io.integration=$2", [trace, name]);
+  assert.equal(row.rowCount, 0);
+  await pool.query("DELETE FROM integration_outbox WHERE event_id IN (SELECT id FROM request_events WHERE trace_id=$1)", [trace]);
+  await pool.query("DELETE FROM request_events WHERE trace_id=$1", [trace]);
+  await pool.query("DELETE FROM integrations WHERE name=$1", [name]);
+});
+test("missing adapters, unsupported schemas, and ambiguous delivery are terminal", async () => {
+  const cases = [
+    { suffix: "missing", adapters: new Map<string, IntegrationAdapter>() },
+    { suffix: "schema", adapters: new Map<string, IntegrationAdapter>() },
+    {
+      suffix: "ambiguous",
+      adapters: new Map<string, IntegrationAdapter>(),
+    },
+  ];
+  for (const item of cases) {
+    const name = `terminal-${item.suffix}-${counter}`;
+    await pool.query("INSERT INTO integrations(name,enabled) VALUES($1,true)", [name]);
+    const trace = randomUUID();
+    await s.transaction((c) => s.event(c, { trace_id: trace }, "test", `terminal_${item.suffix}`, {}));
+    const row = (await pool.query<{ id: string; event_id: string }>("SELECT io.id,io.event_id::text FROM integration_outbox io JOIN request_events e ON e.id=io.event_id WHERE e.trace_id=$1 AND io.integration=$2", [trace, name])).rows[0]!;
+    if (item.suffix === "schema")
+      await pool.query("UPDATE request_events SET data=jsonb_set(data,'{schema_version}','99') WHERE id=$1", [row.event_id]);
+    if (item.suffix === "ambiguous")
+      item.adapters = new Map([[name, { name, async deliver() { throw new IntegrationDeliveryError("ambiguous_provider_result", true, true); } }]]);
+    const dispatcher = new Runtime(cfg, log, { pool, integrationAdapters: item.adapters });
+    await dispatcher.deliverIntegration(row.id);
+    const result = (await pool.query<{ state: string; error_class: string | null }>("SELECT state,error_class FROM integration_outbox WHERE id=$1", [row.id])).rows[0]!;
+    assert.equal(result.state, "dead_letter");
+    assert.equal(result.error_class, item.suffix === "ambiguous" ? "ambiguous" : "terminal");
+    await pool.query("DELETE FROM integration_outbox WHERE id=$1", [row.id]);
+    await pool.query("DELETE FROM request_events WHERE trace_id=$1", [trace]);
+    await pool.query("DELETE FROM integrations WHERE name=$1", [name]);
+  }
+});
+test("concurrent delivery claims one row and one external effect", async () => {
+  const name = `concurrent-${counter}`;
+  let calls = 0;
+  await pool.query("INSERT INTO integrations(name,enabled) VALUES($1,true)", [name]);
+  const trace = randomUUID();
+  await s.transaction((c) => s.event(c, { trace_id: trace }, "test", "concurrent_dispatch", {}));
+  const row = (await pool.query<{ id: string }>("SELECT io.id FROM integration_outbox io JOIN request_events e ON e.id=io.event_id WHERE e.trace_id=$1 AND io.integration=$2", [trace, name])).rows[0]!;
+  const dispatcher = new Runtime(cfg, log, { pool, integrationAdapters: new Map([[name, { name, async deliver() { calls++; await delay(50); } }]]) });
+  await Promise.all([dispatcher.deliverIntegration(row.id), dispatcher.deliverIntegration(row.id)]);
+  assert.equal(calls, 1);
+  assert.equal((await pool.query("SELECT state FROM integration_outbox WHERE id=$1", [row.id])).rows[0]!.state, "delivered");
+  await pool.query("DELETE FROM integration_outbox WHERE id=$1", [row.id]);
+  await pool.query("DELETE FROM integration_outbox WHERE event_id IN (SELECT id FROM request_events WHERE trace_id=$1)", [trace]);
+  await pool.query("DELETE FROM request_events WHERE trace_id=$1", [trace]);
+  await pool.query("DELETE FROM integrations WHERE name=$1", [name]);
+});
+test("recovery requeues due rows, stale active rows, and predecessor-unblocked rows", async () => {
+  const name = `recovery-${counter}`;
+  await pool.query("INSERT INTO integrations(name,enabled) VALUES($1,true)", [name]);
+  const delivered: string[] = [];
+  const adapter: IntegrationAdapter = { name, async deliver(_event, options) { delivered.push(options.idempotencyKey); } };
+  const dispatcher = new Runtime(cfg, log, { pool, integrationAdapters: new Map([[name, adapter]]) });
+  const scheduled: string[] = [];
+  dispatcher.queue = { send: async (_client: unknown, _queue: unknown, data: { id: string }) => { scheduled.push(data.id); return "job"; } } as unknown as Queue;
+  dispatcher.store = s;
+  const emit = async (type: string) => {
+    const trace = randomUUID();
+    await s.transaction((c) => s.event(c, { trace_id: trace }, "test", type, {}));
+    return (await pool.query<{ id: string; idempotency_key: string }>("SELECT io.id,io.idempotency_key FROM integration_outbox io JOIN request_events e ON e.id=io.event_id WHERE e.trace_id=$1 AND io.integration=$2", [trace, name])).rows[0]!;
+  };
+  const stale = await emit("recovery_stale");
+  await pool.query("UPDATE integration_outbox SET state='active',last_attempt_at=clock_timestamp()-interval '61 seconds' WHERE id=$1", [stale.id]);
+  await dispatcher.recoverIntegrationQueue();
+  assert.equal((await pool.query("SELECT state FROM integration_outbox WHERE id=$1", [stale.id])).rows[0]!.state, "pending");
+  assert.ok(scheduled.includes(stale.id));
+  await pool.query("UPDATE integration_outbox SET state='delivered',delivered_at=clock_timestamp() WHERE id=$1", [stale.id]);
+
+  const predecessor = await emit("recovery_predecessor");
+  const successor = await emit("recovery_successor");
+  await dispatcher.deliverIntegration(successor.id);
+  assert.equal(delivered.includes(successor.idempotency_key), false);
+  await dispatcher.deliverIntegration(predecessor.id);
+  scheduled.length = 0;
+  await dispatcher.recoverIntegrationQueue();
+  assert.ok(scheduled.includes(successor.id));
+  await dispatcher.deliverIntegration(successor.id);
+
+  const future = await emit("recovery_future");
+  await pool.query("UPDATE integration_outbox SET next_attempt_at=clock_timestamp()+interval '60 seconds' WHERE id=$1", [future.id]);
+  scheduled.length = 0;
+  await dispatcher.recoverIntegrationQueue();
+  assert.equal(scheduled.includes(future.id), false);
+  await pool.query("UPDATE integration_outbox SET next_attempt_at=NULL WHERE id=$1", [future.id]);
+  await dispatcher.recoverIntegrationQueue();
+  assert.ok(scheduled.includes(future.id));
+  await pool.query("DELETE FROM integration_outbox WHERE integration=$1", [name]);
+  await pool.query("DELETE FROM integration_outbox WHERE event_id IN (SELECT id FROM request_events WHERE event_type LIKE 'recovery_%')");
+  await pool.query("DELETE FROM request_events WHERE event_type LIKE 'recovery_%'");
   await pool.query("DELETE FROM integrations WHERE name=$1", [name]);
 });
 test("two quick messages preserve receipt order even when processing is invoked backwards", async () => {

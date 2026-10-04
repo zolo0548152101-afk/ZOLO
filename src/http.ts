@@ -372,7 +372,24 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           ok: true,
           inbox: inbox.rows[0],
           outbox: outbox.rows,
-          integrations: (await s.pool.query("SELECT integration,state,count(*)::int AS count,coalesce(sum(attempts),0)::int AS attempts FROM integration_outbox GROUP BY integration,state ORDER BY integration,state")).rows,
+          integrations: (await s.pool.query(
+            `SELECT integration,
+                    count(*) FILTER (WHERE state='pending')::int AS pending_count,
+                    coalesce(extract(epoch FROM clock_timestamp()-min(created_at) FILTER (WHERE state='pending')),0)::int AS oldest_pending_age_seconds,
+                    count(*) FILTER (WHERE state='pending' AND error_class='retryable')::int AS retrying_count,
+                    count(*) FILTER (WHERE state='dead_letter')::int AS dead_letter_count,
+                    count(*) FILTER (WHERE state='active' AND last_attempt_at < clock_timestamp()-interval '60 seconds')::int AS stuck_active_count,
+                    coalesce(sum(attempts),0)::int AS attempts
+               FROM integration_outbox
+              GROUP BY integration ORDER BY integration`,
+          )).rows,
+          integration_details: (await s.pool.query(
+            `SELECT integration,id,event_id,state,attempts,last_error,error_class,
+                    created_at,last_attempt_at,next_attempt_at,terminal_at
+               FROM integration_outbox
+              WHERE state<>'delivered' OR last_error IS NOT NULL
+              ORDER BY event_id DESC LIMIT 100`,
+          )).rows,
           queues,
           blocked,
           ai: ai.rows[0],
@@ -384,8 +401,8 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
         requireAdminCapability(req, "normal");
         const s = runtime.requireStore();
         await s.transaction(async (client) => {
-          const row = await client.query<{ state: string; idempotency_key: string }>(
-            "SELECT state,idempotency_key FROM integration_outbox WHERE id=$1 FOR UPDATE",
+          const row = await client.query<{ state: string; integration: string; idempotency_key: string }>(
+            "SELECT state,integration,idempotency_key FROM integration_outbox WHERE id=$1 FOR UPDATE",
             [p.id],
           );
           const item = row.rows[0];
@@ -396,6 +413,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             "UPDATE integration_outbox SET state='pending',attempts=0,last_error=NULL,error_class=NULL,terminal_at=NULL,next_attempt_at=NULL WHERE id=$1",
             [p.id],
           );
+          await s.queue.send(client, "integration", { id: p.id }, `integration:${item.integration}:${p.id}`);
           await s.event(client, { trace_id: req.id }, "admin", "integration_delivery_replayed", adminAuditRecord(req, "replay_integration_delivery", `integration_outbox:${p.id}`, "success", { integration_outbox_id: p.id, idempotency_key: item.idempotency_key, reason: b.reason }));
         });
         return { ok: true, id: p.id };
