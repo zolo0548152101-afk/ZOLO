@@ -137,11 +137,14 @@ Phase 3 is closed. Phase 4 has not started and must not be started without the s
 
 ### Phase 4 — T18 Safe Admin Boundary
 
-- status: implementation complete; independent review requested; T19/T20 not started.
-- source commit: `669904f0fc555121bbcb9b699f660352604465fa`.
-- implementation: added server-side admin capabilities, same-origin protection, bounded mutation rate limiting, production/live destructive guard, structured operation/actor/capability audit fields, exact destructive confirmation, and disabled generic database PATCH/DELETE mutation paths. Database inspection now advertises no editable fields; the UI's active renderer exposes inspection/media/location actions only.
-- focused verification: PASS — unit `63/63`; T18 admin-focused integration `12/12`.
-- full disposable integration: `70 passed, 0 failed, 1 cancelled` due the existing native PostgreSQL SIGKILL worker-lease test timing out at 20 seconds; no T18 assertion failed.
-- other gates: spec and prompt-wiring PASS; regression is blocked by the same integration timeout; Golden is blocked by the existing Windows absolute-path ESM loader issue.
+- status: correction complete; independent review requested; T19/T20 not started.
+- baseline commit: `05bdd5ce61a27243a4b69623f3448380e59c7c71`.
+- source commit: `ebb404616e1389fc93b49620faa36851de6b6748`.
+- implementation: capability is derived only from server-configured credentials (`HAIM_ADMIN_TOKEN`, optional distinct read-only/destructive tokens); the caller-controlled `x-admin-capability` header cannot escalate. All successful named admin mutations now emit complete operation/timestamp/actor/capability/target/result audit records. Generic database PATCH/DELETE remains unavailable server-side. The disposable Docker verification stage now runs full integration, resets all disposable application and pg-boss schemas, then runs regressions and Golden.
+- focused verification: PASS — unit `63/63`; the full Linux integration run includes all T18 capability/audit tests.
+- full disposable Linux integration: PASS — `71 passed, 0 failed, 0 cancelled`.
+- regression gate: PASS — `26/26`, `12` probes.
+- Golden gate: PASS — `52/52` scenarios; forbidden-effect detector `6/6`.
+- other gates: build, spec, prompt-wiring, migration/FK/checksum, diff check, and secret scan PASS.
 - evidence: `artifacts/qa/t18-safe-admin-verification.json`.
 - safety: no deployment, production access, live WAHA, live DB, or real messages; T19/T20 not started.

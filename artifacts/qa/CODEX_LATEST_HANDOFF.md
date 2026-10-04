@@ -1,47 +1,47 @@
 # CODEX LATEST HANDOFF
 
-phase: 4 / T18 safe-admin only
-source_commit: 669904f0fc555121bbcb9b699f660352604465fa
-evidence_commit: b86617779b63a19ea9a51e57c8a92726e90bb665
-handoff_commit: pending (this file is committed with the next push)
+phase: 4 / T18 safe-admin correction only
+baseline_commit: 05bdd5ce61a27243a4b69623f3448380e59c7c71
+source_commit: ebb404616e1389fc93b49620faa36851de6b6748
+evidence_commit: pending (this file is committed in the evidence-only handoff)
 branch: qa-build
-push_success_before_handoff: true
+push_success_before_handoff: pending
 working_tree_before_handoff: clean
 
 ## Scope and implementation
 
-- Added server-side read-only/normal/destructive admin capabilities.
-- Generic database PATCH/DELETE paths are unavailable server-side with 404; they are not merely hidden in the UI.
-- Database inspection returns `editable_fields=[]`; the active admin renderer exposes inspection, media, and location actions only.
-- Added same-origin/CSRF rejection, bounded per-route mutation rate limiting, production/live destructive fail-closed guard, exact destructive confirmation, transactional audit evidence, and named-operation audit metadata.
+- Capability is server-authorized by configured credentials only; `x-admin-capability` is ignored for authorization and forged escalation attempts are rejected.
+- Read-only, normal, and destructive credentials are distinct capability identities; destructive operations require the destructive credential plus exact test-only confirmation and remain blocked in production/live mode.
+- Every successful admin mutation covered by the named routes emits audit evidence containing operation, timestamp, actor, capability, target, and result.
+- Generic database PATCH/DELETE mutation paths remain unavailable server-side; database inspection advertises no editable fields.
+- Docker disposable verification now runs full integration, resets `haim`, `haim_core_test`, and `haim_core_test_jobs`, then runs regressions and Golden in Linux.
 - No T19/T20 work, deployment, production access, live WAHA, live DB, or real messages.
 
 ## Gates
 
-- build: PASS
-- unit: PASS (63/63)
-- T18 focused integration: PASS (12/12)
-- full integration: BLOCKED (70 passed, 0 failed, 1 cancelled; existing native PostgreSQL SIGKILL worker-lease test timed out at 20 seconds)
+- `pnpm run build`: PASS
+- `pnpm test`: PASS (63/63)
+- Linux disposable integration: PASS (71/71; 0 failed; 0 cancelled)
+- regressions: PASS (26/26; 12 probes)
+- Golden: PASS (52/52; forbidden-effect detector 6/6)
 - migrations: PASS on fresh disposable PostgreSQL schema
 - foreign keys: PASS (0 failures; 41 FK constraints observed)
 - schema checksums: PASS (21 checksum rows observed)
-- spec: PASS
-- prompt wiring: PASS
-- regressions: BLOCKED by the same integration-suite timeout
-- Golden: BLOCKED by existing Windows `ERR_UNSUPPORTED_ESM_URL_SCHEME` absolute-path loader issue
-- diff check: PASS
-- secret scan: PASS
+- `pnpm run check:spec`: PASS
+- `pnpm run check:prompt-wiring`: PASS
+- `git diff --check`: PASS (only existing LF/CRLF normalization warnings)
+- secret scan: PASS; no credentials, runtime volumes, media, or secrets staged
 
 ## Evidence
 
 - `artifacts/qa/t18-safe-admin-verification.json`
 - `docs/qa/MASTER_PROGRESS.md`
 - `src/application/admin-service.ts`
+- `src/config.ts`
 - `src/http.ts`
 - `tests/integration.test.ts`
+- `Dockerfile`
 
-## Blockers and next action
+## Next action
 
-- Existing lease integration timeout prevents claiming a full regression/Golden green gate in this Windows runner.
-- Golden script has an existing Windows absolute-path ESM loader incompatibility.
-- Wait for the independent reviewer directive. Do not start T19/T20.
+Wait for the independent reviewer directive on PR #2. Do not start T19/T20.
