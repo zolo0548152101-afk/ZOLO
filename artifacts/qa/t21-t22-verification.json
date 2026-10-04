@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "work_unit": "PHASE-4-T21-T22-OBSERVABILITY-HARDENING",
-  "verified_source_sha": "616cde7a4d523929deb17fd96758e2d6270dd324",
-  "verification_started_at": "2026-10-04T12:45:00Z",
-  "verification_finished_at": "2026-10-04T13:03:40Z",
+  "verified_source_sha": "560ab5a82db838344002cbef3abbca06f63a33aa",
+  "verification_started_at": "2026-10-04T13:43:00Z",
+  "verification_finished_at": "2026-10-04T13:49:47Z",
   "runtime": {
     "local_node": "v24.19.0",
     "verification_node": "v24.21.0",
@@ -22,7 +22,7 @@
     ],
     "configurable_threshold_transitions": "PASS",
     "failed_import_and_integration_states": "PASS",
-    "diagnostic_redaction": "PASS",
+    "diagnostic_redaction": "PASS; authorization Bearer, standalone Bearer, and key/value forms",
     "bounded_context_bytes": 512,
     "observe_only": true
   },
@@ -37,9 +37,17 @@
       "status": "PASS",
       "disposable_only": true,
       "isolated_source_target": true,
-      "target_proof": "local_postgresql_host_explicit_disposable_database_and_application_name",
+      "target_proof": {
+        "application_name": "haim-qa-backup-restore",
+        "database_name_contract": true,
+        "source_database": "haim_core_backup_source",
+        "target_database": "haim_core_backup_target",
+        "distinct_database_identity": true
+      },
       "target_state_verification": "PASS",
       "media_content_and_metadata": "PASS",
+      "media_storage_key_resolution": "PASS",
+      "media_checksum_and_size_match": "PASS",
       "configuration_metadata": "PASS",
       "rpo_minutes_tested": 60,
       "rto_minutes_tested": 30,
@@ -57,8 +65,8 @@
     "golden": "52/52 PASS",
     "migration_fk_checksum": "PASS; FK failures 0",
     "backup_restore": "PASS; restored=true and target_verified=true",
-    "ci_verification_sha": "616cde7a4d523929deb17fd96758e2d6270dd324",
-    "ci_verification_runs": [37204416130, 37204413644],
+    "ci_verification_sha": "560ab5a82db838344002cbef3abbca06f63a33aa",
+    "ci_verification_runs": [37206883702, 37206881161],
     "secret_privacy_scan": "PASS",
     "diff_check": "PASS"
   },

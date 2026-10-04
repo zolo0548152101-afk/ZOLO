@@ -2,11 +2,11 @@
 
 phase: 4 / T21+T22 observability and hardening
 baseline_commit: d1cda7959bf18df9e98b26a8b0971d27970c7f28
-source_commit: 616cde7a4d523929deb17fd96758e2d6270dd324
+source_commit: 560ab5a82db838344002cbef3abbca06f63a33aa
 evidence_commit: this evidence-only handoff commit
 branch: qa-build
-ci_source_sha: 616cde7a4d523929deb17fd96758e2d6270dd324
-ci_verification_runs: 37204416130, 37204413644 (success)
+ci_source_sha: 560ab5a82db838344002cbef3abbca06f63a33aa
+ci_verification_runs: 37206883702, 37206881161 (success)
 
 ## Scope
 
@@ -20,19 +20,23 @@ ci_verification_runs: 37204416130, 37204413644 (success)
   lineage, integration/outbox state, media bytes/metadata, and configuration;
   it rejects non-disposable targets and runs against fresh isolated source and
   target databases.
+- Review corrections: media is written and resolved by the exact database
+  storage key with checksum/size verification; source/target identity is
+  normalized by host, port, and database; diagnostic redaction covers
+  authorization Bearer, standalone Bearer, and key/value forms.
 
 ## Gates
 
 - build/typecheck: PASS
 - unit: PASS (64/64)
-- targeted T21/T22: PASS (4/4)
+- targeted T21/T22: PASS (5/5)
 - disposable PostgreSQL integration: PASS (76/76)
 - Sheets importer: PASS (30/30)
 - regressions: PASS (26/26; 12 probes)
 - Golden: PASS (52/52)
 - migrations/FK/checksum: PASS; FK failures 0
-- backup/restore: PASS; `restored:true`, `target_verified:true`
-- CI on exact source SHA: PASS (runs 37204416130, 37204413644)
+- backup/restore: PASS; `restored:true`, `target_verified:true`, exact storage-key file/checksum/size verified
+- CI on exact source SHA: PASS (runs 37206883702, 37206881161)
 - diff check and secret/privacy scan: PASS
 
 ## Evidence
