@@ -3,7 +3,9 @@
 work_unit: T24 shadow qualification
 candidate_git_sha: 616524f8f069454d1f24b000623bec8b9405d745
 branch: qa-build
-status: verified_pending_publish
+status: deployed_and_reset_verified
+deployed_image: haim-bot-core:t24-e599be5
+service: whatsapp_haim-bot-core 1/1 healthy
 
 ## T24 result
 
@@ -15,6 +17,12 @@ status: verified_pending_publish
 - restart recovery leaves one committed request and one reply effect.
 - canonical gates: unit `64/64`, integration `77/77`, T21/T22 `5/5`, AI contract `9/9`, regressions `26/26`, Golden `52/52`, backup/restore PASS.
 - evidence file: `artifacts/qa/t24-shadow-verification.json` (handoff commit binds it to the source SHA).
+
+## Post-deploy reset
+
+- snapshot: `/var/backups/haim-qa/haim-reset-20261004T1755Z.sql` (SHA-256 `14dc81f575c69ee2b194029e6076e5d6b3ed5cd8ef1f848133435cc141d86bf8`)
+- media snapshot: `/var/backups/haim-qa/haim-reset-20261004T1755Z-media.tgz` (SHA-256 `15b81f08e538ebfab0c60b8801f43cf0256e4068e0f2208d75869166de6bdb33`)
+- post-reset: migrations `24`; operational counts and physical media files `0`; failed/retry jobs `0`.
 
 ## Completed recovery work
 
@@ -31,4 +39,4 @@ status: verified_pending_publish
 
 ## Next action
 
-Commit and publish this exact verified state, deploy the matching QA image, and only then begin the separately authorized WAHA contract gate. No real WAHA qualification conversation has started.
+The matching QA image is deployed and the post-deploy test-data reset is verified. Begin the separately authorized WAHA contract gate. No live 8/8 qualification batch has started.

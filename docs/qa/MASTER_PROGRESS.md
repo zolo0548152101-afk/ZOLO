@@ -1,5 +1,15 @@
 # Master Progress
 
+## 2026-10-04 T24 publication, deployment, and post-deploy reset
+
+- source commit: `616524f8f069454d1f24b000623bec8b9405d745`; evidence handoff: `e599be591f6c2670698690b66522f3923bc235a9`.
+- GitHub: both commits pushed to `origin/qa-build`; local working tree was clean before deployment.
+- deployed image: `haim-bot-core:t24-e599be5`; Swarm `whatsapp_haim-bot-core` converged at `1/1`; container health `healthy`; `/health` returned HTTP `200`.
+- post-deploy reset was authorized as internal test-data cleanup. Snapshot: `/var/backups/haim-qa/haim-reset-20261004T1755Z.sql`, SHA-256 `14dc81f575c69ee2b194029e6076e5d6b3ed5cd8ef1f848133435cc141d86bf8`; media snapshot: `/var/backups/haim-qa/haim-reset-20261004T1755Z-media.tgz`, SHA-256 `15b81f08e538ebfab0c60b8801f43cf0256e4068e0f2208d75869166de6bdb33`.
+- reset scope: `haim_core` operational records and the verified HAIM media volume only; migrations, location data, configuration, WAHA sessions, and other services were not deleted.
+- reset proof: migrations `24`, requests/messages/conversations/contacts/outbox/integration_outbox/media/counter `0`, failed/retry jobs `0`, physical media files `0`; service remained healthy.
+- next gate: authorized WAHA contract testing and live eight-conversation qualification. This deployment is not a claim that the live 8/8 batch has passed.
+
 ## 2026-10-04 T24 shadow qualification
 
 - verdict: PASS for isolated shadow qualification; deployment remains limited to the already-authorized QA service and real WAHA qualification has not started.
