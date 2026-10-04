@@ -15,16 +15,17 @@ for (const row of cases) {
     continue;
   }
   if (!supportedManagedIntents.has(row.expected_intent)) throw new Error(`unsupported_expected_intent:${row.id}`);
-  if (!Array.isArray(row.expected_command_types) || row.expected_command_types.length === 0)
-    throw new Error(`missing_expected_command_types:${row.id}`);
+  if (row.expected_command_types && (!Array.isArray(row.expected_command_types) || row.expected_command_types.length === 0))
+    throw new Error(`invalid_expected_command_types:${row.id}`);
   if (row.expected_managed_actions && !Array.isArray(row.expected_managed_actions))
     throw new Error(`expected_managed_actions_must_be_array:${row.id}`);
   if (row.forbidden_managed_actions && !Array.isArray(row.forbidden_managed_actions))
     throw new Error(`forbidden_managed_actions_must_be_array:${row.id}`);
 }
 if (!cases.some((row) => Array.isArray(row.input))) throw new Error("missing_multi_message_case");
-if (!cases.some((row) => row.expected_intent === "transport" && row.expected_command_types?.includes("counterparty")))
-  throw new Error("missing_direct_transport_case");
+if (!cases.some((row) => row.expected_intent === "transport" && !row.expected_command_types))
+  throw new Error("missing_freeform_transport_case");
+if (!cases.some((row) => row.expected_command_types?.length)) throw new Error("missing_command_contract_case");
 if (!cases.some((row) => row.expected_managed_actions?.includes("needs_human"))) throw new Error("missing_escalation_case");
 if (!cases.some((row) => row.forbidden_managed_actions?.length)) throw new Error("missing_forbidden_action_case");
 if (!cases.some((row) => row.mode === "notice")) throw new Error("missing_notice_case");

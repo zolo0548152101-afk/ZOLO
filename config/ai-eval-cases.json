@@ -3,7 +3,7 @@
   { "id": "donate-typo-hebrew", "input": "ישלי שידה למסירהה", "expected_intent": "donate", "expected_command_types": ["donate"], "forbidden_managed_actions": ["notify_donor", "notify_receiver"] },
   { "id": "request-fridge", "input": "אני מחפש מקרר למסירה בבית שאן", "expected_intent": "request", "expected_command_types": ["seek"] },
   { "id": "verification-notice", "mode": "notice", "input": "כן, אפשר לפנות לטל לצורך אימות", "expected_notice": true },
-  { "id": "direct-no-photo", "input": "אני רוצה למסור מיטה לטל 0584152101", "expected_intent": "transport", "expected_command_types": ["counterparty"], "forbidden_managed_actions": ["notify_donor", "notify_receiver", "needs_human"] },
+  { "id": "transport-freeform-no-photo", "input": "אני רוצה לתאם הובלה של מיטה לטל, ואין תמונה כרגע", "expected_intent": "transport", "forbidden_managed_actions": ["notify_donor", "notify_receiver", "needs_human"] },
   { "id": "rapid-burst-direct", "input": ["יש לי שולחן", "לטל 0584152101", "בבית שאן"], "expected_intent": "transport", "expected_command_types": ["counterparty"], "forbidden_managed_actions": ["notify_donor", "notify_receiver"] },
   { "id": "outside-area", "input": "יש לי ספה באילת", "expected_intent": "donate", "expected_command_types": ["donate"], "forbidden_managed_actions": ["notify_donor", "notify_receiver"] },
   { "id": "human-escalation", "input": "אני רוצה לדבר עם אדם", "expected_intent": "unclear", "expected_command_types": ["escalate"], "expected_managed_actions": ["needs_human"] }
