@@ -139,9 +139,9 @@ Phase 3 is closed. Phase 4 has not started and must not be started without the s
 
 - status: correction complete; independent review requested; T19/T20 not started.
 - baseline commit: `05bdd5ce61a27243a4b69623f3448380e59c7c71`.
-- source commit: `ebb404616e1389fc93b49620faa36851de6b6748`.
+- source commit: `1a42e23c0784845c651419c2e5e9b42997a7cc08`.
 - implementation: capability is derived only from server-configured credentials (`HAIM_ADMIN_TOKEN`, optional distinct read-only/destructive tokens); the caller-controlled `x-admin-capability` header cannot escalate. All successful named admin mutations now emit complete operation/timestamp/actor/capability/target/result audit records. Generic database PATCH/DELETE remains unavailable server-side. The disposable Docker verification stage now runs full integration, resets all disposable application and pg-boss schemas, then runs regressions and Golden.
-- focused verification: PASS — unit `63/63`; the full Linux integration run includes all T18 capability/audit tests.
+- focused verification: PASS — unit `64/64`; duplicate non-empty capability credentials fail closed, and the full Linux integration run includes complete audit-contract assertions for normal and destructive mutations.
 - full disposable Linux integration: PASS — `71 passed, 0 failed, 0 cancelled`.
 - regression gate: PASS — `26/26`, `12` probes.
 - Golden gate: PASS — `52/52` scenarios; forbidden-effect detector `6/6`.
