@@ -90,8 +90,13 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
   ].filter(Boolean);
   if (new Set(adminCapabilityTokens).size !== adminCapabilityTokens.length)
     throw new Error("admin_capability_credentials_must_be_distinct");
-  if ((c.NODE_ENV === "production" || c.BOT_MODE === "live") && !validateAdminSecret(c.HAIM_ADMIN_TOKEN))
-    throw new Error("admin_token_too_weak");
+  if (c.NODE_ENV === "production" || c.BOT_MODE === "live") {
+    if (!validateAdminSecret(c.HAIM_ADMIN_TOKEN)) throw new Error("admin_token_too_weak");
+    if (c.HAIM_ADMIN_READONLY_TOKEN && !validateAdminSecret(c.HAIM_ADMIN_READONLY_TOKEN))
+      throw new Error("admin_readonly_token_too_weak");
+    if (c.HAIM_ADMIN_DESTRUCTIVE_TOKEN && !validateAdminSecret(c.HAIM_ADMIN_DESTRUCTIVE_TOKEN))
+      throw new Error("admin_destructive_token_too_weak");
+  }
   if (c.BOT_MODE === "live" && c.DB_SCHEMA !== "haim_core")
     throw new Error("live_requires_haim_core");
   if (

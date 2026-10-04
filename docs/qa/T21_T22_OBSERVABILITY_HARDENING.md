@@ -3,47 +3,50 @@
 This work unit is repository/disposable-test only. It does not deploy, access
 live WAHA/PostgreSQL, or deliver alerts externally.
 
-## Operational signals
+## Operational contract
 
-`GET /admin/metrics` returns `observability` with bounded machine-readable
-signals. The default values below are test/operator defaults, not production
-commitments; they are configurable in the signal builder before an operational
-deployment:
+`GET /admin/metrics` exposes bounded signals for inbox/outbox backlog and age,
+uncertain and retrying delivery, dead letters, stale leases, FIFO blockers,
+prompt failures, failed or review-required Sheets imports, retrying
+integrations, and stale active integrations. Warning and critical transitions
+are driven by configurable `SloThresholds`; defaults are test/operator defaults.
 
-| Signal | Warning | Critical | Operator action |
-| --- | ---: | ---: | --- |
-| inbox/outbox count | 10 | 50 | inspect worker/provider queue |
-| inbox/outbox oldest age | 5 min | 15 min | inspect oldest item and worker |
-| uncertain delivery | 1 | 1 | resolve provider evidence before retry |
-| retrying delivery | 1 | 5 | inspect bounded retry cause |
-| dead-letter integration | 1 | 5 | review terminal failure before replay |
-| stale lease / FIFO blocker / prompt failure / Sheets review | 1 | 5 | follow the corresponding runbook action |
+Diagnostic context is bounded and never exposes credentials, tokens, private
+media, or raw provider errors. Integration `last_error` values are sanitized
+before entering the admin metrics response.
 
-Signal context is bounded to 512 bytes and contains counts/ages only. It never
-contains message text, tokens, credentials, or private media.
+## Admin hardening
 
-## Hardening contract
+- Production/live `HAIM_ADMIN_TOKEN` and every configured optional capability
+  token must be strong; empty optional capability tokens disable that capability.
+- Capability tokens remain distinct; callers cannot self-promote with
+  `x-admin-capability`.
+- Mutations remain same-origin and rate bounded.
+- Audit records recursively redact token/secret/password/authorization/cookie/
+  API-key/private-key/credential fields.
+- Secret rotation is an overlap simulation only; no real secret is rotated.
 
-- Production/live `HAIM_ADMIN_TOKEN` must be a non-repeating 32-character secret.
-- Configured capability tokens must remain distinct; callers cannot self-promote
-  with `x-admin-capability`.
-- Admin mutation requests remain same-origin and rate bounded (20 per route/IP/
-  token per 60 seconds). Read-only routes do not consume mutation budget.
-- Admin audit records recursively redact token/secret/password/authorization/
-  cookie/API-key/private-key/credential fields.
-- Secret rotation is an overlap simulation only: both secrets must be strong and
-  different; no real secret is rotated by tests.
+## Disposable backup/restore drill
 
-## Backup and restore drill
+The canonical Docker verification stage runs the drill in isolated disposable
+source and target databases. It requires `DRILL_CONFIRM=YES`,
+`DISPOSABLE_RESTORE=YES`, an explicit disposable database name, the fixed
+`application_name`, and local/PostgreSQL-only targets. It rejects live/core
+identifiers and missing proof of disposability.
 
-The disposable drill requires `DRILL_CONFIRM=YES` and
-`DISPOSABLE_RESTORE=YES`, rejects non-local database hosts, and requires a
-media root plus configuration file. It runs `pg_dump`, `pg_restore`, and a
-restore listing, then emits `backup-manifest.json` containing PostgreSQL,
-media-manifest, and configuration checksums. Missing components, invalid
-checksums, invalid paths, or non-positive sizes fail closed.
+The drill seeds and verifies contacts, request/parties/item, message/media and
+request-media linkage, integration/event/outbox state, Sheets import batch and
+lineage, media bytes/metadata, and configuration metadata. It dumps the source,
+restores into a clean disposable target, verifies target-side state and exact
+media/config checksums, and prints `restored:true` only after those checks pass.
 
-Test defaults are RPO 60 minutes and RTO 30 minutes for the disposable drill
-only. They are not production SLO/RPO/RTO commitments. Restore ordering is:
-PostgreSQL schema/data, media objects, configuration metadata, then checksum and
-business-invariant validation.
+Test-only defaults are RPO 60 minutes and RTO 30 minutes; these are not
+production commitments.
+
+## Verification evidence
+
+The exact source SHA and gate results are recorded in
+`artifacts/qa/t21-t22-verification.json` in the evidence-only handoff commit.
+The canonical Docker run includes targeted T21/T22 tests, PostgreSQL
+integration, Sheets importer tests, migration/FK checks, the disposable drill,
+regressions, and Golden scenarios.

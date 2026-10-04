@@ -7,6 +7,7 @@ import {
 } from "../src/application/observability.js";
 import {
   redactSecrets,
+  redactDiagnosticText,
   validateAdminSecret,
   rotationPlan,
 } from "../src/application/security.js";
@@ -21,12 +22,15 @@ test("T21 signals classify backlog, retry, terminal, stale and FIFO states", () 
   const snapshot: OperationalSnapshot = {
     inbox: { count: 11, oldestAgeSeconds: 301 },
     outbox: { count: 12, oldestAgeSeconds: 301, uncertainCount: 1 },
-    retryingDeliveries: 2,
-    deadLetter: 1,
+  retryingDeliveries: 2,
+    integrationRetryingDeliveries: 2,
+  deadLetter: 1,
+    integrationStaleActive: 1,
     staleLeases: 1,
     fifoBlockers: 1,
     promptFailures: 1,
-    sheetsReviewRequired: 1,
+  sheetsReviewRequired: 1,
+    sheetsFailed: 1,
   };
   const result = buildOperationalSignals(snapshot, DEFAULT_SLO_THRESHOLDS);
   assert.equal(result.status, "critical");
@@ -36,17 +40,39 @@ test("T21 signals classify backlog, retry, terminal, stale and FIFO states", () 
       "inbox_backlog",
       "outbox_backlog",
       "uncertain_delivery",
-      "retrying_delivery",
+      "outbox_retrying_delivery",
+      "integration_retrying_delivery",
       "dead_letter",
+      "integration_stale_active",
       "stale_lease",
       "fifo_blocker",
       "prompt_failure",
       "sheets_review_required",
+      "sheets_import_failed",
     ],
   );
   for (const signal of result.signals) {
     assert.ok(signal.context_json.length <= 512);
   }
+});
+
+test("T21 thresholds drive healthy-warning-critical transitions for integration and import signals", () => {
+  const base: OperationalSnapshot = {
+    inbox: { count: 0, oldestAgeSeconds: 0 },
+    outbox: { count: 0, oldestAgeSeconds: 0, uncertainCount: 0 },
+    retryingDeliveries: 0,
+    integrationRetryingDeliveries: 0,
+    deadLetter: 0,
+    integrationStaleActive: 0,
+    staleLeases: 0,
+    fifoBlockers: 0,
+    promptFailures: 0,
+    sheetsReviewRequired: 0,
+    sheetsFailed: 0,
+  };
+  assert.equal(buildOperationalSignals(base).status, "healthy");
+  assert.equal(buildOperationalSignals({ ...base, integrationRetryingDeliveries: 1, sheetsFailed: 1 }).status, "warning");
+  assert.equal(buildOperationalSignals({ ...base, integrationRetryingDeliveries: 5, integrationStaleActive: 5, sheetsFailed: 5 }).status, "critical");
 });
 
 test("T22 redaction removes secrets recursively and admin secrets are strong", () => {
@@ -60,6 +86,7 @@ test("T22 redaction removes secrets recursively and admin secrets are strong", (
     authorization: "[REDACTED]",
     nested: { password: "[REDACTED]", message: "safe" },
   });
+  assert.equal(redactDiagnosticText("adapter failed authorization=Bearer-top-secret token=private-value"), "adapter failed authorization=[REDACTED] token=[REDACTED]");
   assert.equal(validateAdminSecret("short"), false);
   const current = "A7!current-secret-rotation-2026-01";
   const next = "B8@next-secret-rotation-2026-02!!";
@@ -81,6 +108,33 @@ test("T22 redaction removes secrets recursively and admin secrets are strong", (
     LIVE_DEPENDENCIES_VERIFIED: "true",
     MEDIA_VOLUME_CONFIRMED: "true",
   }), /admin_token_too_weak/);
+  const strong = "A7!current-secret-rotation-2026-01";
+  assert.throws(() => readConfig({
+    NODE_ENV: "production",
+    DATABASE_URL: "postgres://test/test",
+    DB_SCHEMA: "haim_core",
+    BOT_MODE: "live",
+    AI_ENABLED: "false",
+    WAHA_WEBHOOK_HMAC_KEY: "h".repeat(32),
+    HAIM_ADMIN_TOKEN: strong,
+    HAIM_ADMIN_READONLY_TOKEN: "weak",
+    WAHA_API_KEY: "waha",
+    LIVE_DEPENDENCIES_VERIFIED: "true",
+    MEDIA_VOLUME_CONFIRMED: "true",
+  }), /admin_readonly_token_too_weak/);
+  assert.throws(() => readConfig({
+    NODE_ENV: "production",
+    DATABASE_URL: "postgres://test/test",
+    DB_SCHEMA: "haim_core",
+    BOT_MODE: "live",
+    AI_ENABLED: "false",
+    WAHA_WEBHOOK_HMAC_KEY: "h".repeat(32),
+    HAIM_ADMIN_TOKEN: strong,
+    HAIM_ADMIN_DESTRUCTIVE_TOKEN: "weak",
+    WAHA_API_KEY: "waha",
+    LIVE_DEPENDENCIES_VERIFIED: "true",
+    MEDIA_VOLUME_CONFIRMED: "true",
+  }), /admin_destructive_token_too_weak/);
 });
 
 test("T22 backup manifest requires every component and verifies checksums", async () => {

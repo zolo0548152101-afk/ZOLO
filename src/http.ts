@@ -22,6 +22,7 @@ import {
 import { parseWebhook, verifyHmac } from "./infrastructure/webhook.js";
 import { QUEUES } from "./infrastructure/queue.js";
 import { buildOperationalSignals, type OperationalSnapshot } from "./application/observability.js";
+import { redactDiagnosticText } from "./application/security.js";
 const uuid = z.uuid();
 const reason = z.string().trim().min(3).max(500);
 const isTuesdayDate = (value: string) => {
@@ -382,18 +383,27 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
         const promptFailures = await s.pool.query<{ count: number }>(
           "SELECT count(*)::int AS count FROM messages WHERE error_code ILIKE 'openai%' OR error_code ILIKE 'planner%' OR error_code ILIKE '%prompt%'",
         );
-        const sheetsReviewRequired = await s.pool.query<{ count: number }>(
-          "SELECT count(*)::int AS count FROM sheets_import_batches WHERE state='review_required'",
+        const sheetsImportStates = await s.pool.query<{ review_required: number; failed: number }>(
+          "SELECT count(*) FILTER (WHERE state='review_required')::int AS review_required, count(*) FILTER (WHERE state='failed')::int AS failed FROM sheets_import_batches",
+        );
+        const integrationRetrying = await s.pool.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM integration_outbox WHERE state='pending' AND error_class='retryable'",
+        );
+        const integrationStaleActive = await s.pool.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM integration_outbox WHERE state='active' AND last_attempt_at < clock_timestamp()-interval '60 seconds'",
         );
         const snapshot: OperationalSnapshot = {
           inbox: { count: Number(inbox.rows[0]?.pending ?? 0), oldestAgeSeconds: Number(inbox.rows[0]?.oldest_age_seconds ?? 0) },
           outbox: { count: Number(outboxAge.rows[0]?.count ?? 0), oldestAgeSeconds: Number(outboxAge.rows[0]?.oldest_age_seconds ?? 0), uncertainCount: Number(outboxAge.rows[0]?.uncertain_count ?? 0) },
           retryingDeliveries: Number(outboxAge.rows[0]?.retrying_count ?? 0),
+          integrationRetryingDeliveries: Number(integrationRetrying.rows[0]?.count ?? 0),
           deadLetter: (await s.pool.query<{ count: number }>("SELECT count(*)::int AS count FROM integration_outbox WHERE state='dead_letter'")).rows[0]?.count ?? 0,
+          integrationStaleActive: Number(integrationStaleActive.rows[0]?.count ?? 0),
           staleLeases: staleLeases.rows[0]?.count ?? 0,
           fifoBlockers: Object.values(blocked).reduce((sum, value) => sum + value, 0),
           promptFailures: promptFailures.rows[0]?.count ?? 0,
-          sheetsReviewRequired: sheetsReviewRequired.rows[0]?.count ?? 0,
+          sheetsReviewRequired: sheetsImportStates.rows[0]?.review_required ?? 0,
+          sheetsFailed: sheetsImportStates.rows[0]?.failed ?? 0,
         };
         return {
           ok: true,
@@ -416,7 +426,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
                FROM integration_outbox
               WHERE state<>'delivered' OR last_error IS NOT NULL
               ORDER BY event_id DESC LIMIT 100`,
-          )).rows,
+          )).rows.map((row) => ({ ...row, last_error: redactDiagnosticText(row.last_error) })),
           queues,
           blocked,
           ai: ai.rows[0],

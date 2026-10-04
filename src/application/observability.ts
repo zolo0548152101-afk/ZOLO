@@ -18,6 +18,18 @@ export type SloThresholds = {
   prompt_failure_critical: number;
   sheets_review_warning: number;
   sheets_review_critical: number;
+  sheets_failed_warning: number;
+  sheets_failed_critical: number;
+  integration_retrying_warning: number;
+  integration_retrying_critical: number;
+  integration_stale_active_warning: number;
+  integration_stale_active_critical: number;
+  uncertain_delivery_warning: number;
+  uncertain_delivery_critical: number;
+  outbox_retrying_warning: number;
+  outbox_retrying_critical: number;
+  dead_letter_warning: number;
+  dead_letter_critical: number;
 };
 
 export const DEFAULT_SLO_THRESHOLDS: SloThresholds = {
@@ -37,17 +49,32 @@ export const DEFAULT_SLO_THRESHOLDS: SloThresholds = {
   prompt_failure_critical: 5,
   sheets_review_warning: 1,
   sheets_review_critical: 5,
+  sheets_failed_warning: 1,
+  sheets_failed_critical: 5,
+  integration_retrying_warning: 1,
+  integration_retrying_critical: 5,
+  integration_stale_active_warning: 1,
+  integration_stale_active_critical: 5,
+  uncertain_delivery_warning: 1,
+  uncertain_delivery_critical: 1,
+  outbox_retrying_warning: 1,
+  outbox_retrying_critical: 5,
+  dead_letter_warning: 1,
+  dead_letter_critical: 5,
 };
 
 export type OperationalSnapshot = {
   inbox: { count: number; oldestAgeSeconds: number };
   outbox: { count: number; oldestAgeSeconds: number; uncertainCount: number };
   retryingDeliveries: number;
+  integrationRetryingDeliveries: number;
   deadLetter: number;
+  integrationStaleActive: number;
   staleLeases: number;
   fifoBlockers: number;
   promptFailures: number;
   sheetsReviewRequired: number;
+  sheetsFailed: number;
 };
 
 export type OperationalSignal = {
@@ -97,13 +124,16 @@ export function buildOperationalSignals(
   };
   add("inbox_backlog", snapshot.inbox.count, snapshot.inbox.oldestAgeSeconds, thresholds.inbox_count_warning, thresholds.inbox_count_critical, thresholds.inbox_age_warning_seconds, thresholds.inbox_age_critical_seconds, "Inspect the inbox worker and oldest unprocessed message.");
   add("outbox_backlog", snapshot.outbox.count, snapshot.outbox.oldestAgeSeconds, thresholds.outbox_count_warning, thresholds.outbox_count_critical, thresholds.outbox_age_warning_seconds, thresholds.outbox_age_critical_seconds, "Inspect the sender queue and provider acceptance state.");
-  addCount("uncertain_delivery", snapshot.outbox.uncertainCount, 1, 1, "Resolve each uncertain send from provider evidence before retrying.");
-  addCount("retrying_delivery", snapshot.retryingDeliveries, 1, 5, "Inspect retry cause and bounded retry budget.");
-  addCount("dead_letter", snapshot.deadLetter, 1, 5, "Review terminal integration failures and replay only after diagnosis.");
+  addCount("uncertain_delivery", snapshot.outbox.uncertainCount, thresholds.uncertain_delivery_warning, thresholds.uncertain_delivery_critical, "Resolve each uncertain send from provider evidence before retrying.");
+  addCount("outbox_retrying_delivery", snapshot.retryingDeliveries, thresholds.outbox_retrying_warning, thresholds.outbox_retrying_critical, "Inspect normal WhatsApp retry cause and bounded retry budget.");
+  addCount("integration_retrying_delivery", snapshot.integrationRetryingDeliveries, thresholds.integration_retrying_warning, thresholds.integration_retrying_critical, "Inspect integration retry cause and bounded retry budget.");
+  addCount("dead_letter", snapshot.deadLetter, thresholds.dead_letter_warning, thresholds.dead_letter_critical, "Review terminal integration failures and replay only after diagnosis.");
+  addCount("integration_stale_active", snapshot.integrationStaleActive, thresholds.integration_stale_active_warning, thresholds.integration_stale_active_critical, "Inspect the integration worker lease and recover only after confirming ownership.");
   addCount("stale_lease", snapshot.staleLeases, thresholds.stale_lease_warning, thresholds.stale_lease_critical, "Inspect worker heartbeat/lease ownership and recover the stale worker.");
   addCount("fifo_blocker", snapshot.fifoBlockers, thresholds.fifo_blocker_warning, thresholds.fifo_blocker_critical, "Inspect the predecessor message or blocked conversation key.");
   addCount("prompt_failure", snapshot.promptFailures, thresholds.prompt_failure_warning, thresholds.prompt_failure_critical, "Inspect bounded planner failure diagnostics and route to fallback/human review.");
   addCount("sheets_review_required", snapshot.sheetsReviewRequired, thresholds.sheets_review_warning, thresholds.sheets_review_critical, "Review the import batch reconciliation report before retrying apply.");
+  addCount("sheets_import_failed", snapshot.sheetsFailed, thresholds.sheets_failed_warning, thresholds.sheets_failed_critical, "Inspect the failed import batch and its row-level evidence before retrying.");
   const status: OverallOperationalStatus = signals.some((s) => s.severity === "critical") ? "critical" : signals.length ? "warning" : "healthy";
   return { status, generated_at: new Date().toISOString(), thresholds, signals };
 }

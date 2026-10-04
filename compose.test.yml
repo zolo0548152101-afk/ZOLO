@@ -18,6 +18,8 @@ services:
       target: verification
     environment:
       TEST_DATABASE_URL: postgres://postgres:disposable-test-only@postgres:5432/haim_core_test
+      BACKUP_DRILL_SOURCE_URL: postgres://postgres:disposable-test-only@postgres:5432/haim_core_test?application_name=haim-qa-backup-restore
+      BACKUP_DRILL_TARGET_URL: postgres://postgres:disposable-test-only@postgres:5432/haim_qa_disposable?application_name=haim-qa-backup-restore
       GIT_SHA: ${GIT_SHA:-unknown}
     volumes:
       - ./artifacts/qa:/app/artifacts/qa
