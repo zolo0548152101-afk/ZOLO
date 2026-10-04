@@ -1,0 +1,74 @@
+{
+  "stage": "4",
+  "work_unit": "T20",
+  "evidence_schema_version": 1,
+  "verified_source_sha": "dd9aae0ed91aa8e3341f179c077c763c9926ab4c",
+  "baseline_sha": "8d4b8e0dcc83e52ee3f1f6cd94452b9a8e1e6fe6",
+  "verification_started_at": "2026-10-04T08:54:00.000Z",
+  "verification_finished_at": "2026-10-04T09:00:44.3468348Z",
+  "node_version": "v24.19.0 host; v24.21.0 verification image",
+  "dependency_runtime": {
+    "runtime_image": "node:24-bookworm-slim",
+    "database": "PostgreSQL 17 disposable tmpfs",
+    "external_calls": false,
+    "live_systems_touched": false
+  },
+  "test_totals": {
+    "unit": { "passed": 64, "total": 64 },
+    "integration": { "passed": 76, "total": 76 },
+    "t20_import": { "passed": 30, "total": 30 },
+    "regressions": { "passed": 26, "total": 26 },
+    "golden": { "passed": 52, "total": 52 }
+  },
+  "typecheck": "PASS",
+  "migration_checksum": {
+    "file": "db/migrations/023_sheets_import_lifecycle.sql",
+    "sha256": "7c2a06d94f8ed5549247609f53a778c0e214f2b5f9be7da22adbeca7a584fce1"
+  },
+  "foreign_key_check_failures": 0,
+  "secret_scan": "PASS",
+  "config_tests": "PASS: exact 28-column header, mapping, locations, legacy mapping",
+  "protocol_tests": "PASS: CSV quoting/CRLF, deterministic source and row hashes, JSON CLI reports",
+  "policy_tests": "PASS: dry-run is non-mutating; disposable guard; review and blocking policy",
+  "state_machine_tests": "PASS: staged/validated/apply_ready/applied/failed/review_required/rolled_back",
+  "lease_tests": "PASS: existing integration lease/concurrency/recovery suite 76/76",
+  "external_effect_tests": "PASS: no Google, WAHA, server, production DB, or external calls",
+  "mapping": {
+    "status": "PASS: known statuses mapped deterministically; unknown status blocks",
+    "phones": "PASS: Israeli phone normalization and invalid-phone blocking",
+    "dates": "PASS: strict ISO date/timestamp parsing",
+    "locations": "PASS: allowlisted service_locations only",
+    "parties_items": "PASS: donor/receiver/item/quantity/floor/approval mapping",
+    "media": "PASS: reference preserved and linked; no fetch or reinterpretation"
+  },
+  "loss_review": {
+    "status": "PASS",
+    "fields": ["הערות", "סטטוס בוט", "נדרש טיפול אנושי", "תמונות WhatsApp"],
+    "apply_requires_allow_review": true,
+    "blocking_exceptions_bypassable": false
+  },
+  "dry_run": { "status": "PASS", "business_mutations": 0 },
+  "apply": { "status": "PASS", "lineage": true, "reconciliation": true },
+  "idempotency": { "status": "PASS", "same_source_rerun_no_duplicates": true },
+  "rollback": { "status": "PASS", "import_created_entities_only": true, "repeat_is_idempotent": true },
+  "failure_recovery": { "status": "PASS", "review_block_and_invalid_rows_tested": true, "transaction_rollback": true },
+  "blockers": [],
+  "architecture_deviations": [],
+  "safety": {
+    "production_access": false,
+    "server_access": false,
+    "ssh_access": false,
+    "easypanel_access": false,
+    "live_waha_access": false,
+    "live_db_access": false,
+    "real_messages_sent": false,
+    "deployment_performed": false,
+    "pr2_merged": false,
+    "t21_started": false
+  },
+  "evidence_files": [
+    "artifacts/qa/t20-sheets-import-verification.json",
+    "docs/qa/T20_SHEETS_IMPORT.md",
+    "db/migrations/023_sheets_import_lifecycle.sql"
+  ]
+}
