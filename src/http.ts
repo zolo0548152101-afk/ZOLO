@@ -6,9 +6,11 @@ import type { Config } from "./config.js";
 import { Runtime } from "./application/runtime.js";
 import {
   AdminRateLimiter,
-  adminAuditFields,
+  adminAuditRecord,
   assertAdminSameOrigin,
   assertDestructiveAllowed,
+  bindAdminCapability,
+  type AdminCapability,
   requireAdminCapability,
 } from "./application/admin-service.js";
 import { AppError, errorCode } from "./domain/types.js";
@@ -46,12 +48,18 @@ const adminStatusLabel: Record<string, string> = {
   closed: "הושלמה",
   rejected: "לא מתאימה",
 };
-function authorized(req: FastifyRequest, c: Config): boolean {
+function authenticatedCapability(req: FastifyRequest, c: Config): AdminCapability | null {
   const input = req.headers["x-admin-token"];
-  if (typeof input !== "string") return false;
-  const a = Buffer.from(input),
-    b = Buffer.from(c.HAIM_ADMIN_TOKEN);
-  return a.length === b.length && timingSafeEqual(a, b);
+  if (typeof input !== "string") return null;
+  const matches = (expected: string) => {
+    if (!expected) return false;
+    const a = Buffer.from(input), b = Buffer.from(expected);
+    return a.length === b.length && timingSafeEqual(a, b);
+  };
+  if (matches(c.HAIM_ADMIN_DESTRUCTIVE_TOKEN)) return "destructive";
+  if (matches(c.HAIM_ADMIN_READONLY_TOKEN)) return "read-only";
+  if (matches(c.HAIM_ADMIN_TOKEN)) return "normal";
+  return null;
 }
 export async function makeHttp(
   c: Config,
@@ -262,14 +270,15 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
     async (admin) => {
       const adminRateLimiter = new AdminRateLimiter();
       admin.addHook("onRequest", async (req) => {
-        if (!authorized(req, c)) throw new AppError("admin_unauthorized", 401);
+        const capability = authenticatedCapability(req, c);
+        if (!capability) throw new AppError("admin_unauthorized", 401);
+        bindAdminCapability(req, capability);
         if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) {
           assertAdminSameOrigin(req, c);
-          const capability = requireAdminCapability(req, "normal");
+          requireAdminCapability(req, "normal");
           adminRateLimiter.check(req, String(req.headers["x-admin-token"]));
           if ((req.method === "PATCH" || req.method === "DELETE") && req.url.startsWith("/admin/database/"))
             throw new AppError("admin_generic_mutation_unavailable", 404, "מסד הנתונים זמין לקריאה בלבד; השתמש בפעולת אדמין named.");
-          void capability;
         }
       });
       const wahaCall = async (path: string, init: RequestInit = {}) => {
@@ -307,6 +316,14 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           body: JSON.stringify({ name: session }),
         });
         if (!r.ok && r.status !== 422) throw new AppError("waha_reconnect_failed", 502, "לא ניתן להתחיל את סשן WhatsApp.");
+        const s = runtime.requireStore();
+        await s.transaction((client) => s.event(
+          client,
+          { trace_id: req.id },
+          "admin",
+          "admin_mutation",
+          adminAuditRecord(req, "reconnect_waha", `waha:${session}`, "success", { started: r.ok }),
+        ));
         return { ok: true, started: r.ok, session };
       });
       admin.get("/waha/qr", async (req) => {
@@ -573,7 +590,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
         return { ok: true };
       });
       admin.post("/database/clear-all", async (req) => {
-        const capability = assertDestructiveAllowed(req, c);
+        assertDestructiveAllowed(req, c);
         z.strictObject({ confirm: z.literal("מחק הכל") }).parse(req.body);
         const s = runtime.requireStore();
         const deleted: Record<string, number> = {};
@@ -607,19 +624,13 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           await remove("searches", "DELETE FROM searches");
           await remove("contacts", "DELETE FROM contacts");
           await client.query("UPDATE request_counter SET value=0 WHERE id=true");
-          await s.event(client, { trace_id: req.id }, "admin", "admin_test_data_cleared", {
-            operation: "clear_test_data",
-            target: "test_database",
-            result: "success",
-            actor: "admin-http",
-            capability,
-          });
+          await s.event(client, { trace_id: req.id }, "admin", "admin_test_data_cleared", adminAuditRecord(req, "clear_test_data", "test_database", "success", { deleted }));
         });
         runtime.log.warn({ trace_id: req.id, deleted }, "admin_database_cleared");
         return { ok: true, deleted };
       });
       admin.post("/database/clear-phone", async (req) => {
-        const capability = assertDestructiveAllowed(req, c);
+        assertDestructiveAllowed(req, c);
         const body = z
           .strictObject({ phone: z.string().min(3).max(40), confirm: z.literal("מחק מספר") })
           .parse(req.body);
@@ -680,13 +691,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           await remove("contact_identities", "DELETE FROM contact_identities WHERE contact_id=ANY($1::uuid[])", [ids]);
           await remove("searches", "DELETE FROM searches WHERE contact_id=ANY($1::uuid[])", [ids]);
           await remove("contacts", "DELETE FROM contacts WHERE id=ANY($1::uuid[])", [ids]);
-          await s.event(client, { trace_id: req.id }, "admin", "admin_test_phone_data_cleared", {
-            operation: "clear_test_phone_data",
-            target: phone,
-            result: "success",
-            actor: "admin-http",
-            capability,
-          });
+          await s.event(client, { trace_id: req.id }, "admin", "admin_test_phone_data_cleared", adminAuditRecord(req, "clear_test_phone_data", `phone:${phone}`, "success", { deleted }));
         });
         runtime.log.warn({ trace_id: req.id, phone, deleted }, "admin_phone_data_cleared");
         return { ok: true, phone, deleted };
@@ -709,7 +714,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             "INSERT INTO app_settings(key,value,updated_at) VALUES('bot_access',$1,clock_timestamp()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=EXCLUDED.updated_at",
             [JSON.stringify(access)],
           );
-          await s.event(client, { trace_id: req.id }, "admin", "bot_access_changed", { operation: "update_bot_access", ...access, ...adminAuditFields(req) });
+          await s.event(client, { trace_id: req.id }, "admin", "bot_access_changed", adminAuditRecord(req, "update_bot_access", "bot_access", "success", access));
         });
         return { ok: true, ...access };
       });
@@ -733,12 +738,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
               [conversation.id],
             );
           }
-          await s.event(client, { trace_id: req.id }, "admin", "conversation_reset", {
-            phone,
-            operation: "reset_conversation",
-            conversations: conversations.rowCount,
-            ...adminAuditFields(req),
-          });
+          await s.event(client, { trace_id: req.id }, "admin", "conversation_reset", adminAuditRecord(req, "reset_conversation", `phone:${phone}`, "success", { phone, conversations: conversations.rowCount }));
         });
         return { ok: true, phone };
       });
@@ -756,11 +756,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           await client.query(
             "UPDATE conversations SET mode='bot',selected_request_id=NULL,version=version+1",
           );
-          await s.event(client, { trace_id: req.id }, "admin", "all_conversations_reset", {
-            operation: "reset_all_conversations",
-            conversations: result.rowCount,
-            ...adminAuditFields(req),
-          });
+          await s.event(client, { trace_id: req.id }, "admin", "all_conversations_reset", adminAuditRecord(req, "reset_all_conversations", "all_conversations", "success", { conversations: result.rowCount }));
         });
         return { ok: true };
       });
@@ -860,6 +856,13 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             { phone, text: b.text },
             `admin-direct:${phone}:${trace_id}`,
           );
+          await s.event(
+            client,
+            { trace_id },
+            "admin",
+            "admin_mutation",
+            adminAuditRecord(req, "send_admin_message", `phone:${phone}`, "success", { outbox_id }),
+          );
           return { ok: true, outbox_id };
         });
       });
@@ -908,6 +911,15 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
               "simulation",
               captured,
             );
+          await simulation.requireStore().transaction((client) =>
+            simulation.requireStore().event(
+              client,
+              { trace_id: req.id },
+              "admin",
+              "admin_mutation",
+              adminAuditRecord(req, "simulate_message", `simulation:${result.id}`, "success", { message_id: result.id }),
+            ),
+          );
           return reply
             .code(202)
             .send({
@@ -961,7 +973,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             { trace_id: req.id },
             "admin",
             "request_resumed",
-            { reason: b.reason, operation: "resume_request", ...adminAuditFields(req) },
+            adminAuditRecord(req, "resume_request", `request:${r.id}`, "success", { reason: b.reason }),
             r.id,
           );
           return { ok: true, request: r };
@@ -982,7 +994,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             { trace_id: req.id },
             "admin",
             "conversation_resumed",
-            { operation: "resume_conversation", phone, reason: b.reason, ...adminAuditFields(req) },
+            adminAuditRecord(req, "resume_conversation", `phone:${phone}`, "success", { phone, reason: b.reason }),
           );
         });
         return { ok: true };
@@ -1020,7 +1032,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             { trace_id: req.id },
             "admin",
             "coordinated",
-            { operation: "coordinate_request", date: r.run_date, reason: b.reason, ...adminAuditFields(req) },
+            adminAuditRecord(req, "coordinate_request", `request:${r.id}`, "success", { date: r.run_date, reason: b.reason }),
             r.id,
           );
           for (const party of r.parties)
@@ -1056,7 +1068,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             { trace_id: req.id },
             "admin",
             "completed",
-            { reason: b.reason },
+            adminAuditRecord(req, "complete_request", `request:${r.id}`, "success", { reason: b.reason }),
             r.id,
           );
           return { ok: true, request: r };
@@ -1104,7 +1116,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             { trace_id: req.id },
             "admin",
             "capacity_changed",
-            { operation: "change_transport_capacity", date: p.date, ...b, ...adminAuditFields(req) },
+            adminAuditRecord(req, "change_transport_capacity", `transport:${p.date}`, "success", { date: p.date, ...b }),
           );
         });
         return { ok: true };
@@ -1138,7 +1150,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             { trace_id: req.id },
             "admin",
             "location_policy_changed",
-            { operation: "change_location_policy", ...b, ...adminAuditFields(req) },
+            adminAuditRecord(req, "change_location_policy", `location:${b.name}`, "success", b),
           );
         });
         return { ok: true };
@@ -1204,7 +1216,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             { trace_id: req.id },
             "admin",
             "outbox_resolved",
-            { operation: "resolve_outbox", outbox_id: p.id, ...b, ...adminAuditFields(req) },
+            adminAuditRecord(req, "resolve_outbox", `outbox:${p.id}`, "success", { outbox_id: p.id, ...b }),
           );
         });
         return { ok: true };
@@ -1235,9 +1247,13 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
              WHERE id=$1`,
             [p.id, b.state, b.provider_id],
           );
-          await s.event(client, { trace_id: req.id }, "system", "outbox_receipt", {
-            outbox_id: p.id, ...b,
-          });
+          await s.event(
+            client,
+            { trace_id: req.id },
+            "admin",
+            "outbox_receipt",
+            adminAuditRecord(req, "record_outbox_receipt", `outbox:${p.id}`, "success", { outbox_id: p.id, ...b }),
+          );
         });
         return { ok: true };
       });
@@ -1258,13 +1274,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           await s.queue.boss.retry(p.queue, p.id, {
             db: { executeSql: (text, values) => client.query(text, values) },
           });
-          await s.event(client, { trace_id: req.id }, "admin", "job_retried", {
-            queue: p.queue,
-            job_id: p.id,
-            operation: "retry_job",
-            reason: b.reason,
-            ...adminAuditFields(req),
-          });
+          await s.event(client, { trace_id: req.id }, "admin", "job_retried", adminAuditRecord(req, "retry_job", `job:${p.queue}:${p.id}`, "success", { queue: p.queue, job_id: p.id, reason: b.reason }));
         });
         return { ok: true };
       });

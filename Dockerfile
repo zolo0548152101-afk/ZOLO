@@ -10,7 +10,7 @@ RUN npm run build && npm test
 
 FROM build AS verification
 COPY db ./db
-CMD ["sh", "-c", "npm run test:regressions && npm run test:golden"]
+CMD ["sh", "-c", "npm run test:integration && node --input-type=module -e \"import pg from 'pg'; const pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL}); for (const schema of ['haim','haim_core_test','haim_core_test_jobs']) await pool.query('DROP SCHEMA IF EXISTS ' + schema + ' CASCADE'); await pool.end();\" && npm run test:regressions && npm run test:golden"]
 
 FROM node:24-bookworm-slim AS runtime
 ENV NODE_ENV=production PORT=3000

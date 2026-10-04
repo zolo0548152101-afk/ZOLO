@@ -4,12 +4,14 @@ import { AppError } from "../domain/types.js";
 
 export type AdminCapability = "read-only" | "normal" | "destructive";
 const rank: Record<AdminCapability, number> = { "read-only": 0, normal: 1, destructive: 2 };
+const authenticated = new WeakMap<object, AdminCapability>();
 
 export function adminCapability(req: FastifyRequest): AdminCapability {
-  const value = req.headers["x-admin-capability"];
-  if (value === undefined) return "normal";
-  if (value === "read-only" || value === "normal" || value === "destructive") return value;
-  throw new AppError("admin_capability_invalid", 400, "הרשאת האדמין אינה תקינה.");
+  return authenticated.get(req) ?? "read-only";
+}
+
+export function bindAdminCapability(req: FastifyRequest, capability: AdminCapability): void {
+  authenticated.set(req, capability);
 }
 
 export function requireAdminCapability(
@@ -53,6 +55,23 @@ export class AdminRateLimiter {
 
 export function adminAuditFields(req: FastifyRequest): { actor: string; capability: AdminCapability } {
   return { actor: "admin-http", capability: adminCapability(req) };
+}
+
+export function adminAuditRecord(
+  req: FastifyRequest,
+  operation: string,
+  target: string,
+  result = "success",
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    operation,
+    timestamp: new Date().toISOString(),
+    ...adminAuditFields(req),
+    target,
+    result,
+    ...extra,
+  };
 }
 
 export function assertDestructiveAllowed(req: FastifyRequest, c: Config): AdminCapability {

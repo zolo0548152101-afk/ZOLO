@@ -48,6 +48,7 @@ let cfg = config(),
   storage: LocalMediaStorage,
   pool: ReturnType<typeof makePool>,
   app: FastifyInstance,
+  runtime: Runtime,
   root = "";
 const ai = new FakePlanner(),
   channel = new FakeChannel();
@@ -55,7 +56,7 @@ let counter = 0;
 const phone = () => String(530000000 + ++counter);
 before(async () => {
   root = await mkdtemp(join(tmpdir(), "haim-integration-"));
-  cfg = config({ MEDIA_ROOT: root });
+  cfg = config({ MEDIA_ROOT: root, HAIM_ADMIN_DESTRUCTIVE_TOKEN: "test-destructive-token" });
   await migrate(cfg);
   pool = makePool(cfg, log);
   const guard = await pool.query<{ n: number }>(
@@ -77,7 +78,7 @@ before(async () => {
   storage = new LocalMediaStorage(cfg);
   await storage.init();
   engine = new Engine(s, ai, channel, storage, log, () => monday);
-  const runtime = new Runtime(cfg, log, {
+  runtime = new Runtime(cfg, log, {
     pool,
     planner: ai,
     channel,
@@ -1656,11 +1657,17 @@ test("admin database is read-only and exposes only named mutation operations", a
   });
   assert.equal(view.statusCode, 200);
   assert.deepEqual(view.json<{ editable_fields: string[] }>().editable_fields, []);
-  const readOnlyMutation = await app.inject({
+  const readOnlyApp = await makeHttp(
+    { ...cfg, HAIM_ADMIN_READONLY_TOKEN: "test-read-only-token" },
+    runtime,
+    null,
+  );
+  await readOnlyApp.ready();
+  const readOnlyMutation = await readOnlyApp.inject({
     method: "PATCH",
     url: `/admin/database/requests/${r.id}`,
     headers: {
-      "x-admin-token": cfg.HAIM_ADMIN_TOKEN,
+      "x-admin-token": "test-read-only-token",
       "x-admin-capability": "read-only",
     },
     payload: {
@@ -1668,6 +1675,7 @@ test("admin database is read-only and exposes only named mutation operations", a
     },
   });
   assert.equal(readOnlyMutation.statusCode, 403);
+  await readOnlyApp.close();
   const genericUpdate = await app.inject({
     method: "PATCH",
     url: `/admin/database/requests/${r.id}`,
@@ -1730,6 +1738,33 @@ test("destructive admin operations require test-only capability and explicit con
   });
   assert.equal(wrongCapability.statusCode, 403);
   assert.equal(Number((await pool.query("SELECT count(*) FROM messages")).rows[0].count), before);
+  const forgedEscalation = await app.inject({
+    method: "POST",
+    url: "/admin/database/clear-all",
+    headers: {
+      "x-admin-token": cfg.HAIM_ADMIN_TOKEN,
+      "x-admin-capability": "destructive",
+    },
+    payload: { confirm: "מחק הכל" },
+  });
+  assert.equal(forgedEscalation.statusCode, 403);
+  const readOnlyApp = await makeHttp(
+    { ...cfg, HAIM_ADMIN_READONLY_TOKEN: "test-read-only-token" },
+    runtime,
+    null,
+  );
+  await readOnlyApp.ready();
+  const readOnlyEscalation = await readOnlyApp.inject({
+    method: "POST",
+    url: "/admin/database/clear-all",
+    headers: {
+      "x-admin-token": "test-read-only-token",
+      "x-admin-capability": "destructive",
+    },
+    payload: { confirm: "מחק הכל" },
+  });
+  assert.equal(readOnlyEscalation.statusCode, 403);
+  await readOnlyApp.close();
   const wrongConfirmation = await app.inject({
     method: "PATCH",
     url: `/admin/database/requests/${r.id}`,
@@ -1741,7 +1776,7 @@ test("destructive admin operations require test-only capability and explicit con
     method: "POST",
     url: "/admin/database/clear-all",
     headers: {
-      "x-admin-token": cfg.HAIM_ADMIN_TOKEN,
+      "x-admin-token": cfg.HAIM_ADMIN_DESTRUCTIVE_TOKEN,
       "x-admin-capability": "destructive",
     },
     payload: { confirm: "מחק הכל" },
@@ -1895,7 +1930,7 @@ test("admin clear-all requires the exact destructive confirmation and resets tes
   const wrong = await app.inject({
     method: "POST",
     url: "/admin/database/clear-all",
-    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN, "x-admin-capability": "destructive" },
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_DESTRUCTIVE_TOKEN, "x-admin-capability": "destructive" },
     payload: { confirm: "לא" },
   });
   assert.equal(wrong.statusCode, 400);
@@ -1903,7 +1938,7 @@ test("admin clear-all requires the exact destructive confirmation and resets tes
   const cleared = await app.inject({
     method: "POST",
     url: "/admin/database/clear-all",
-    headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN, "x-admin-capability": "destructive" },
+    headers: { "x-admin-token": cfg.HAIM_ADMIN_DESTRUCTIVE_TOKEN, "x-admin-capability": "destructive" },
     payload: { confirm: "מחק הכל" },
   });
   assert.equal(cleared.statusCode, 200);

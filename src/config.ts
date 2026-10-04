@@ -41,6 +41,10 @@ const envSchema = z.object({
   // The deployment owner may deliberately use a short local admin PIN.
   // It is still required and never returned by the service.
   HAIM_ADMIN_TOKEN: z.string().min(4),
+  // Optional distinct capabilities. Empty values fail closed and are never
+  // accepted as credentials; callers cannot self-promote with a header.
+  HAIM_ADMIN_READONLY_TOKEN: z.string().default(""),
+  HAIM_ADMIN_DESTRUCTIVE_TOKEN: z.string().default(""),
   ADMIN_PHONE: z.string().default("584152101").transform(canonicalPhone),
   WAHA_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).default(10000),
   WAHA_MEDIA_ORIGINS: z.string().default(""),
