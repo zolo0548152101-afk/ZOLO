@@ -3,7 +3,10 @@
 work_unit: T25 canary qualification gate
 candidate_git_sha: 084293b82aa1cb1c72947a9d5661fcef0d26835b
 branch: qa-build
-status: shadow_gate_verified
+status: deployed_health_verified
+deployed_image: haim-bot-core:t25-c72c831
+service: whatsapp_haim-bot-core 1/1 healthy
+rollback_target: haim-bot-core:t24-e599be5
 
 ## T25 result
 
@@ -13,12 +16,14 @@ status: shadow_gate_verified
 - four required flow classes are explicitly gated: direct, open donation, self-transfer, and open request.
 - delivery/status/reconciliation evidence is required for every flow; any gap fails qualification.
 - rollback preserves inbox/outbox/provider receipts/snapshot/evidence and performs no destructive deletion.
-- no live canary, WAHA send, server mutation, or deployment was performed in T25.
+- T25 candidate was deployed with Swarm `start-first` and automatic rollback; the service converged at `1/1`.
+- `/health` returned HTTP 200 and `/ready` returned HTTP 200 with schema `haim_core`.
+- no live canary flow or WhatsApp message was run by this deployment step.
 - evidence file: `artifacts/qa/t25-canary-verification.json`.
 
 ## T25 boundary
 
-Live canary traffic remains a separate high-risk operational action requiring explicit release authorization, fresh snapshot/dependency evidence, and independent review. This commit implements and verifies the fail-closed shadow qualification gate only.
+Live canary traffic remains a separate high-risk operational action requiring explicit release authorization and fresh evidence. This deployment verified service health only; it is not a claim that four live canary flows or 8/8 WhatsApp qualification passed.
 
 work_unit: T24 shadow qualification
 candidate_git_sha: 616524f8f069454d1f24b000623bec8b9405d745

@@ -8,7 +8,9 @@
 - allowlist is normalized and fail-closed to the two authorized test recipients only: `0584152101`, `0536662043`; bot identity `0543414386` is not a recipient.
 - four flow classes are covered by the qualification contract: direct, open donation, self-transfer, open request.
 - rollback contract preserves inbox/outbox/provider receipts/snapshot/evidence and forbids destructive deletion.
-- live canary/WAHA/server/deployment was not run; it requires a separate explicit operational authorization and independent review.
+- candidate `haim-bot-core:t25-c72c831` deployed to `whatsapp_haim-bot-core` with `start-first` and automatic rollback to `haim-bot-core:t24-e599be5`.
+- service converged at `1/1`; `/health` and `/ready` returned HTTP 200; `/ready` reported schema `haim_core`.
+- no live canary flow or WhatsApp message was run; deployment health is not 4-flow or 8/8 qualification evidence.
 - evidence: `artifacts/qa/t25-canary-verification.json`, `docs/qa/T25_CANARY_CUTOVER.md`.
 
 ## 2026-10-04 T24 publication, deployment, and post-deploy reset
