@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { evaluateCases } from "../scripts/ai-eval.mjs";
+import { evaluationConfigEnv, evaluateCases } from "../scripts/ai-eval.mjs";
+
+test("remote evaluation always isolates its configuration from production runtime validation", () => {
+  const env = evaluationConfigEnv({ NODE_ENV: "production", BOT_MODE: "live", DB_SCHEMA: "haim_core" });
+  assert.equal(env.NODE_ENV, "test");
+  assert.equal(env.BOT_MODE, "simulation");
+  assert.equal(env.DB_SCHEMA, "haim_core_sim");
+});
 
 test("remote evaluator preserves burst history and accepts the compatible planner contract", async () => {
   const seen = [];

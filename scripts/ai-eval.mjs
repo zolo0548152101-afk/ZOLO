@@ -36,6 +36,21 @@ export function buildEvalContext(input) {
   };
 }
 
+export function evaluationConfigEnv(env) {
+  return {
+    ...env,
+    // A remote prompt eval must not inherit live-runtime validation or connect
+    // to its database/transport. The paid call receives synthetic data only.
+    NODE_ENV: "test",
+    BOT_MODE: "simulation",
+    DB_SCHEMA: "haim_core_sim",
+    AI_ENABLED: "true",
+    DATABASE_URL: "postgres://unused/unused",
+    HAIM_ADMIN_TOKEN: "eval-only-not-used-admin-token-0000000",
+    WAHA_WEBHOOK_HMAC_KEY: "eval-only-not-used-webhook-key-0000000",
+  };
+}
+
 function evaluateResult(row, result) {
   const commands = Array.isArray(result?.plan?.commands) ? result.plan.commands : [];
   const commandTypes = commands.map((command) => command.type);
@@ -139,11 +154,7 @@ async function main() {
   const [{ readConfig }, { OpenAIPlanner }] = await Promise.all([
     import("../dist/config.js"), import("../dist/infrastructure/ai.js"),
   ]);
-  const c = readConfig({
-    ...process.env, BOT_MODE: "simulation", DB_SCHEMA: "haim_core_sim", AI_ENABLED: "true",
-    DATABASE_URL: "postgres://unused/unused", HAIM_ADMIN_TOKEN: "eval-only-not-used-admin-token-0000000",
-    WAHA_WEBHOOK_HMAC_KEY: "eval-only-not-used-webhook-key-0000000",
-  });
+  const c = readConfig(evaluationConfigEnv(process.env));
   const cases = JSON.parse(await readFile(resolve(process.cwd(), "config/ai-eval-cases.json"), "utf8"));
   if (cases.length < 8) throw new Error("ai_eval_requires_eight_cases");
   const planner = new OpenAIPlanner(c);
