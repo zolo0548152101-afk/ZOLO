@@ -2,7 +2,7 @@
 
 phase: 4 / T20 legacy Sheets import and reconciliation
 baseline_commit: 8d4b8e0dcc83e52ee3f1f6cd94452b9a8e1e6fe6
-source_commit: dd9aae0ed91aa8e3341f179c077c763c9926ab4c
+source_commit: 442c53bbaeb18146270e1d7bea2f13fd0b58c6d8
 evidence_commit: pending (this file is committed in the evidence-only handoff)
 branch: qa-build
 push_success_before_handoff: pending
@@ -21,7 +21,7 @@ working_tree_before_handoff: clean after source commit
 - build/typecheck: PASS
 - unit: PASS (64/64)
 - disposable PostgreSQL integration: PASS (76/76; 0 failed; 0 cancelled)
-- T20 importer/negative tests: PASS (30/30; dry-run, review block, apply, idempotency, lineage, reconciliation, rollback)
+- T20 importer/negative tests: PASS (30/30 executable assertions; dry-run, review block, apply, idempotency, business-value reconciliation, lineage, rollback)
 - regressions: PASS (26/26; 12 probes)
 - Golden: PASS (52/52)
 - spec, prompt wiring, probes, locations, legacy mapping: PASS
