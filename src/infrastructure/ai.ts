@@ -307,30 +307,29 @@ export class OpenAIPlanner implements Planner {
     }
     const translated = translate(payload, ctx, text);
     // The hosted OpenAI prompt is still the old phrasing shape, so it often
-    // invents approve_self from any «מאשר» and skips addresses/consent. Until a
-    // dedicated decode prompt is published, prefer rulePlan whenever it matches;
-    // AI still owns unclear (understood=false) and post-commit phrasing.
+    // invents approve_self from any «מאשר» and skips addresses/consent — and
+    // also false-negatives short approvals as unclear. Until a dedicated
+    // decode prompt is published, prefer rulePlan whenever it matches, even
+    // over AI unclear. AI still owns unclear only when rules miss, plus
+    // post-commit phrasing.
     const deterministic = rulePlan(ctx);
-    const plan =
-      translated.understood === false
-        ? translated.plan
-        : deterministic ?? translated.plan;
+    const plan = deterministic ?? translated.plan;
+    const understood = deterministic ? true : translated.understood;
     return {
-      understood: translated.understood,
+      understood,
       plan,
       metadata: {
         provider: "openai_responses_decode",
         prompt_id: promptId,
         prompt_version: promptVersion,
         model: this.c.OPENAI_MODEL,
-        action_source:
-          translated.understood === false
+        action_source: deterministic
+          ? "ai_decode_bridged_rules"
+          : translated.understood === false
             ? "ai_decode_unclear"
-            : deterministic
-              ? "ai_decode_bridged_rules"
-              : "ai_decode",
-        understood: translated.understood,
-        bridged_rules: Boolean(deterministic) && translated.understood !== false,
+            : "ai_decode",
+        understood,
+        bridged_rules: Boolean(deterministic),
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,
