@@ -5,6 +5,7 @@
 
 understood=false רק כשאי אפשר להבין את הכוונה. אז commands ריק.
 אל תנחש. שדה שלא נאמר = null.
+אם יש רמז חלקי (למשל «אני רוצה למסור» בלי למי) עדיף understood=true עם הפקודות החלקיות שיש, והקוד ישאל את מה שחסר.
 
 פקודות:
 - donate: פתיחת מסירה. items, counterparty_phone, counterparty_name, direct, free, working.

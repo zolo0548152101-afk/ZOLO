@@ -42,6 +42,7 @@ import {
   applyClaimGuard,
   CLARIFY_REPLY,
   FAULT_REPLY,
+  probeReply,
 } from "../domain/ai-guards.js";
 
 export class Engine {
@@ -173,9 +174,28 @@ export class Engine {
   async processNext(triggerId: string, lastAiAttempt = false): Promise<void> {
     const trigger = await this.s.message(triggerId);
     if (!trigger.phone) return;
-    // WhatsApp can deliver several short messages in one burst. Give the
-    // sender a small coalescing window so one reply covers the whole burst.
-    await delay(900);
+    // WhatsApp users often split one thought across several bubbles. Wait for
+    // a real quiet window after the newest message before merging the burst.
+    const quietMs = this.s.config.MESSAGE_COALESCE_QUIET_MS;
+    const maxMs = this.s.config.MESSAGE_COALESCE_MAX_MS;
+    const started = Date.now();
+    while (Date.now() - started < maxMs) {
+      const remaining = maxMs - (Date.now() - started);
+      await delay(Math.min(quietMs, remaining));
+      const newest = await this.s.pool.query<{ age_ms: number }>(
+        `SELECT GREATEST(0, (extract(epoch FROM clock_timestamp()-m.received_at)*1000))::int AS age_ms
+           FROM messages m JOIN contacts c ON c.id=m.contact_id
+          WHERE c.phone=$1 AND m.processed_at IS NULL
+          ORDER BY m.seq DESC LIMIT 1`,
+        [trigger.phone],
+      );
+      if (!newest.rows[0]) return;
+      if (newest.rows[0].age_ms >= quietMs) break;
+      const waitMore = quietMs - newest.rows[0].age_ms;
+      const cap = maxMs - (Date.now() - started);
+      if (cap <= 0) break;
+      await delay(Math.min(waitMore, cap));
+    }
     const pending = await this.s.pool.query<{
       id: string;
       text: string;
@@ -223,9 +243,9 @@ export class Engine {
         generation = nextGeneration.rows[0]!.generation;
         const created = await c.query<{ id: string }>(
           `INSERT INTO conversation_turns(conversation_id,generation,deadline_at)
-           VALUES($1,$2,clock_timestamp()+interval '900 milliseconds')
+           VALUES($1,$2,clock_timestamp()+($3::int * interval '1 millisecond'))
            RETURNING id`,
-          [locked.rows[0]!.conversation_id, generation],
+          [locked.rows[0]!.conversation_id, generation, quietMs],
         );
         turnId = created.rows[0]!.id;
       }
@@ -255,7 +275,9 @@ export class Engine {
       pending.rows.every((m) => m.kind === "text" && m.media_state === "none")
     ) {
       const last = pending.rows.at(-1)!;
-      const mergedText = pending.rows.map((m) => m.text).filter(Boolean).join("\n");
+      const parts = pending.rows.map((m) => m.text.trim()).filter(Boolean);
+      const shortBurst = parts.length > 1 && parts.every((part) => part.length <= 48);
+      const mergedText = parts.join(shortBurst ? " " : "\n");
       const mergedContacts = pending.rows.flatMap((m) => m.contacts);
       await this.s.transaction(async (c) => {
         const current = await c.query<{ id: string }>(
@@ -455,24 +477,56 @@ export class Engine {
     );
   }
 
-  private async unclearCount(
+  private async consecutiveReplyCount(
     conversationId: string,
     beforeSeq: string,
+    match: (reply: string) => boolean,
     c: { query: Store["pool"]["query"] } = this.s.pool,
   ): Promise<number> {
     const rows = await c.query<{ reply: string | null }>(
       `SELECT reply FROM messages
         WHERE conversation_id=$1 AND seq<$2 AND processed_at IS NOT NULL
           AND coalesce(error_code,'') NOT LIKE 'coalesced_into:%'
+          AND coalesce(error_code,'') NOT LIKE 'superseded_by:%'
         ORDER BY seq DESC LIMIT 8`,
       [conversationId, beforeSeq],
     );
     let count = 0;
     for (const row of rows.rows) {
-      if ((row.reply ?? "").trim() === CLARIFY_REPLY) count += 1;
+      if (match((row.reply ?? "").trim())) count += 1;
       else break;
     }
     return count;
+  }
+
+  private async unclearCount(
+    conversationId: string,
+    beforeSeq: string,
+    c: { query: Store["pool"]["query"] } = this.s.pool,
+  ): Promise<number> {
+    return this.consecutiveReplyCount(
+      conversationId,
+      beforeSeq,
+      (reply) =>
+        reply === CLARIFY_REPLY ||
+        /^(?:למי תרצה למסור|איזה פריט|מה תרצה לעשות|מה תרצה לקבל|מאיפה או ממי)/u.test(
+          reply,
+        ),
+      c,
+    );
+  }
+
+  private async faultCount(
+    conversationId: string,
+    beforeSeq: string,
+    c: { query: Store["pool"]["query"] } = this.s.pool,
+  ): Promise<number> {
+    return this.consecutiveReplyCount(
+      conversationId,
+      beforeSeq,
+      (reply) => reply === FAULT_REPLY,
+      c,
+    );
   }
 
   private async finishFault(id: string, error: unknown): Promise<void> {
@@ -480,9 +534,43 @@ export class Engine {
       const ctx = await this.s.context(id, c, true);
       if (ctx.message.processed_at) return;
       const phone = ctx.conversation.phone;
+      const prior = await this.faultCount(ctx.conversation.id, ctx.message.seq, c);
+      const next = prior + 1;
       await this.s.event(c, ctx.message, "system", "ai_fault", {
         code: errorCode(error),
+        fault_count: next,
       });
+      // Two clear AI/API failures → human. Conversational probes never escalate here.
+      if (next >= 2) {
+        const open =
+          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+          ctx.requests.find(
+            (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
+          ) ??
+          null;
+        if (open) {
+          open.status = "human";
+          open.human_reason = "ai_fault_after_retries";
+          await this.s.save(c, open);
+        }
+        await this.alert(c, ctx, "ai_fault_after_retries", FAULT_REPLY, open);
+        await this.s.outbound(
+          c,
+          ctx.message,
+          { phone, text: FAULT_REPLY },
+          `reply:${id}`,
+          open?.id ?? null,
+        );
+        await c.query(
+          "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
+          [id, FAULT_REPLY, "openai_failure_escalated"],
+        );
+        await c.query(
+          "UPDATE conversations SET mode='human',version=version+1 WHERE id=$1",
+          [ctx.conversation.id],
+        );
+        return;
+      }
       await this.s.outbound(
         c,
         ctx.message,
@@ -498,65 +586,30 @@ export class Engine {
   }
 
   private async finishUnclear(id: string): Promise<void> {
-    const deferred: {
-      outboxId: string;
-      notice: Notice;
-      requestId: string | null;
-    }[] = [];
     await this.s.transaction(async (c) => {
       const ctx = await this.s.context(id, c, true);
       if (ctx.message.processed_at) return;
       const phone = ctx.conversation.phone;
       const prior = await this.unclearCount(ctx.conversation.id, ctx.message.seq, c);
       const next = prior + 1;
-      if (next >= 3) {
-        const open =
-          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-          ctx.requests.find(
-            (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
-          ) ??
-          null;
-        if (open) {
-          open.status = "human";
-          open.human_reason = "unclear_after_two_clarifications";
-          await this.s.save(c, open);
-          await this.alert(
-            c,
-            ctx,
-            "unclear_after_two_clarifications",
-            HUMAN_REPLY,
-            open,
-          );
-        }
-        await this.s.event(c, ctx.message, phone, "unclear_escalated", {
-          unclear_count: next,
-        }, open?.id ?? null);
-        await c.query(
-          "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
-          [id, null, "unclear_escalated"],
-        );
-        await c.query(
-          "UPDATE conversations SET mode='human',version=version+1 WHERE id=$1",
-          [ctx.conversation.id],
-        );
-        return;
-      }
+      const reply = probeReply(ctx.message.text);
+      // Keep probing. Human escalation is reserved for repeated AI/API faults.
       await this.s.outbound(
         c,
         ctx.message,
-        { phone, text: CLARIFY_REPLY },
+        { phone, text: reply },
         `reply:${id}`,
         null,
       );
       await this.s.event(c, ctx.message, phone, "unclear_clarify", {
         unclear_count: next,
+        probe: reply !== CLARIFY_REPLY,
       });
       await c.query(
         "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
-        [id, CLARIFY_REPLY],
+        [id, reply],
       );
     });
-    void deferred;
   }
 
   private async finish(

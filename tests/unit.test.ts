@@ -1962,6 +1962,14 @@ test("claim-guard drops invented save/approval claims", async () => {
   assert.match(FAULT_REPLY, /תקלה/);
 });
 
+test("probeReply asks concrete follow-ups instead of generic unclear", async () => {
+  const { probeReply } = await import("../src/domain/ai-guards.js");
+  assert.match(probeReply("אני רוצה"), /למסור פריט או לקבל/);
+  assert.match(probeReply("אני רוצה למסור"), /למי תרצה למסור/);
+  assert.match(probeReply("אני רוצה למסור לטל"), /איזה פריט/);
+  assert.match(probeReply("אני רוצה למסור לטל מנורה"), /כתוב את זה שוב/);
+});
+
 test("translate maps explicit approve_self and refuses unclear", async () => {
   const { translate } = await import("../src/infrastructure/ai.js");
   const request = sampleRequest();

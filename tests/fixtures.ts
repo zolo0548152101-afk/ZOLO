@@ -34,6 +34,8 @@ export function config(extra: Partial<Config> = {}): Config {
       WAHA_WEBHOOK_HMAC_KEY: "test-only-hmac-key-not-a-secret-000000",
       HAIM_ADMIN_TOKEN: "test-only-admin-key-not-a-secret-00000",
       MEDIA_ROOT: "/tmp/haim-v5-test-media",
+      MESSAGE_COALESCE_QUIET_MS: "50",
+      MESSAGE_COALESCE_MAX_MS: "100",
     }),
     ...extra,
   };
