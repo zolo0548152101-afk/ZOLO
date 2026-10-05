@@ -565,13 +565,6 @@ export class Commands {
       } catch (error) {
         const actor = r.parties.find((candidate) => candidate.phone === phone);
         const receiver = r.parties.find((candidate) => candidate.role === "receiver");
-        const createdByThisMessage = await c.query<{ present: boolean }>(
-          `SELECT EXISTS(
-             SELECT 1 FROM request_events
-              WHERE request_id=$1 AND message_id=$2 AND event_type='command.donate'
-           ) AS present`,
-          [r.id, ctx.message.id],
-        );
         const onlyFillsMissingReceiverFields = Boolean(
           receiver &&
           (!cmd.name || !receiver.name || receiver.name === cmd.name) &&
@@ -579,13 +572,12 @@ export class Commands {
           (!cmd.address || !receiver.address || receiver.address === cmd.address) &&
           (cmd.floor === null || receiver.floor === null || receiver.floor === cmd.floor),
         );
-        // In a direct handoff the donor may include the receiver's destination
-        // in the same opening message. Store those facts as provisional so the
-        // receiver can verify a complete summary instead of being asked for
-        // information that was already supplied. This exception is deliberately
-        // limited to the request-creation message, empty/same fields, and the
-        // period before the receiver has approved. Later cross-party edits stay
-        // forbidden.
+        // In a direct handoff the donor may supply the receiver's destination
+        // ("כתובת היעד…"), either in the opening message or together with
+        // later consent to contact them. Store those facts as provisional so
+        // the receiver can verify a complete summary. Keep this limited to
+        // empty/same fields and the period before the receiver has approved;
+        // later cross-party edits stay forbidden.
         if (
           !(error instanceof AppError && error.code === "forbidden_party") ||
           r.origin !== "direct" ||
@@ -593,7 +585,6 @@ export class Commands {
           actor?.role !== "donor" ||
           !receiver ||
           receiver.approved_at !== null ||
-          !createdByThisMessage.rows[0]?.present ||
           !onlyFillsMissingReceiverFields
         )
           throw error;

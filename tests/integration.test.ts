@@ -789,6 +789,52 @@ test("donor cannot overwrite receiver destination after the direct request creat
   assert.equal(unchangedReceiver.floor, 2);
 });
 
+test("donor can fill missing receiver destination together with contact consent", async () => {
+  const donor = phone(), receiver = phone();
+  await message(
+    donor,
+    `בדיקת יעד: יש לי מנורה שולחנית תקינה למסירה ישירות לטל ${receiver}. אני מבית שאן, האיסוף מרחוב העלייה 5 קומה 2. אין לי תמונה כרגע.`,
+  );
+  const request = (await s.active(donor))[0]!;
+  assert.equal(request.origin, "direct");
+  assert.equal(request.items[0]?.description, "מנורה");
+  const before = request.parties.find((party) => party.role === "receiver")!;
+  assert.equal(before.settlement, null);
+  assert.equal(before.address, null);
+
+  const contacted = await message(
+    donor,
+    "טל כהן, כתובת היעד בית שאן רחוב המלך 8 קומה 1. מאשר לפנות אליה לאימות.",
+    [
+      {
+        type: "details",
+        request_number: request.number,
+        role: "receiver",
+        name: null,
+        settlement: "בית שאן",
+        address: "רחוב המלך 8",
+        floor: 1,
+      },
+      {
+        type: "contact_counterparty",
+        request_number: request.number,
+        contact: true,
+      },
+    ],
+  );
+  assert.doesNotMatch(contacted.row.reply ?? "", /טיפול אנושי/);
+  assert.match(contacted.row.reply ?? "", /נפנה לצד השני|אשלח|אימות/);
+  const after = (await s.request(request.id)).parties.find((party) => party.role === "receiver")!;
+  assert.equal(after.settlement, "בית שאן");
+  assert.match(after.address ?? "", /רחוב המלך 8/);
+  assert.equal(after.floor, 1);
+  assert.equal((await s.request(request.id)).verification_contacted, true);
+  const notice = (await outputs(contacted.id)).find((row) => row.phone === receiver)?.text ?? "";
+  assert.match(notice, /מנורה/);
+  assert.match(notice, /בית שאן/);
+  assert.match(notice, /רחוב המלך 8/);
+});
+
 test("a contact candidate can convert an open donation before the photo gate", async () => {
   const donor = phone(), receiver = phone(), cmd = donate("מיטה", "bed");
   const started = await message(donor, "רוצה למסור מיטה", [cmd]);
