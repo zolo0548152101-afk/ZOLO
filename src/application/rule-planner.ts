@@ -385,6 +385,52 @@ export function rulePlan(ctx: Context): Plan | null {
     return plan(text, commands);
   }
 
+  // A named handoff often arrives as two messages: "רוצה למסור לטל" then
+  // "מיטה". Keep the pending name and open the direct request when the item
+  // finally appears, without asking the AI to invent facts.
+  if (
+    item &&
+    !requesterIntent &&
+    (ctx.conversation.pending_counterparty_name || hasPartialNamedHandoff(ctx))
+  ) {
+    const recipientName =
+      ctx.conversation.pending_counterparty_name ??
+      namedRecipientName(
+        ctx.history
+          .filter((entry) => entry.role === "user")
+          .slice(-3)
+          .map((entry) => entry.content)
+          .join("\n"),
+      );
+    const recipientPhone =
+      ctx.conversation.pending_counterparty_phone ??
+      standalonePhone(text) ??
+      namedRecipientPhone(text);
+    return plan(text, [
+      {
+        type: "donate",
+        items: [{ ...item, quantity: 1 }],
+        counterparty_phone: recipientPhone,
+        counterparty_name: recipientName,
+        direct: true,
+        free: true,
+        working: true,
+      },
+    ]);
+  }
+
+  // Named handoff without an item yet: remember the recipient and ask only
+  // for the missing item. Do not escalate or invent a donation.
+  if (!item && directHandoffIntent(text))
+    return plan(text, [{ type: "next" }]);
+  if (
+    !item &&
+    ctx.conversation.pending_counterparty_name &&
+    !activeRequest(ctx) &&
+    (standalonePhone(text) || ctx.message.contacts[0]?.phone)
+  )
+    return plan(text, [{ type: "next" }]);
+
   // A general request must start a search even when older requests exist in
   // the database.  Conversation reset hides those requests from the context;
   // this guard also makes the intent unambiguous for short/slang messages.

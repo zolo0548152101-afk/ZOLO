@@ -57,7 +57,7 @@ let counter = 0;
 const phone = () => String(530000000 + ++counter);
 before(async () => {
   root = await mkdtemp(join(tmpdir(), "haim-integration-"));
-  cfg = config({ MEDIA_ROOT: root, HAIM_ADMIN_DESTRUCTIVE_TOKEN: "test-destructive-token" });
+  cfg = config({ MEDIA_ROOT: root, HAIM_ADMIN_DESTRUCTIVE_TOKEN: "test-destructive-token", INTEGRATION_DISPATCH: true });
   await migrate(cfg);
   pool = makePool(cfg, log);
   const guard = await pool.query<{ n: number }>(

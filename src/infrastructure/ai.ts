@@ -3,23 +3,12 @@ import { z } from "zod";
 import type { Config } from "../config.js";
 import {
   AppError,
-  type Command,
   type Context,
-  type ItemKind,
   type Notice,
   type Plan,
   type Request,
 } from "../domain/types.js";
-import {
-  donationIntent,
-  directHandoffIntent,
-  explicitApproval,
-  ambiguousStreetCity,
-  cityOutsideStreet,
-  streetPhrase,
-  grounded,
-  nextQuestion,
-} from "../domain/policies.js";
+import { nextQuestion } from "../domain/policies.js";
 
 export interface Planner {
   plan(
@@ -55,24 +44,6 @@ const managedResponseSchema = z
   .passthrough();
 type ManagedResponse = z.infer<typeof managedResponseSchema>;
 
-const textValue = (updates: Record<string, unknown>, key: string): string | null => {
-  const value = updates[key];
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed && trimmed.toLowerCase() !== "null" ? trimmed : null;
-};
-
-const numberValue = (
-  updates: Record<string, unknown>,
-  key: string,
-): number | null => {
-  const value = updates[key];
-  if (typeof value === "number" && Number.isInteger(value)) return value;
-  if (typeof value === "string" && /^\s*-?\d+\s*$/.test(value))
-    return Number(value);
-  return null;
-};
-
 const boolValue = (
   updates: Record<string, unknown>,
   key: string,
@@ -98,267 +69,12 @@ export function managedNeedsHuman(
   );
 }
 
-// Keep the managed-prompt contract closed. A newly introduced action must be
-// deliberately mapped here (or rejected explicitly) before it can reach the
-// domain command layer.
-const managedActionKeys = new Set([
-  "search_for_match",
-  "check_donor_availability",
-  "notify_donor",
-  "notify_receiver",
-  "notify_other_party_of_cancellation",
-  "ready_for_coordination",
-  "needs_human",
-  "interest",
-  "self_move",
-]);
-
-function itemKind(value: string): ItemKind {
-  const t = value.toLowerCase();
-  if (/מיטה|bed/.test(t)) return "bed";
-  if (/שידה/.test(t)) return "other";
-  if (/ספה|כורס|sofa/.test(t)) return "sofa";
-  if (/ארון|wardrobe/.test(t)) return "wardrobe";
-  if (/מקרר|fridge/.test(t)) return "fridge";
-  if (/תנור|oven/.test(t)) return "oven";
-  if (/מכונת כביסה|washing/.test(t)) return "washing_machine";
-  if (/מייבש|dryer/.test(t)) return "dryer";
-  if (/מקפיא|freezer/.test(t)) return "freezer";
-  if (/מדיח|dishwasher/.test(t)) return "dishwasher";
-  if (/שולחן.*כיס|כיס.*שולחן/.test(t)) return "table_set";
-  if (/שולחן|table/.test(t)) return "table";
-  if (/כיסאות|כיסא|chairs/.test(t)) return "chairs";
-  if (/פסנתר|piano/.test(t)) return "piano";
-  if (/דירה מלאה|הובלת דירה|house.?move/.test(t)) return "house_move";
-  return "other";
-}
-
-function descriptionFrom(
-  updates: Record<string, unknown>,
-  text: string,
-  request?: Request,
-): string {
-  const canonical = (value: string): string | null => {
-    const t = value.replace(/\s+/g, " ").trim();
-    const found = [
-      [/(?:מכונת\s+כביסה)/, "מכונת כביסה"],
-      [/(?:שולחן\s+וכיסאות|כיסאות\s+ושולחן)/, "שולחן וכיסאות"],
-      [/(?:שידה)/, "שידה"],
-      [/(?:מיטה)/, "מיטה"],
-      [/(?:ספה|כורסה)/, "ספה"],
-      [/(?:ארון)/, "ארון"],
-      [/(?:שולחן)/, "שולחן"],
-      [/(?:כיסאות|כיסא)/, "כיסאות"],
-      [/(?:מקרר)/, "מקרר"],
-      [/(?:תנור)/, "תנור"],
-    ] as const;
-    return found.find(([pattern]) => pattern.test(t))?.[1] ?? null;
-  };
-  const value = textValue(updates, "מה מעבירים");
-  if (value) return canonical(value) ?? value;
-  const known = request?.items[0]?.description;
-  if (known) return known;
-  return canonical(text) ?? (text.replace(/\s+/g, " ").trim().slice(0, 120) || "פריט");
-}
-
-function phoneFrom(value: string | null): string | null {
-  if (!value) return null;
-  return value.replace(/\D/g, "").length >= 9 ? value : null;
-}
-
-function floorFrom(value: string | null): number | null {
-  if (!value) return null;
-  if (/קרקע|ground/i.test(value)) return 0;
-  const match = value.match(/-?\d+/);
-  return match ? Number(match[0]) : null;
-}
-
-function activeRequest(ctx: Context): Request | undefined {
-  const open = ctx.requests.filter(
-    (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
-  );
-  if (open.length === 1) return open[0];
-  const selected = ctx.requests.find(
-    (r) =>
-      r.id === ctx.conversation.selected_request_id &&
-      !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
-  );
-  return selected ?? (open.length === 1 ? open[0] : undefined);
-}
-
-function translate(
-  managed: ManagedResponse,
-  ctx: Context,
-  text: string,
-): Plan {
-  const updates = managed.updates;
-  const actions = managed.actions;
-  const current = activeRequest(ctx);
-  const prior = ctx.history.at(-1)?.content ?? "";
-  const commands: Command[] = [];
-  const pushOnce = (command: Command) => {
-    if (!commands.some((existing) => JSON.stringify(existing) === JSON.stringify(command)))
-      commands.push(command);
-  };
-  const unknownAction = Object.keys(actions).find(
-    (key) => action(actions, key) && !managedActionKeys.has(key),
-  );
-  if (unknownAction)
-    throw new AppError("unsupported_managed_action", 422, "פעולת AI לא מוכרת");
-
-  if (action(actions, "interest")) {
-    const presented = ctx.candidates.find((candidate) => candidate.state === "presented");
-    if (presented) pushOnce({ type: "interest", request_number: presented.request.number });
-  }
-  if (action(actions, "notify_receiver") || action(actions, "notify_donor")) {
-    if (!current)
-      throw new AppError("verification_without_request", 409, "לא נמצאה פנייה מתאימה לאימות.");
-    pushOnce({ type: "contact_counterparty", request_number: current.number, contact: true });
-  }
-  if (managed.intent === "self_move" || action(actions, "self_move")) {
-    const description = descriptionFrom(updates, text);
-    pushOnce({
-      type: "donate",
-      items: [{ kind: itemKind(description), description, quantity: Math.max(1, Math.min(20, numberValue(updates, "כמות פריטים") ?? 1)) }],
-      counterparty_phone: ctx.conversation.phone,
-      direct: true,
-      free: true,
-      working: boolValue(updates, "תקינות") ?? boolValue(updates, "תקין") ?? true,
-    });
-  }
-
-  if (managed.intent === "cancellation") {
-    const choice = /(?:לגמרי|סופית|לא רלוונטי|לא צריך)/.test(text)
-      ? "final"
-      : /(?:שבוע הבא|רלוונטי)/.test(text)
-        ? "next_week"
-        : "ask";
-    commands.push({ type: "cancel", request_number: current?.number ?? null, choice });
-  } else if (managedNeedsHuman(actions, updates)) {
-    commands.push({
-      type: "escalate",
-      request_number: current?.number ?? null,
-      reason: /מנוף|חלון|גישה/.test(text)
-        ? "unusual_access"
-        : /גבול|מחוץ|יישוב/.test(text)
-          ? "borderline_area"
-          : "unclear",
-    });
-  } else if (managed.intent === "donate" && (donationIntent(text) || !current)) {
-    const description = descriptionFrom(updates, text);
-    const quantity = numberValue(updates, "כמות פריטים") ?? 1;
-    commands.push({
-      type: "donate",
-      items: [
-        {
-          kind: itemKind(description),
-          description,
-          quantity: Math.max(1, Math.min(20, quantity)),
-        },
-      ],
-      counterparty_phone: phoneFrom(textValue(updates, "נייד מקבל")),
-      direct:
-        directHandoffIntent(text) ||
-        Boolean(phoneFrom(textValue(updates, "נייד מקבל"))),
-      free: true,
-      working: boolValue(updates, "תקינות") ?? boolValue(updates, "תקין"),
-    });
-  } else if (managed.intent === "request" && !current) {
-    const description = descriptionFrom(updates, text);
-    commands.push({ type: "seek", kind: itemKind(description) });
-  } else if (managed.intent === "transport" || current) {
-    const street = streetPhrase(text);
-    const groundedCity = (value: string | null): string | null => {
-      if (!value || ambiguousStreetCity(text) || !cityOutsideStreet(text, value))
-        return null;
-      return value;
-    };
-    const donorSettlement = groundedCity(textValue(updates, "עיר איסוף"));
-    const donorAddress = textValue(updates, "כתובת איסוף") ?? (street && /איסוף|מוסר|אצלי/.test(text) ? street : null);
-    const donorName = textValue(updates, "שם המוסר");
-    const donorFloor = floorFrom(textValue(updates, "קומה איסוף"));
-    const receiverSettlement = groundedCity(textValue(updates, "עיר יעד"));
-    const receiverAddress = textValue(updates, "כתובת יעד") ?? (street && /יעד|מקבל/.test(text) ? street : null);
-    const receiverName = textValue(updates, "שם המקבל");
-    const receiverFloor = floorFrom(textValue(updates, "קומה יעד"));
-
-    if (donorSettlement || donorAddress || donorName || donorFloor !== null)
-      commands.push({
-        type: "details",
-        request_number: current?.number ?? null,
-        role: "donor",
-        name: donorName,
-        settlement: donorSettlement,
-        address: donorAddress,
-        floor: donorFloor,
-      });
-    if (receiverSettlement || receiverAddress || receiverName || receiverFloor !== null)
-      commands.push({
-        type: "details",
-        request_number: current?.number ?? null,
-        role: "receiver",
-        name: receiverName,
-        settlement: receiverSettlement,
-        address: receiverAddress,
-        floor: receiverFloor,
-      });
-
-    const counterpartyPhone = phoneFrom(textValue(updates, "נייד מקבל"));
-    const counterpartyName = textValue(updates, "שם המקבל");
-    if (counterpartyPhone || (counterpartyName && !receiverSettlement && !receiverAddress))
-      commands.push({
-        type: "counterparty",
-        request_number: current?.number ?? null,
-        phone: counterpartyPhone,
-        name: counterpartyName,
-      });
-
-    const asksWorking = /תקין|שמיש|עובד/.test(prior);
-    const asksDisassembly = /פירוק/.test(prior);
-    const working = asksWorking
-      ? /לא\s*(?:תקין|שמיש|עובד)|מקולקל|שבור/.test(text)
-        ? false
-        : explicitApproval(text)
-          ? true
-          : null
-      : null;
-    const needsDisassembly = asksDisassembly
-      ? /^(?:לא|אין)/.test(text.trim())
-        ? false
-        : /כן|נדרש|צריך/.test(text)
-          ? true
-          : null
-      : null;
-    const newDescription = textValue(updates, "מה מעבירים");
-    const items = newDescription
-      ? [{ kind: itemKind(newDescription), description: newDescription, quantity: numberValue(updates, "כמות פריטים") ?? 1 }]
-      : current?.items.map((i) => ({ kind: i.kind, description: i.description, quantity: i.quantity })) ?? null;
-    const ovenType = /בילט/.test(text) ? "built_in" : /משולב/.test(text) ? "combined" : null;
-    if (items && (newDescription || working !== null || needsDisassembly !== null || ovenType))
-      commands.push({
-        type: "item_facts",
-        request_number: current?.number ?? null,
-        items,
-        free: null,
-        working,
-        needs_disassembly: needsDisassembly,
-        wardrobe_small_whole: null,
-        oven_type: ovenType,
-        evacuation: null,
-      });
-
-    if (
-      textValue(updates, "אישורמוסר") === "כן" ||
-      textValue(updates, "אישור מקבל") === "כן" ||
-      (explicitApproval(text) && /אשר|אישור|חלקך/.test(prior))
-    )
-      commands.push({ type: "approve_self", request_number: current?.number ?? null });
-  }
-
-  if (!commands.length) commands.push({ type: "next" });
-  const plan = { commands: commands.slice(0, 5), evidence: text.slice(0, 2000) };
-  if (!grounded(plan, text)) throw new AppError("ungrounded_managed_prompt");
-  return plan;
+/**
+ * The hosted prompt may only phrase a sentence. Rules own facts, commands,
+ * and rejections. Ignore updates/actions so a model guess cannot write state.
+ */
+function translate(_managed: ManagedResponse, _ctx: Context, text: string): Plan {
+  return { commands: [{ type: "next" }], evidence: text.slice(0, 2000) };
 }
 
 export class OpenAIPlanner implements Planner {
@@ -424,6 +140,7 @@ export class OpenAIPlanner implements Planner {
         prompt_id: this.c.OPENAI_PROMPT_ID,
         prompt_version: this.c.OPENAI_PROMPT_VERSION,
         model: this.c.OPENAI_MODEL,
+        action_source: "prompt_phrasing_only",
         managed_reply: managed.reply,
         managed_intent: managed.intent,
         managed_actions: managed.actions,

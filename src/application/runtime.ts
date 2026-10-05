@@ -128,13 +128,15 @@ export class Runtime {
             for (const j of jobs) await engine.send(j.data.id);
           },
         );
-        await queue.boss.work<JobData, void, typeof settings>(
-          "integration",
-          { ...settings, localConcurrency: 1 },
-          async (jobs) => {
-            for (const j of jobs) await this.deliverIntegration(j.data.id);
-          },
-        );
+        if (this.config.INTEGRATION_DISPATCH) {
+          await queue.boss.work<JobData, void, typeof settings>(
+            "integration",
+            { ...settings, localConcurrency: 1 },
+            async (jobs) => {
+              for (const j of jobs) await this.deliverIntegration(j.data.id);
+            },
+          );
+        }
         await queue.boss.work<JobData, void, typeof settings>(
           "ops",
           { ...settings, localConcurrency: 1 },
@@ -203,7 +205,7 @@ export class Runtime {
             ]);
           });
         }
-        await this.recoverIntegrationQueue();
+        if (this.config.INTEGRATION_DISPATCH) await this.recoverIntegrationQueue();
         await this.beat();
         this.heartbeat = setInterval(
           () =>
@@ -374,7 +376,7 @@ export class Runtime {
       "INSERT INTO worker_heartbeats(id) VALUES($1) ON CONFLICT(id) DO UPDATE SET updated_at=clock_timestamp()",
       [this.workerId],
     );
-    await this.recoverIntegrationQueue();
+    if (this.config.INTEGRATION_DISPATCH) await this.recoverIntegrationQueue();
   }
   async check(): Promise<void> {
     if (!this.ready || !this.engine || !this.queue?.started)
@@ -426,15 +428,17 @@ export class Runtime {
     const failedMedia = await this.pool.query<{ n: number }>(
       "SELECT count(*)::int n FROM messages WHERE media_state='pending' AND received_at<clock_timestamp()-interval '60 seconds'",
     );
-    const integrations = await this.pool.query<{ n: number; dead: number; stuck: number }>(
-      `SELECT count(*)::int n,
-              count(*) FILTER (WHERE state='dead_letter')::int dead,
-              count(*) FILTER (WHERE state='active' AND last_attempt_at < clock_timestamp()-interval '60 seconds')::int stuck
-         FROM integration_outbox
-        WHERE state='dead_letter'
-           OR (state='active' AND last_attempt_at < clock_timestamp()-interval '60 seconds')
-           OR (state='pending' AND created_at < clock_timestamp()-interval '60 seconds')`,
-    );
+    const integrations = this.config.INTEGRATION_DISPATCH
+      ? await this.pool.query<{ n: number; dead: number; stuck: number }>(
+          `SELECT count(*)::int n,
+                  count(*) FILTER (WHERE state='dead_letter')::int dead,
+                  count(*) FILTER (WHERE state='active' AND last_attempt_at < clock_timestamp()-interval '60 seconds')::int stuck
+             FROM integration_outbox
+            WHERE state='dead_letter'
+               OR (state='active' AND last_attempt_at < clock_timestamp()-interval '60 seconds')
+               OR (state='pending' AND created_at < clock_timestamp()-interval '60 seconds')`,
+        )
+      : { rows: [{ n: 0, dead: 0, stuck: 0 }] };
     if (
       Object.values(blocked).some((v) => v > 0) ||
       uncertain.rows[0]!.n > 0 ||

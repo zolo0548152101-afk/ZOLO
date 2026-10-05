@@ -561,6 +561,7 @@ export class Store {
         WHERE id=$1`,
       [eventId, JSON.stringify({ ...payload, event_id: eventId, event_type: type, schema_version: 1, request_id: requestId, occurred_at: new Date().toISOString(), delivery_keys: deliveryKeys, payload })],
     );
+    if (!this.config.INTEGRATION_DISPATCH) return;
     const integrations = await c.query<{ id: string; integration: string }>(
       `INSERT INTO integration_outbox(event_id,integration,idempotency_key)
        SELECT $1::bigint,name,'integration:'||name||':'||($1::bigint)::text FROM integrations WHERE enabled=true

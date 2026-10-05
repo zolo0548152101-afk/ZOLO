@@ -24,6 +24,7 @@ import {
   nextQuestion,
   statusText,
   nextTuesday,
+  norm,
 } from "../domain/policies.js";
 export interface Outcome {
   reply: string | null;
@@ -230,6 +231,14 @@ export class Commands {
         );
         ctx.conversation.pending_counterparty_name = cmd.counterparty_name;
       }
+      if (other || (cmd.type === "donate" && cmd.counterparty_phone)) {
+        await c.query(
+          "UPDATE conversations SET pending_counterparty_name=NULL,pending_counterparty_phone=NULL,version=version+1 WHERE id=$1",
+          [ctx.conversation.id],
+        );
+        ctx.conversation.pending_counterparty_name = null;
+        ctx.conversation.pending_counterparty_phone = null;
+      }
       for (const p of parties)
         if (p.phone !== phone && !direct)
           notices.push({
@@ -280,8 +289,53 @@ export class Commands {
     }
     if (cmd.type === "escalate" && !ctx.requests.length)
       return { ...output(HUMAN_REPLY), humanReason: cmd.reason };
-    if (cmd.type === "next" && !ctx.requests.length)
+    if (cmd.type === "next" && !ctx.requests.length) {
+      const pendingName = ctx.conversation.pending_counterparty_name;
+      const handoffName = (() => {
+        const names = [
+          ...norm(text).matchAll(/(?:^|\s)ל([א-ת]{2,})(?=$|[\s,.;!?])/gu),
+        ]
+          .map((match) => match[1]!)
+          .filter(
+            (name) =>
+              !["מסירה", "תרומה", "מישהו", "מישהי", "אדם", "בית", "עפולה", "צמח", "קרקע"].includes(
+                name,
+              ),
+          );
+        return names.at(-1) ?? null;
+      })();
+      if (donationIntent(text) && handoffName) {
+        await c.query(
+          "UPDATE conversations SET pending_counterparty_name=$2,version=version+1 WHERE id=$1",
+          [ctx.conversation.id, handoffName],
+        );
+        ctx.conversation.pending_counterparty_name = handoffName;
+        return output(`רשמתי שמדובר במסירה ל${handoffName}. מה הפריט שברצונך למסור?`);
+      }
+      const supplied =
+        ctx.message.contacts[0]?.phone ??
+        (() => {
+          try {
+            const match = text.match(/(?:\+?972|0)?[\d][\d\s().-]{7,14}\d/);
+            return match ? canonicalPhone(match[0]) : null;
+          } catch {
+            return null;
+          }
+        })();
+      if (pendingName && supplied) {
+        await c.query(
+          "UPDATE conversations SET pending_counterparty_phone=$2,version=version+1 WHERE id=$1",
+          [ctx.conversation.id, supplied],
+        );
+        ctx.conversation.pending_counterparty_phone = supplied;
+        return output(
+          `רשמתי את מספר הטלפון של ${pendingName}. מה הפריט שברצונך למסור?`,
+        );
+      }
+      if (pendingName)
+        return output(`מה הפריט שברצונך למסור ל${pendingName}?`);
       return output("איך אפשר לעזור — למסור פריט, לקבל פריט או לתאם הובלה?");
+    }
     if (cmd.type === "clarify_duplicate") {
       // A duplicate message can arrive after the other party has approved.
       // Reload under the transaction lock so returning this read-only reply

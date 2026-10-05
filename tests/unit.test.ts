@@ -1234,6 +1234,33 @@ test("a following phone answers the named handoff", () => {
     { type: "counterparty", request_number: request.number, phone: "536662043", name: "טל" },
   ]);
 });
+test("split handoff messages keep the name until the item arrives", () => {
+  const named = rulePlan({
+    conversation: { id: "c-split", phone: "584152101", chat_id: "972584152101@c.us", mode: "bot", selected_request_id: null, version: 1, pending_counterparty_name: null, pending_counterparty_phone: null },
+    requests: [],
+    candidates: [],
+    message: { text: "רוצה למסור לטל", transcript: null, contacts: [] },
+    history: [],
+  } as unknown as Context);
+  assert.deepEqual(named?.commands, [{ type: "next" }]);
+  const item = rulePlan({
+    conversation: { id: "c-split", phone: "584152101", chat_id: "972584152101@c.us", mode: "bot", selected_request_id: null, version: 2, pending_counterparty_name: "טל", pending_counterparty_phone: null },
+    requests: [],
+    candidates: [],
+    message: { text: "מיטה", transcript: null, contacts: [] },
+    history: [
+      { role: "user", content: "רוצה למסור לטל" },
+      { role: "assistant", content: "רשמתי שמדובר במסירה לטל. מה הפריט שברצונך למסור?" },
+    ],
+  } as unknown as Context);
+  const donate = item?.commands[0];
+  assert.equal(donate?.type, "donate");
+  if (donate?.type === "donate") {
+    assert.equal(donate.direct, true);
+    assert.equal(donate.counterparty_name, "טל");
+    assert.equal(donate.items[0]?.kind, "bed");
+  }
+});
 test("רחוב אילת is a street and bare אילת asks instead of rejecting", async () => {
   const request = sampleRequest();
   request.origin = "direct";

@@ -77,6 +77,9 @@ const envSchema = z.object({
     .default(DEFAULT_TRANSPORT_CAPACITY),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
   ENABLE_SIMULATE: flag.default(true),
+  // Keep SQL tables and admin replay, but do not enqueue integration work
+  // from every live message event unless explicitly enabled.
+  INTEGRATION_DISPATCH: flag.default(false),
   LIVE_ALLOWLIST: z.string().default(""),
   LIVE_DEPENDENCIES_VERIFIED: flag.default(false),
   MEDIA_VOLUME_CONFIRMED: flag.default(false),
