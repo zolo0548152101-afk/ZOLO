@@ -17,6 +17,8 @@ import {
 import {
   ACTIVE,
   canonicalPhone,
+  DEFAULT_TRANSPORT_CAPACITY,
+  MAX_TRANSPORT_CAPACITY,
   norm,
   nextTuesday,
   readyToCoordinate,
@@ -144,12 +146,12 @@ export class Store {
     const base = await c.query<
       Omit<Request, "parties" | "items" | "photo_ids">
     >(
-      `SELECT id,number::int,version,status,origin,verification_contacted,run_date::text,earliest_run_date::text,preferred_time,represents_both_parties,closed_at::text,human_reason,created_at::text FROM requests WHERE id=$1 ${lock ? "FOR UPDATE" : ""}`,
+      `SELECT id,number::int,version,status,origin,verification_contacted,run_date::text,proposed_run_date::text,earliest_run_date::text,preferred_time,represents_both_parties,closed_at::text,human_reason,created_at::text FROM requests WHERE id=$1 ${lock ? "FOR UPDATE" : ""}`,
       [id],
     );
     if (!base.rows[0]) throw new AppError("request_not_found", 404);
     const parties = await c.query<Party>(
-      `SELECT p.role,co.phone,p.name,p.settlement,p.address,p.floor,p.floor_note_shown,p.approved_at::text,ap.phone AS approved_by,p.schedule_approved FROM request_parties p JOIN contacts co ON co.id=p.contact_id LEFT JOIN contacts ap ON ap.id=p.approved_by WHERE p.request_id=$1 ORDER BY role`,
+      `SELECT p.role,co.phone,p.name,p.settlement,p.address,p.floor,p.floor_note_shown,p.approved_at::text,ap.phone AS approved_by,(p.schedule_approved_date::date=COALESCE(r.proposed_run_date,r.run_date)::date AND p.schedule_approved_date IS NOT NULL) AS schedule_approved,p.schedule_approved_date::text,p.schedule_approved_at::text FROM request_parties p JOIN requests r ON r.id=p.request_id JOIN contacts co ON co.id=p.contact_id LEFT JOIN contacts ap ON ap.id=p.approved_by WHERE p.request_id=$1 ORDER BY role`,
       [id],
     );
     const items = await c.query<Item>(
@@ -236,10 +238,29 @@ export class Store {
     const message = await this.message(id, c, lock);
     if (!message.phone) throw new AppError("identity_unresolved", 409);
     const conv = await c.query<Conversation>(
-      `SELECT cv.id,co.phone,cv.chat_id,cv.mode,cv.selected_request_id,cv.version,cv.pending_counterparty_name FROM conversations cv JOIN contacts co ON co.id=cv.contact_id JOIN messages m ON m.conversation_id=cv.id WHERE m.id=$1 ${lock ? "FOR UPDATE OF cv" : ""}`,
+      `SELECT cv.id,co.phone,cv.chat_id,cv.mode,cv.selected_request_id,cv.version,cv.pending_counterparty_name,cv.pending_counterparty_phone FROM conversations cv JOIN contacts co ON co.id=cv.contact_id JOIN messages m ON m.conversation_id=cv.id WHERE m.id=$1 ${lock ? "FOR UPDATE OF cv" : ""}`,
       [id],
     );
     if (!conv.rows[0]) throw new AppError("conversation_missing", 409);
+    const reset = await c.query<{ reset_at: string | null }>(
+      "SELECT reset_at::text FROM conversation_resets WHERE conversation_id=$1",
+      [conv.rows[0].id],
+    );
+    const resetAt = reset.rows[0]?.reset_at ?? null;
+    const requests = (await this.active(message.phone, c)).filter(
+      (r) => !resetAt || r.created_at > resetAt,
+    );
+    // History for the open business conversation only. A finished/coordinated
+    // handoff is out of scope. Prefer the selected open request, else the
+    // earliest still-open request for this phone.
+    const open = requests.filter(
+      (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
+    );
+    const selectedOpen =
+      open.find((r) => r.id === conv.rows[0]!.selected_request_id) ??
+      [...open].sort((a, b) => a.created_at.localeCompare(b.created_at))[0] ??
+      null;
+    const historySince = selectedOpen?.created_at ?? resetAt;
     const h = await c.query<{
       text: string;
       transcript: string | null;
@@ -250,11 +271,38 @@ export class Store {
        WHERE m.conversation_id=$1 AND m.seq<$2 AND m.processed_at IS NOT NULL
          AND coalesce(m.error_code,'') NOT LIKE 'coalesced_into:%'
          AND (cr.reset_at IS NULL OR m.received_at>cr.reset_at)
-       ORDER BY m.seq DESC LIMIT 8`,
-      [conv.rows[0].id, message.seq],
+         AND (
+           $3::timestamptz IS NULL
+           OR m.received_at>=$3::timestamptz
+           OR EXISTS (
+             SELECT 1 FROM request_events e
+             WHERE e.message_id=m.id AND e.request_id=$4::uuid
+           )
+         )
+       ORDER BY m.seq ASC`,
+      [conv.rows[0].id, message.seq, historySince, selectedOpen?.id ?? null],
     );
     const history: Context["history"] = [];
-    for (const row of h.rows.reverse()) {
+    const important = /(מאשר|מאשרת|תיקון|טעיתי|בעצם|התכוונתי|אל תפנה|ליצור קשר)/u;
+    const rows = h.rows;
+    const MAX_TURNS = 40;
+    const selectedRows =
+      rows.length <= MAX_TURNS
+        ? rows
+        : [
+            ...rows.slice(0, 4),
+            ...rows.slice(4, -12).filter((row) =>
+              important.test(`${row.transcript ?? row.text}\n${row.reply ?? ""}`),
+            ),
+            ...rows.slice(-12),
+          ];
+    if (rows.length > MAX_TURNS) {
+      history.push({
+        role: "assistant",
+        content: `סיכום שיחה פתוחה: נשמרו ${rows.length} הודעות; מוצגות ההודעות הראשונות, אישורים/תיקונים, וההודעות האחרונות.`,
+      });
+    }
+    for (const row of selectedRows) {
       history.push({
         role: "user",
         content: (row.transcript ?? row.text).slice(0, 2000),
@@ -267,19 +315,42 @@ export class Store {
        LEFT JOIN conversation_resets cr ON cr.conversation_id=current.conversation_id
        WHERE o.phone=$1 AND o.state IN ('sent','shadow','simulation') AND o.created_at<=current.received_at
          AND (cr.reset_at IS NULL OR o.created_at>cr.reset_at)
+         AND ($3::timestamptz IS NULL OR o.created_at>=$3::timestamptz)
        ORDER BY o.seq DESC LIMIT 1`,
-      [message.phone, id],
+      [message.phone, id, historySince],
     );
     if (latest.rows[0] && history.at(-1)?.content !== latest.rows[0].text)
       history.push({
         role: "assistant",
         content: latest.rows[0].text.slice(0, 2000),
       });
+    const messageText = (message.transcript ?? message.text).trim();
+    if (/(?:טעיתי|תיקון|בעצם|התכוונתי)/.test(messageText)) {
+      const correction = await c.query<{ id: string }>(
+        `SELECT DISTINCT r.id,r.number
+         FROM requests r
+         JOIN request_parties p ON p.request_id=r.id
+         JOIN contacts co ON co.id=p.contact_id
+         WHERE co.phone=$1 AND r.status='rejected'
+           AND ($2::timestamptz IS NULL OR r.created_at>$2)
+           AND EXISTS(
+             SELECT 1 FROM request_events e
+             WHERE e.request_id=r.id AND e.event_type='outside_area_rejected'
+           )
+         ORDER BY r.number DESC LIMIT 2`,
+        [message.phone, resetAt],
+      );
+      if (correction.rows.length === 1)
+        requests.push(await this.request(correction.rows[0]!.id, c));
+    }
+    const candidates = (await this.candidates(message.phone, c)).filter(
+      (candidate) => !resetAt || candidate.request.created_at > resetAt,
+    );
     return {
       message,
       conversation: conv.rows[0],
-      requests: await this.active(message.phone, c),
-      candidates: await this.candidates(message.phone, c),
+      requests,
+      candidates,
       history,
     };
   }
@@ -308,6 +379,7 @@ export class Store {
       parties,
       photo_ids: [],
       run_date: null,
+      proposed_run_date: null,
       earliest_run_date: null,
       preferred_time: null,
       represents_both_parties: false,
@@ -324,7 +396,7 @@ export class Store {
   }
   async save(c: pg.PoolClient, r: Request): Promise<void> {
     const result = await c.query(
-      `UPDATE requests SET version=version+1,status=$2,origin=$3,run_date=$4,human_reason=$5,preferred_time=$7,earliest_run_date=$8,verification_contacted=$9,represents_both_parties=$10,closed_at=$11,updated_at=clock_timestamp() WHERE id=$1 AND version=$6`,
+      `UPDATE requests SET version=version+1,status=$2,origin=$3,run_date=$4,proposed_run_date=$12,human_reason=$5,preferred_time=$7,earliest_run_date=$8,verification_contacted=$9,represents_both_parties=$10,closed_at=$11,updated_at=clock_timestamp() WHERE id=$1 AND version=$6`,
       [
         r.id,
         r.status,
@@ -337,6 +409,7 @@ export class Store {
         r.verification_contacted,
         r.represents_both_parties ?? false,
         r.closed_at,
+        r.proposed_run_date,
       ],
     );
     if (result.rowCount !== 1) throw new AppError("version_conflict", 409);
@@ -344,8 +417,8 @@ export class Store {
     for (const p of r.parties) {
       const id = await this.contact(c, p.phone);
       await c.query(
-        `INSERT INTO request_parties(request_id,role,contact_id,name,settlement,address,floor,floor_note_shown,approved_at,approved_by,schedule_approved) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-        ON CONFLICT(request_id,role) DO UPDATE SET contact_id=EXCLUDED.contact_id,name=EXCLUDED.name,settlement=EXCLUDED.settlement,address=EXCLUDED.address,floor=EXCLUDED.floor,floor_note_shown=EXCLUDED.floor_note_shown,approved_at=EXCLUDED.approved_at,approved_by=EXCLUDED.approved_by,schedule_approved=EXCLUDED.schedule_approved`,
+        `INSERT INTO request_parties(request_id,role,contact_id,name,settlement,address,floor,floor_note_shown,approved_at,approved_by,schedule_approved,schedule_approved_date,schedule_approved_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        ON CONFLICT(request_id,role) DO UPDATE SET contact_id=EXCLUDED.contact_id,name=EXCLUDED.name,settlement=EXCLUDED.settlement,address=EXCLUDED.address,floor=EXCLUDED.floor,approved_at=EXCLUDED.approved_at,approved_by=EXCLUDED.approved_by,schedule_approved=EXCLUDED.schedule_approved,schedule_approved_date=EXCLUDED.schedule_approved_date,schedule_approved_at=EXCLUDED.schedule_approved_at`,
         [
           r.id,
           p.role,
@@ -357,7 +430,14 @@ export class Store {
           p.floor_note_shown,
           p.approved_at,
           p.approved_by ? id : null,
-          p.schedule_approved,
+          Boolean(
+            (r.proposed_run_date ?? r.run_date) &&
+              p.schedule_approved_date &&
+              p.schedule_approved_date.slice(0, 10) ===
+                (r.proposed_run_date ?? r.run_date)?.slice(0, 10),
+          ),
+          p.schedule_approved_date,
+          p.schedule_approved_at,
         ],
       );
     }
@@ -380,12 +460,106 @@ export class Store {
         ],
       );
   }
+  async prepareTransportRun(c: pg.PoolClient, date: string): Promise<void> {
+    await c.query(
+      "INSERT INTO transport_runs(date,capacity) VALUES($1,$2) ON CONFLICT(date) DO NOTHING",
+      [date, Math.min(this.config.TRANSPORT_CAPACITY, DEFAULT_TRANSPORT_CAPACITY)],
+    );
+  }
+  private async askForCapacityApproval(
+    c: pg.PoolClient,
+    r: Request,
+    date: string,
+    capacity: number,
+  ): Promise<"pending" | "denied" | "limit"> {
+    if (capacity >= MAX_TRANSPORT_CAPACITY) return "limit";
+    const inserted = await c.query<{ id: string; status: string }>(
+      `INSERT INTO transport_capacity_approvals(run_date,requested_capacity,request_id)
+       VALUES($1,$2,$3) ON CONFLICT(run_date,requested_capacity) DO NOTHING
+       RETURNING id,status`,
+      [date, capacity + 1, r.id],
+    );
+    const approval = inserted.rows[0] ?? (await c.query<{ id: string; status: string }>(
+      "SELECT id,status FROM transport_capacity_approvals WHERE run_date=$1 AND requested_capacity=$2",
+      [date, capacity + 1],
+    )).rows[0];
+    if (!approval) throw new AppError("capacity_approval_not_persisted", 500);
+    if (approval.status === "denied") return "denied";
+    if (inserted.rows[0]) {
+      const [year, month, day] = date.split("-");
+      const trace_id = randomUUID();
+      const text = `הגענו ל־${capacity} הובלות מאושרות ביום שלישי ${day}/${month}/${year}. האם לאשר הובלה נוספת אחת (מכסה ${capacity + 1})?\nהשב/י: כן ${date} או לא ${date}. עד לאישור, לא נציע ולא נתאם הובלות נוספות ליום זה.`;
+      await this.outbound(
+        c,
+        { trace_id, mode: this.config.BOT_MODE, phone: this.config.ADMIN_PHONE },
+        { phone: this.config.ADMIN_PHONE, text },
+        `capacity-approval:${approval.id}`,
+        r.id,
+      );
+      await this.event(c, { trace_id }, "system", "capacity_approval_requested", {
+        date,
+        current_capacity: capacity,
+        requested_capacity: capacity + 1,
+        approval_id: approval.id,
+      }, r.id);
+    }
+    return "pending";
+  }
+  async proposeScheduleDate(
+    c: pg.PoolClient,
+    r: Request,
+    now: Date,
+  ): Promise<string | null> {
+    const first = nextTuesday(now).date;
+    let date = first;
+    if (r.earliest_run_date && r.earliest_run_date > date)
+      date = r.earliest_run_date;
+    const start = new Date(`${date}T12:00:00Z`);
+    const day = (2 - start.getUTCDay() + 7) % 7;
+    start.setUTCDate(start.getUTCDate() + day);
+    date = start.toISOString().slice(0, 10);
+
+    await this.prepareTransportRun(c, date);
+    const run = await c.query<{ capacity: number; status: string }>(
+      "SELECT capacity,status FROM transport_runs WHERE date=$1 FOR UPDATE",
+      [date],
+    );
+    const used = await c.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM requests WHERE run_date=$1 AND status IN ('coordinated','closed')",
+      [date],
+    );
+    if (run.rows[0]?.status !== "open" || (date === first && nextTuesday(now).sameDay))
+      return null;
+    const proposed = await c.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM requests WHERE proposed_run_date=$1 AND status='awaiting_approval'",
+      [date],
+    );
+    if (used.rows[0]!.n >= run.rows[0]!.capacity) {
+      await this.askForCapacityApproval(c, r, date, run.rows[0]!.capacity);
+      return null;
+    }
+    if (used.rows[0]!.n + proposed.rows[0]!.n >= run.rows[0]!.capacity)
+      return null;
+    return date;
+  }
   async region(
     c: DB,
     value: string,
   ): Promise<{ name: string; decision: "allowed" | "outside" | "review" }> {
+    const allowedExact: Record<string, string> = {
+      "בית שאן": "בית שאן",
+      "מסילות": "מסילות",
+      "ירדנה": "ירדנה",
+      "בית אלפא": "בית אלפא",
+      "טירת צבי": "טירת צבי",
+      "קיבוץ טירת צבי": "טירת צבי",
+      "כפר רופין": "כפר רופין",
+      "מחולה": "מחולה",
+    };
     const s = norm(value),
       lookup = s.replace(/^(?:רחוב|שכונת|שכונה|שדרות|שד[׳']?)\s+/, "").trim();
+    const exact = allowedExact[lookup];
+    if (exact) return { name: exact, decision: "allowed" };
     const candidates = [lookup, lookup.replace(/\s+\d+[א-ת]?\s*$/, "").trim()].filter(
       (value, index, all) => value && all.indexOf(value) === index,
     );
@@ -413,7 +587,7 @@ export class Store {
     data: unknown = {},
     requestId: string | null = null,
   ): Promise<void> {
-    const e = await c.query<{ id: string }>(
+    const e = await c.query<{ id: string; created_at: string }>(
       "INSERT INTO request_events(request_id,message_id,trace_id,actor,event_type,data) VALUES($1,$2,$3,$4,$5,$6) RETURNING id",
       [
         requestId,
@@ -424,14 +598,29 @@ export class Store {
         JSON.stringify(data),
       ],
     );
+    const eventId = e.rows[0]!.id;
+    const payload = data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : { value: data };
+    const enabled = await c.query<{ name: string }>(
+      "SELECT name FROM integrations WHERE enabled=true ORDER BY name",
+    );
+    const deliveryKeys = Object.fromEntries(
+      enabled.rows.map(({ name }) => [name, `integration:${name}:${eventId}`]),
+    );
+    await c.query(
+      `UPDATE request_events
+          SET data=$2
+        WHERE id=$1`,
+      [eventId, JSON.stringify({ ...payload, event_id: eventId, event_type: type, schema_version: 1, request_id: requestId, occurred_at: new Date().toISOString(), delivery_keys: deliveryKeys, payload })],
+    );
+    if (!this.config.INTEGRATION_DISPATCH) return;
     const integrations = await c.query<{ id: string; integration: string }>(
-      `INSERT INTO integration_outbox(event_id,integration)
-       SELECT $1,name FROM integrations WHERE enabled=true
+      `INSERT INTO integration_outbox(event_id,integration,idempotency_key)
+       SELECT $1::bigint,name,'integration:'||name||':'||($1::bigint)::text FROM integrations WHERE enabled=true
        ON CONFLICT DO NOTHING RETURNING id,integration`,
-      [e.rows[0]!.id],
+      [eventId],
     );
     for (const row of integrations.rows)
-      await this.queue.send(c, "integration", { id: row.id }, row.integration);
+      await this.queue.send(c, "integration", { id: row.id }, `integration:${row.integration}:${row.id}`);
   }
   async outbound(
     c: pg.PoolClient,
@@ -561,7 +750,7 @@ export class Store {
     r: Request,
     now: Date,
     adminSameDay = false,
-  ): Promise<"not_ready" | "same_day" | "full" | "coordinated"> {
+  ): Promise<"not_ready" | "same_day" | "full" | "capacity_denied" | "coordinated"> {
     if (!readyToCoordinate(r)) return "not_ready";
     for (const p of r.parties) {
       const location = await c.query<{ decision: string }>(
@@ -570,33 +759,208 @@ export class Store {
       );
       if (location.rows[0]?.decision !== "allowed") return "not_ready";
     }
-    const target = nextTuesday(now);
-    if (r.earliest_run_date && r.earliest_run_date > target.date) {
-      target.date = r.earliest_run_date;
-      target.sameDay = false;
-    }
-    if (target.sameDay && !adminSameDay) return "same_day";
-    await c.query(
-      "INSERT INTO transport_runs(date,capacity) VALUES($1,$2) ON CONFLICT DO NOTHING",
-      [target.date, this.config.TRANSPORT_CAPACITY],
-    );
+    const date = r.proposed_run_date;
+    if (!date) return "not_ready";
+    const today = nextTuesday(now);
+    if (today.sameDay && today.date === date && !adminSameDay) return "same_day";
+    await this.prepareTransportRun(c, date);
     const run = await c.query<{ capacity: number; status: string }>(
       "SELECT capacity,status FROM transport_runs WHERE date=$1 FOR UPDATE",
-      [target.date],
+      [date],
     );
     const used = await c.query<{ n: number }>(
       "SELECT count(*)::int AS n FROM requests WHERE run_date=$1 AND status IN ('coordinated','closed')",
-      [target.date],
+      [date],
     );
-    if (
-      run.rows[0]!.status !== "open" ||
-      used.rows[0]!.n >= run.rows[0]!.capacity
-    ) {
+    if (run.rows[0]!.status !== "open") {
       r.status = "waiting_capacity";
       return "full";
     }
+    if (used.rows[0]!.n >= run.rows[0]!.capacity) {
+      r.status = "waiting_capacity";
+      const approval = await this.askForCapacityApproval(c, r, date, run.rows[0]!.capacity);
+      return approval === "denied" ? "capacity_denied" : "full";
+    }
     r.status = "coordinated";
-    r.run_date = target.date;
+    r.run_date = date;
+    r.proposed_run_date = null;
     return "coordinated";
+  }
+  async resolveCapacityApproval(
+    c: pg.PoolClient,
+    date: string | null,
+    approved: boolean,
+    adminPhone: string,
+  ): Promise<"approved" | "denied" | "none" | "ambiguous"> {
+    if (canonicalPhone(adminPhone) !== this.config.ADMIN_PHONE)
+      throw new AppError("admin_required", 403);
+    const pending = await c.query<{ id: string; run_date: string; requested_capacity: number }>(
+      `SELECT id,run_date::text,requested_capacity FROM transport_capacity_approvals
+       WHERE status='pending' AND ($1::date IS NULL OR run_date=$1)
+       ORDER BY requested_at FOR UPDATE`,
+      [date],
+    );
+    if (!pending.rows.length) return "none";
+    if (pending.rows.length !== 1) return "ambiguous";
+    const row = pending.rows[0]!;
+    if (approved) {
+      await c.query("SELECT date FROM transport_runs WHERE date=$1 FOR UPDATE", [row.run_date]);
+      const run = await c.query<{ status: string }>(
+        "SELECT status FROM transport_runs WHERE date=$1",
+        [row.run_date],
+      );
+      if (run.rows[0]?.status !== "open") throw new AppError("transport_run_closed", 409);
+      if (row.requested_capacity > MAX_TRANSPORT_CAPACITY)
+        throw new AppError("transport_capacity_limit", 409);
+      await c.query("UPDATE transport_runs SET capacity=$2 WHERE date=$1", [row.run_date, row.requested_capacity]);
+    }
+    await c.query(
+      "UPDATE transport_capacity_approvals SET status=$2,resolved_at=clock_timestamp(),resolved_by=$3 WHERE id=$1",
+      [row.id, approved ? "approved" : "denied", this.config.ADMIN_PHONE],
+    );
+    await this.event(c, { trace_id: randomUUID() }, "admin", approved ? "capacity_approval_granted" : "capacity_approval_denied", {
+      date: row.run_date,
+      requested_capacity: row.requested_capacity,
+      approval_id: row.id,
+      admin_phone: this.config.ADMIN_PHONE,
+    }, null);
+    return approved ? "approved" : "denied";
+  }
+
+  /**
+   * Named cleanup for one phone: delete that phone's requests (so Tuesday
+   * capacity is freed) and reset the conversation, counters, and history.
+   * Safe in live: it does not use the destructive clear-all guard.
+   */
+  async purgePhone(phone: string): Promise<{ deletedRequests: number }> {
+    const canonical = canonicalPhone(phone);
+    return this.transaction(async (c) => {
+      const contacts = await c.query<{ id: string }>(
+        "SELECT id FROM contacts WHERE phone=$1 FOR UPDATE",
+        [canonical],
+      );
+      const contactIds = contacts.rows.map((row) => row.id);
+      const requests = await c.query<{ id: string }>(
+        `SELECT DISTINCT r.id
+           FROM requests r
+           JOIN request_parties p ON p.request_id=r.id
+           JOIN contacts co ON co.id=p.contact_id
+          WHERE co.phone=$1`,
+        [canonical],
+      );
+      const requestIds = requests.rows.map((row) => row.id);
+      if (requestIds.length) {
+        await c.query(
+          "UPDATE conversations SET selected_request_id=NULL WHERE selected_request_id=ANY($1::uuid[])",
+          [requestIds],
+        );
+        await c.query(
+          "DELETE FROM integration_outbox WHERE event_id IN (SELECT id FROM request_events WHERE request_id=ANY($1::uuid[]))",
+          [requestIds],
+        );
+        await c.query(
+          "DELETE FROM request_events WHERE request_id=ANY($1::uuid[])",
+          [requestIds],
+        );
+        await c.query(
+          "DELETE FROM request_verifications WHERE request_id=ANY($1::uuid[])",
+          [requestIds],
+        );
+        await c.query(
+          "DELETE FROM outbox WHERE request_id=ANY($1::uuid[])",
+          [requestIds],
+        );
+        await c.query("DELETE FROM matches WHERE request_id=ANY($1::uuid[])", [
+          requestIds,
+        ]);
+        await c.query(
+          "DELETE FROM request_media WHERE request_id=ANY($1::uuid[])",
+          [requestIds],
+        );
+        await c.query(
+          "DELETE FROM request_parties WHERE request_id=ANY($1::uuid[])",
+          [requestIds],
+        );
+        await c.query(
+          "DELETE FROM request_items WHERE request_id=ANY($1::uuid[])",
+          [requestIds],
+        );
+        await c.query("DELETE FROM requests WHERE id=ANY($1::uuid[])", [
+          requestIds,
+        ]);
+      }
+      if (!contactIds.length) return { deletedRequests: requestIds.length };
+      const conversations = await c.query<{ id: string }>(
+        "SELECT id FROM conversations WHERE contact_id=ANY($1::uuid[])",
+        [contactIds],
+      );
+      const conversationIds = conversations.rows.map((row) => row.id);
+      const messages = await c.query<{ id: string }>(
+        `SELECT id FROM messages
+          WHERE contact_id=ANY($1::uuid[])
+             OR conversation_id=ANY($2::uuid[])`,
+        [contactIds, conversationIds],
+      );
+      const messageIds = messages.rows.map((row) => row.id);
+      if (messageIds.length) {
+        await c.query(
+          "DELETE FROM request_events WHERE message_id=ANY($1::uuid[])",
+          [messageIds],
+        );
+        await c.query(
+          "DELETE FROM command_results WHERE message_id=ANY($1::uuid[])",
+          [messageIds],
+        );
+        await c.query(
+          "DELETE FROM outbox WHERE message_id=ANY($1::uuid[]) OR phone=$2",
+          [messageIds, canonical],
+        );
+        await c.query(
+          "DELETE FROM request_locations WHERE message_id=ANY($1::uuid[])",
+          [messageIds],
+        );
+        await c.query(
+          "DELETE FROM turn_messages WHERE message_id=ANY($1::uuid[])",
+          [messageIds],
+        );
+        await c.query(
+          "UPDATE messages SET media_id=NULL WHERE id=ANY($1::uuid[])",
+          [messageIds],
+        );
+        await c.query("DELETE FROM media WHERE message_id=ANY($1::uuid[])", [
+          messageIds,
+        ]);
+        await c.query(
+          "UPDATE messages SET turn_id=NULL WHERE id=ANY($1::uuid[])",
+          [messageIds],
+        );
+        await c.query("DELETE FROM messages WHERE id=ANY($1::uuid[])", [
+          messageIds,
+        ]);
+      } else {
+        await c.query("DELETE FROM outbox WHERE phone=$1", [canonical]);
+      }
+      if (conversationIds.length) {
+        await c.query(
+          "DELETE FROM conversation_resets WHERE conversation_id=ANY($1::uuid[])",
+          [conversationIds],
+        );
+        await c.query(
+          "DELETE FROM conversation_turns WHERE conversation_id=ANY($1::uuid[])",
+          [conversationIds],
+        );
+        await c.query(
+          `UPDATE conversations
+              SET mode='bot', selected_request_id=NULL, pending_counterparty_name=NULL,
+                  pending_counterparty_phone=NULL, version=version+1
+            WHERE id=ANY($1::uuid[])`,
+          [conversationIds],
+        );
+      }
+      await c.query("DELETE FROM searches WHERE contact_id=ANY($1::uuid[])", [
+        contactIds,
+      ]);
+      return { deletedRequests: requestIds.length };
+    });
   }
 }

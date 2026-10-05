@@ -19,8 +19,16 @@ import {
   type Log,
   type Request,
 } from "../domain/types.js";
-import { localDate, statusText } from "../domain/policies.js";
-import { integrationAdapters } from "./integration-port.js";
+import { localDate, nextQuestion, statusText } from "../domain/policies.js";
+import {
+  integrationAdapters,
+  IntegrationDeliveryError,
+  type IntegrationAdapter,
+  type IntegrationEvent,
+} from "./integration-port.js";
+const INTEGRATION_MAX_ATTEMPTS = 3;
+const INTEGRATION_RETRY_DELAY_SECONDS = 2;
+const INTEGRATION_ACTIVE_TIMEOUT_SECONDS = 60;
 export interface RuntimeOverrides {
   pool?: pg.Pool;
   planner?: Planner;
@@ -28,6 +36,7 @@ export interface RuntimeOverrides {
   storage?: MediaStorage;
   queueOptions?: Partial<ConstructorOptions>;
   now?: () => Date;
+  integrationAdapters?: ReadonlyMap<string, IntegrationAdapter>;
 }
 export class Runtime {
   readonly pool: pg.Pool;
@@ -39,20 +48,19 @@ export class Runtime {
   private initializing = false;
   private heartbeat: NodeJS.Timeout | undefined;
   private planner: Planner | null = null;
+  private readonly adapters: ReadonlyMap<string, IntegrationAdapter>;
   constructor(
     readonly config: Config,
     readonly log: Log,
     private readonly overrides: RuntimeOverrides = {},
   ) {
     this.pool = overrides.pool ?? makePool(config, log);
+    this.adapters = overrides.integrationAdapters ?? integrationAdapters;
   }
   async start(workers = true): Promise<void> {
     if (this.initializing || this.ready) return;
     this.initializing = true;
     try {
-      await this.pool.query(
-        "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_counterparty_name text",
-      );
       const version = await this.pool.query<{ n: number }>(
         "SELECT count(*)::int AS n FROM pgmigrations",
       );
@@ -120,13 +128,15 @@ export class Runtime {
             for (const j of jobs) await engine.send(j.data.id);
           },
         );
-        await queue.boss.work<JobData, void, typeof settings>(
-          "integration",
-          { ...settings, localConcurrency: 1 },
-          async (jobs) => {
-            for (const j of jobs) await this.deliverIntegration(j.data.id);
-          },
-        );
+        if (this.config.INTEGRATION_DISPATCH) {
+          await queue.boss.work<JobData, void, typeof settings>(
+            "integration",
+            { ...settings, localConcurrency: 1 },
+            async (jobs) => {
+              for (const j of jobs) await this.deliverIntegration(j.data.id);
+            },
+          );
+        }
         await queue.boss.work<JobData, void, typeof settings>(
           "ops",
           { ...settings, localConcurrency: 1 },
@@ -149,6 +159,7 @@ export class Runtime {
         // A deployment or a worker restart must never strand an accepted
         // WhatsApp message or an outbound reply in the database. Rebuild the
         // lightweight queue jobs from durable state before declaring ready.
+        await this.reconcileCompletedTurns();
         const recoverIdentity = await this.pool.query<{ id: string }>(
           `SELECT id FROM messages
             WHERE contact_id IS NULL AND processed_at IS NULL
@@ -194,14 +205,7 @@ export class Runtime {
             ]);
           });
         }
-        const recoverIntegrations = await this.pool.query<{ id: string; integration: string }>(
-          "SELECT id,integration FROM integration_outbox WHERE state='pending' ORDER BY id LIMIT 500",
-        );
-        for (const row of recoverIntegrations.rows) {
-          await store.transaction(async (c) => {
-            await queue.send(c, "integration", { id: row.id }, row.integration);
-          });
-        }
+        if (this.config.INTEGRATION_DISPATCH) await this.recoverIntegrationQueue();
         await this.beat();
         this.heartbeat = setInterval(
           () =>
@@ -224,31 +228,84 @@ export class Runtime {
     }
   }
 
-  private async deliverIntegration(id: string): Promise<void> {
+  /**
+   * A process can stop after the message commit but before the turn terminal
+   * state is written. Once every durable message in a turn is already
+   * processed, replaying it is both unnecessary and unsafe; close the turn
+   * before startup recovery inspects pending messages.
+   */
+  async reconcileCompletedTurns(): Promise<number> {
+    const result = await this.pool.query(
+      `UPDATE conversation_turns t
+          SET status='completed', completed_at=COALESCE(completed_at, clock_timestamp())
+        WHERE t.status IN ('pending','processing')
+          AND EXISTS (SELECT 1 FROM turn_messages tm WHERE tm.turn_id=t.id)
+          AND NOT EXISTS (
+            SELECT 1
+              FROM turn_messages tm
+              JOIN messages m ON m.id=tm.message_id
+             WHERE tm.turn_id=t.id AND m.processed_at IS NULL
+          )`,
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async deliverIntegration(id: string): Promise<void> {
     const row = await this.pool.query<{
       integration: string;
-      state: "pending" | "delivered" | "failed";
+      state: "pending" | "active" | "delivered" | "dead_letter";
+      attempts: number;
       event_id: string;
+      idempotency_key: string;
+      schema_version: number;
+      occurred_at: string;
+      last_error: string | null;
       event_type: string;
       request_id: string | null;
-      occurred_at: string;
       data: unknown;
     }>(
-      `SELECT io.integration,io.state,io.event_id::text,ev.event_type,
-              ev.request_id,ev.created_at::text AS occurred_at,ev.data
+      `SELECT io.integration,io.state,io.attempts,io.idempotency_key,
+              io.event_id::text,ev.data->>'schema_version' AS schema_version,
+              ev.created_at::text AS occurred_at,io.last_error,
+              ev.event_type,ev.request_id,ev.data
          FROM integration_outbox io JOIN request_events ev ON ev.id=io.event_id
         WHERE io.id=$1`,
       [id],
     );
     const item = row.rows[0];
     if (!item || item.state !== "pending") return;
-    const adapter = integrationAdapters.get(item.integration);
+    const claim = await this.pool.query<{ attempts: number }>(
+      `UPDATE integration_outbox io
+          SET state='active',attempts=io.attempts+1,last_attempt_at=clock_timestamp()
+        WHERE io.id=$1 AND io.state='pending'
+          AND (io.next_attempt_at IS NULL OR io.next_attempt_at<=clock_timestamp())
+          AND NOT EXISTS (
+            SELECT 1 FROM integration_outbox prior
+             WHERE prior.integration=io.integration
+               AND prior.event_id<io.event_id
+               AND prior.state<>'delivered'
+          )
+        RETURNING attempts`,
+      [id],
+    );
+    if (!claim.rowCount) return;
+    const attempts = claim.rows[0]!.attempts;
+    const adapter = this.adapters.get(item.integration);
     if (!adapter) {
       await this.pool.query(
-        "UPDATE integration_outbox SET state='failed',attempts=attempts+1,last_error='adapter_not_registered' WHERE id=$1 AND state='pending'",
+        "UPDATE integration_outbox SET state='dead_letter',last_error='adapter_not_registered',error_class='terminal',terminal_at=clock_timestamp() WHERE id=$1 AND state='active'",
         [id],
       );
       this.log.error({ code: "integration_adapter_missing", integration: item.integration, outbox_id: id });
+      return;
+    }
+    const event = item.data as Record<string, unknown>;
+    if (Number(event.schema_version) !== 1) {
+      await this.pool.query(
+        "UPDATE integration_outbox SET state='dead_letter',last_error='unsupported_schema_version',error_class='terminal',terminal_at=clock_timestamp() WHERE id=$1 AND state='active'",
+        [id],
+      );
+      this.log.error({ code: "integration_schema_version_unsupported", integration: item.integration, outbox_id: id });
       return;
     }
     try {
@@ -256,29 +313,70 @@ export class Runtime {
         {
           id: item.event_id,
           type: item.event_type,
+              schemaVersion: Number(event.schema_version ?? item.schema_version),
+              deliveryKey: (event.delivery_keys as Record<string, string> | undefined)?.[item.integration] ?? item.idempotency_key,
           requestId: item.request_id,
           occurredAt: item.occurred_at,
-          data: item.data,
-        },
-        { idempotencyKey: id, signal: AbortSignal.timeout(30000) },
+          data: event.payload ?? item.data,
+        } satisfies IntegrationEvent,
+        { idempotencyKey: item.idempotency_key, signal: AbortSignal.timeout(30000) },
       );
       await this.pool.query(
-        "UPDATE integration_outbox SET state='delivered',attempts=attempts+1,delivered_at=clock_timestamp(),last_error=NULL WHERE id=$1 AND state='pending'",
+        "UPDATE integration_outbox SET state='delivered',delivered_at=clock_timestamp(),last_error=NULL,terminal_at=NULL WHERE id=$1 AND state='active'",
         [id],
       );
     } catch (e) {
+      const retryable = typeof e === "object" && e !== null && "retryable" in e && e.retryable === true;
+      const ambiguous = typeof e === "object" && e !== null && "ambiguous" in e && e.ambiguous === true;
+      const code = (e instanceof IntegrationDeliveryError ? e.message : errorCode(e)).slice(0, 160);
+      if (ambiguous || !retryable || attempts >= INTEGRATION_MAX_ATTEMPTS) {
+        await this.pool.query(
+          "UPDATE integration_outbox SET state='dead_letter',last_error=$2,error_class=$3,terminal_at=clock_timestamp() WHERE id=$1 AND state='active'",
+          [id, code, ambiguous ? "ambiguous" : retryable ? "retry_exhausted" : "terminal"],
+        );
+        if (ambiguous) this.log.error({ code: "integration_ambiguous_delivery", integration: item.integration, outbox_id: id });
+        return;
+      }
       await this.pool.query(
-        "UPDATE integration_outbox SET state='failed',attempts=attempts+1,last_error=$2 WHERE id=$1 AND state='pending'",
-        [id, errorCode(e)],
+        "UPDATE integration_outbox SET state='pending',next_attempt_at=clock_timestamp()+($2 * interval '1 second'),last_error=$3,error_class='retryable' WHERE id=$1 AND state='active'",
+        [id, INTEGRATION_RETRY_DELAY_SECONDS * 2 ** Math.max(0, attempts - 1), code],
       );
-      throw new RetryableError(errorCode(e));
+      throw new RetryableError(code);
     }
+  }
+  async recoverIntegrationQueue(): Promise<void> {
+    if (!this.queue) return;
+    await this.pool.query(
+      `UPDATE integration_outbox
+          SET state='pending'
+        WHERE state='active'
+          AND (last_attempt_at IS NULL OR last_attempt_at < clock_timestamp()-interval '${INTEGRATION_ACTIVE_TIMEOUT_SECONDS} seconds')`,
+    );
+    const rows = await this.pool.query<{ id: string; integration: string }>(
+      `SELECT io.id,io.integration
+         FROM integration_outbox io
+        WHERE io.state='pending'
+          AND (io.next_attempt_at IS NULL OR io.next_attempt_at<=clock_timestamp())
+          AND NOT EXISTS (
+            SELECT 1 FROM integration_outbox prior
+             WHERE prior.integration=io.integration
+               AND prior.event_id<io.event_id
+               AND prior.state<>'delivered'
+          )
+        ORDER BY io.event_id
+        LIMIT 500`,
+    );
+    for (const row of rows.rows)
+      await this.store?.transaction((c) =>
+        this.queue!.send(c, "integration", { id: row.id }, `integration:${row.integration}:${row.id}`),
+      );
   }
   private async beat(): Promise<void> {
     await this.pool.query(
       "INSERT INTO worker_heartbeats(id) VALUES($1) ON CONFLICT(id) DO UPDATE SET updated_at=clock_timestamp()",
       [this.workerId],
     );
+    if (this.config.INTEGRATION_DISPATCH) await this.recoverIntegrationQueue();
   }
   async check(): Promise<void> {
     if (!this.ready || !this.engine || !this.queue?.started)
@@ -303,6 +401,7 @@ export class Runtime {
         [date, ["coordinated", "closed"]],
       );
       const requests: Request[] = [];
+      if (!ids.rows.length) return;
       for (const x of ids.rows) requests.push(await store.request(x.id));
       await store.transaction((c) =>
         store.outbound(
@@ -329,11 +428,23 @@ export class Runtime {
     const failedMedia = await this.pool.query<{ n: number }>(
       "SELECT count(*)::int n FROM messages WHERE media_state='pending' AND received_at<clock_timestamp()-interval '60 seconds'",
     );
+    const integrations = this.config.INTEGRATION_DISPATCH
+      ? await this.pool.query<{ n: number; dead: number; stuck: number }>(
+          `SELECT count(*)::int n,
+                  count(*) FILTER (WHERE state='dead_letter')::int dead,
+                  count(*) FILTER (WHERE state='active' AND last_attempt_at < clock_timestamp()-interval '60 seconds')::int stuck
+             FROM integration_outbox
+            WHERE state='dead_letter'
+               OR (state='active' AND last_attempt_at < clock_timestamp()-interval '60 seconds')
+               OR (state='pending' AND created_at < clock_timestamp()-interval '60 seconds')`,
+        )
+      : { rows: [{ n: 0, dead: 0, stuck: 0 }] };
     if (
       Object.values(blocked).some((v) => v > 0) ||
       uncertain.rows[0]!.n > 0 ||
       formatting.rows[0]!.n > 0 ||
-      failedMedia.rows[0]!.n > 0
+      failedMedia.rows[0]!.n > 0 ||
+      integrations.rows[0]!.n > 0
     ) {
       this.log.error({
         code: "operations_attention",
@@ -341,6 +452,7 @@ export class Runtime {
         uncertain: uncertain.rows[0]!.n,
         notice_formatting_overdue: formatting.rows[0]!.n,
         media_overdue: failedMedia.rows[0]!.n,
+        integrations: integrations.rows[0],
       });
       await store.transaction((c) =>
         store.outbound(
@@ -348,7 +460,7 @@ export class Runtime {
           { trace_id: randomUUID(), mode: this.config.BOT_MODE },
           {
             phone: this.config.ADMIN_PHONE,
-          text: `נדרשת בדיקת מערכת חיים יחד.\nתורים חסומים: ${JSON.stringify(blocked)}\nשליחות לא ודאיות: ${uncertain.rows[0]!.n}\nניסוח הודעות תקוע: ${formatting.rows[0]!.n}\nקבצים בהמתנה מעל דקה: ${failedMedia.rows[0]!.n}\nיש לבדוק במסך הניהול. אם WhatsApp אינו זמין, ההתראה נשמרת בלוג וב־admin API.`,
+          text: `נדרשת בדיקת מערכת חיים יחד.\nתורים חסומים: ${JSON.stringify(blocked)}\nשליחות לא ודאיות: ${uncertain.rows[0]!.n}\nניסוח הודעות תקוע: ${formatting.rows[0]!.n}\nקבצים בהמתנה מעל דקה: ${failedMedia.rows[0]!.n}\nאינטגרציות תקועות/סופיות: ${integrations.rows[0]!.n} (dead-letter: ${integrations.rows[0]!.dead}, active תקוע: ${integrations.rows[0]!.stuck})\nיש לבדוק במסך הניהול. אם WhatsApp אינו זמין, ההתראה נשמרת בלוג וב־admin API.`,
           },
           `ops:${now.toISOString().slice(0, 13)}`,
         ),
@@ -361,6 +473,38 @@ export class Runtime {
       await store.transaction(async (c) => {
         const r = await store.request(row.id, c, true);
         if (r.status !== "waiting_capacity") return;
+        if (!r.proposed_run_date) {
+          const proposed = await store.proposeScheduleDate(c, r, now);
+          if (!proposed) return;
+          r.proposed_run_date = proposed;
+          r.status = "awaiting_approval";
+          for (const p of r.parties) {
+            p.schedule_approved = false;
+            p.schedule_approved_date = null;
+            p.schedule_approved_at = null;
+          }
+          await store.save(c, r);
+          const trace_id = randomUUID();
+          await store.event(c, { trace_id }, "system", "schedule_proposed_after_capacity_approval", { date: proposed }, r.id);
+          for (const p of r.parties) {
+            const permission = await c.query<{ state: string }>(
+              "SELECT state FROM request_verifications WHERE request_id=$1 AND role=$2",
+              [r.id, p.role],
+            );
+            const authorized = ["consented", "queued", "provider_accepted", "delivered", "approved"].includes(permission.rows[0]?.state ?? "");
+            if (!authorized) continue;
+            const notice = { phone: p.phone, text: nextQuestion(r, p.phone).text };
+            await store.outbound(
+              c,
+              { trace_id, mode: this.config.BOT_MODE },
+              notice,
+              `schedule-proposal-after-capacity:${r.id}:${proposed}:${p.phone}`,
+              r.id,
+              "pending",
+            );
+          }
+          return;
+        }
         if ((await store.coordinate(c, r, now)) === "coordinated") {
           await store.save(c, r);
           const trace_id = randomUUID();

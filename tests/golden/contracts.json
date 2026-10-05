@@ -1,0 +1,8 @@
+{
+  "direct_handoff": {"title":"Direct handoff","expected":{"origin":"direct","request_count":1},"completion_criteria":["request_created","recipient_linked","no_photo_gate"]},
+  "open_donation": {"title":"Open donation","expected":{"origin":"general","request_count":1,"photo_required":true},"completion_criteria":["request_created","photo_gate_before_details","opening_facts_retained"]},
+  "self_transfer": {"title":"Self transfer","expected":{"represents_both_parties":true,"request_count":1},"completion_criteria":["request_created","distinct_pickup_destination","same_person_roles"]},
+  "open_request": {"title":"Open request","expected":{"requester_flow":true,"donor_flow":false},"completion_criteria":["seeker_intent","no_photo_gate"]},
+  "cross_flow": {"title":"Cross-flow transitions","expected":{"request_count":1},"completion_criteria":["single_business_request","state_transition"]},
+  "failure_recovery": {"title":"Failure and recovery","expected":{"request_count":1},"completion_criteria":["idempotent_or_ordered_processing","no_duplicate_effect"]}
+}

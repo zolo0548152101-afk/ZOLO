@@ -1,0 +1,85 @@
+import type { FastifyRequest } from "fastify";
+import type { Config } from "../config.js";
+import { AppError } from "../domain/types.js";
+import { redactSecrets } from "./security.js";
+
+export type AdminCapability = "read-only" | "normal" | "destructive";
+const rank: Record<AdminCapability, number> = { "read-only": 0, normal: 1, destructive: 2 };
+const authenticated = new WeakMap<object, AdminCapability>();
+
+export function adminCapability(req: FastifyRequest): AdminCapability {
+  return authenticated.get(req) ?? "read-only";
+}
+
+export function bindAdminCapability(req: FastifyRequest, capability: AdminCapability): void {
+  authenticated.set(req, capability);
+}
+
+export function requireAdminCapability(
+  req: FastifyRequest,
+  required: Exclude<AdminCapability, "read-only">,
+): AdminCapability {
+  const capability = adminCapability(req);
+  if (rank[capability] < rank[required])
+    throw new AppError("admin_capability_forbidden", 403, "ההרשאה אינה מאפשרת את הפעולה.");
+  return capability;
+}
+
+export function assertAdminSameOrigin(req: FastifyRequest, c: Config): void {
+  let supplied: string | undefined = req.headers.origin;
+  if (!supplied && req.headers.referer) {
+    try { supplied = new URL(req.headers.referer).origin; }
+    catch { throw new AppError("csrf_origin_rejected", 403, "מקור הבקשה אינו מורשה."); }
+  }
+  if (!supplied) return;
+  const host = req.headers.host ?? `localhost:${c.PORT}`;
+  const allowed = new Set([`http://${host}`, `https://${host}`, `http://localhost:${c.PORT}`, `http://127.0.0.1:${c.PORT}`]);
+  if (!allowed.has(supplied)) throw new AppError("csrf_origin_rejected", 403, "מקור הבקשה אינו מורשה.");
+}
+
+export class AdminRateLimiter {
+  private readonly buckets = new Map<string, { started: number; count: number }>();
+  constructor(private readonly max = 20, private readonly windowMs = 60_000) {}
+  check(req: FastifyRequest, token: string): void {
+    const route = req.routeOptions.url ?? req.url.split("?")[0];
+    const key = `${token}:${req.ip}:${route}`;
+    const now = Date.now();
+    const current = this.buckets.get(key);
+    if (!current || now - current.started >= this.windowMs) {
+      this.buckets.set(key, { started: now, count: 1 });
+      return;
+    }
+    current.count += 1;
+    if (current.count > this.max) throw new AppError("admin_rate_limited", 429, "קצב הפעולות חרג מהמותר.");
+  }
+}
+
+export function adminAuditFields(req: FastifyRequest): { actor: string; capability: AdminCapability } {
+  return { actor: "admin-http", capability: adminCapability(req) };
+}
+
+export function adminAuditRecord(
+  req: FastifyRequest,
+  operation: string,
+  target: string,
+  result = "success",
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return redactSecrets({
+    operation,
+    timestamp: new Date().toISOString(),
+    ...adminAuditFields(req),
+    target,
+    result,
+    ...extra,
+  }) as Record<string, unknown>;
+}
+
+export function assertDestructiveAllowed(req: FastifyRequest, c: Config): AdminCapability {
+  const capability = c.HAIM_ALLOW_ADMIN_CLEAR_ALL
+    ? requireAdminCapability(req, "normal")
+    : requireAdminCapability(req, "destructive");
+  if (!c.HAIM_ALLOW_ADMIN_CLEAR_ALL && (c.NODE_ENV === "production" || c.BOT_MODE === "live"))
+    throw new AppError("destructive_admin_forbidden", 403, "פעולה הרסנית חסומה בסביבת production/live.");
+  return capability;
+}

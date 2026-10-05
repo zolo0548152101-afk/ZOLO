@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { canonicalPhone } from "./domain/policies.js";
+import { canonicalPhone, DEFAULT_TRANSPORT_CAPACITY } from "./domain/policies.js";
+import { validateAdminSecret } from "./application/security.js";
 const flag = z.enum(["true", "false"]).transform((v) => v === "true");
 const schemas = z.enum([
   "haim_core",
@@ -21,6 +22,13 @@ const envSchema = z.object({
     .string()
     .default("pmpt_6a9d0c66737881938a0f60f5df9088cb0806a26699929a86"),
   OPENAI_PROMPT_VERSION: z.string().default("23"),
+  // Optional hosted prompt overrides. When empty, decode/phrase use the git
+  // files prompts/decode.txt and prompts/phrase.txt via Responses instructions
+  // (preferred — reusable OpenAI prompt objects are being deprecated).
+  OPENAI_DECODE_PROMPT_ID: z.string().default(""),
+  OPENAI_DECODE_PROMPT_VERSION: z.string().default(""),
+  OPENAI_PHRASE_PROMPT_ID: z.string().default(""),
+  OPENAI_PHRASE_PROMPT_VERSION: z.string().default(""),
   OPENAI_REASONING_EFFORT: z.enum(["none", "low", "medium"]).default("low"),
   OPENAI_TIMEOUT_MS: z.coerce
     .number()
@@ -41,6 +49,14 @@ const envSchema = z.object({
   // The deployment owner may deliberately use a short local admin PIN.
   // It is still required and never returned by the service.
   HAIM_ADMIN_TOKEN: z.string().min(4),
+  // When true, HAIM_ADMIN_TOKEN may be a short PIN (e.g. 2101) even in live.
+  // Capability tokens still require long secrets when set.
+  HAIM_ALLOW_SHORT_ADMIN_PIN: flag.default(false),
+  // Optional distinct capabilities. Empty values fail closed and are never
+  // accepted as credentials; callers cannot self-promote with a header.
+  HAIM_ADMIN_READONLY_TOKEN: z.string().default(""),
+  HAIM_ADMIN_DESTRUCTIVE_TOKEN: z.string().default(""),
+  HAIM_ALLOW_ADMIN_CLEAR_ALL: flag.default(false),
   ADMIN_PHONE: z.string().default("584152101").transform(canonicalPhone),
   WAHA_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).default(10000),
   WAHA_MEDIA_ORIGINS: z.string().default(""),
@@ -63,16 +79,53 @@ const envSchema = z.object({
     .max(120000)
     .default(45000),
   OPENAI_TRANSCRIBE_MODEL: z.string().default("gpt-4o-mini-transcribe"),
-  TRANSPORT_CAPACITY: z.coerce.number().int().min(1).max(100).default(10),
+  TRANSPORT_CAPACITY: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(DEFAULT_TRANSPORT_CAPACITY)
+    .default(DEFAULT_TRANSPORT_CAPACITY),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
   ENABLE_SIMULATE: flag.default(true),
+  // Keep SQL tables and admin replay, but do not enqueue integration work
+  // from every live message event unless explicitly enabled.
+  INTEGRATION_DISPATCH: flag.default(false),
   LIVE_ALLOWLIST: z.string().default(""),
   LIVE_DEPENDENCIES_VERIFIED: flag.default(false),
   MEDIA_VOLUME_CONFIRMED: flag.default(false),
+  // Quiet window: wait for this much silence after the newest inbound
+  // message before merging a burst into one reply.
+  MESSAGE_COALESCE_QUIET_MS: z.coerce
+    .number()
+    .int()
+    .min(50)
+    .max(15000)
+    .default(2800),
+  MESSAGE_COALESCE_MAX_MS: z.coerce
+    .number()
+    .int()
+    .min(100)
+    .max(30000)
+    .default(10000),
 });
 export type Config = z.infer<typeof envSchema>;
 export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const c = envSchema.parse(env);
+  const adminCapabilityTokens = [
+    c.HAIM_ADMIN_TOKEN,
+    c.HAIM_ADMIN_READONLY_TOKEN,
+    c.HAIM_ADMIN_DESTRUCTIVE_TOKEN,
+  ].filter(Boolean);
+  if (new Set(adminCapabilityTokens).size !== adminCapabilityTokens.length)
+    throw new Error("admin_capability_credentials_must_be_distinct");
+  if (c.NODE_ENV === "production" || c.BOT_MODE === "live") {
+    if (!c.HAIM_ALLOW_SHORT_ADMIN_PIN && !validateAdminSecret(c.HAIM_ADMIN_TOKEN))
+      throw new Error("admin_token_too_weak");
+    if (c.HAIM_ADMIN_READONLY_TOKEN && !validateAdminSecret(c.HAIM_ADMIN_READONLY_TOKEN))
+      throw new Error("admin_readonly_token_too_weak");
+    if (c.HAIM_ADMIN_DESTRUCTIVE_TOKEN && !validateAdminSecret(c.HAIM_ADMIN_DESTRUCTIVE_TOKEN))
+      throw new Error("admin_destructive_token_too_weak");
+  }
   if (c.BOT_MODE === "live" && c.DB_SCHEMA !== "haim_core")
     throw new Error("live_requires_haim_core");
   if (

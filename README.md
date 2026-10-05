@@ -25,7 +25,10 @@
 npm ci --ignore-scripts
 npm run build
 npm test
+npm run test:chaos
 ```
+
+`npm run test:chaos` runs the shadow conversation suite against a local disposable database (`postgres://postgres:disposable-test-only@127.0.0.1:5432/haim_chaos`, schema `haim_core_test`). It mocks WhatsApp and the model. It refuses a non-local database. After every scenario it deletes that phone’s requests and resets the conversation with the named cleanup `POST /admin/requests/cancel-phone` (confirm `בטל פניות`), which frees Tuesday capacity. The suite calls that same purge directly, and one scenario also calls the HTTP action.
 
 לאחר הגדרת משתני ENV.example דרך סביבת ההרצה:
 

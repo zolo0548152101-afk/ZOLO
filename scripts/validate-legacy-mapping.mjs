@@ -1,7 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-const [sourceFile, mappingFile = "config/legacy-sheets-v9-mapping.json"] = process.argv.slice(2);
+const argv = process.argv.slice(2);
+const fileIndex = argv.indexOf("--file");
+const sourceFile = fileIndex >= 0 ? argv[fileIndex + 1] : argv[0];
+const mappingFile = argv[fileIndex >= 0 ? fileIndex + 3 : 1] ?? "config/legacy-sheets-v9-mapping.json";
 if (!sourceFile) throw new Error("Usage: node scripts/validate-legacy-mapping.mjs <AppsScript.gs> [mapping.json]");
 const source = await readFile(sourceFile, "utf8");
 const block = source.match(/const\s+HEADERS\s*=\s*\[(.*?)\];/s)?.[1];

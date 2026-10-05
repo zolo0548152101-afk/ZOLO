@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "work_unit": "PHASE-4-T21-T22-OBSERVABILITY-HARDENING",
+  "verified_source_sha": "560ab5a82db838344002cbef3abbca06f63a33aa",
+  "verification_started_at": "2026-10-04T13:43:00Z",
+  "verification_finished_at": "2026-10-04T13:49:47Z",
+  "runtime": {
+    "local_node": "v24.19.0",
+    "verification_node": "v24.21.0",
+    "postgres_disposable": "17.11",
+    "live_access": false
+  },
+  "t21_observability": {
+    "status": "PASS",
+    "operator_surface": "/admin/metrics",
+    "signals": [
+      "inbox_backlog", "outbox_backlog", "uncertain_delivery",
+      "outbox_retrying_delivery", "integration_retrying_delivery",
+      "integration_stale_active", "dead_letter", "stale_lease",
+      "fifo_blocker", "prompt_failure", "sheets_review_required",
+      "sheets_import_failed"
+    ],
+    "configurable_threshold_transitions": "PASS",
+    "failed_import_and_integration_states": "PASS",
+    "diagnostic_redaction": "PASS; authorization Bearer, standalone Bearer, and key/value forms",
+    "bounded_context_bytes": 512,
+    "observe_only": true
+  },
+  "t22_hardening": {
+    "status": "PASS",
+    "strong_admin_and_optional_capability_tokens": "PASS",
+    "capability_separation": "PASS",
+    "rate_limit_and_same_origin": "PASS",
+    "recursive_secret_redaction": "PASS",
+    "integration_error_redaction": "PASS",
+    "backup_restore_drill": {
+      "status": "PASS",
+      "disposable_only": true,
+      "isolated_source_target": true,
+      "target_proof": {
+        "application_name": "haim-qa-backup-restore",
+        "database_name_contract": true,
+        "source_database": "haim_core_test",
+        "target_database": "haim_qa_disposable",
+        "distinct_database_identity": true
+      },
+      "target_state_verification": "PASS",
+      "media_content_and_metadata": "PASS",
+      "media_storage_key_resolution": "PASS",
+      "media_checksum_and_size_match": "PASS",
+      "configuration_metadata": "PASS",
+      "rpo_minutes_tested": 60,
+      "rto_minutes_tested": 30,
+      "negative_safety_probe": "PASS"
+    }
+  },
+  "gates": {
+    "build_typecheck": "PASS",
+    "unit": "64/64 PASS",
+    "t21_t22_targeted": "5/5 PASS",
+    "integration": "76/76 PASS",
+    "sheets_import": "30/30 PASS",
+    "regressions": "26/26 PASS",
+    "offline_probes": "12/12 PASS",
+    "golden": "52/52 PASS",
+    "migration_fk_checksum": "PASS; FK failures 0",
+    "backup_restore": "PASS; restored=true and target_verified=true",
+    "ci_verification_sha": "560ab5a82db838344002cbef3abbca06f63a33aa",
+    "ci_verification_runs": [37206883702, 37206881161],
+    "secret_privacy_scan": "PASS",
+    "diff_check": "PASS"
+  },
+  "blockers": [],
+  "safety": {
+    "production_access": false,
+    "server_access": false,
+    "ssh_access": false,
+    "easypanel_access": false,
+    "live_waha": false,
+    "live_db": false,
+    "real_messages": false,
+    "deployment": false,
+    "t23_started": false
+  }
+}

@@ -11,7 +11,8 @@
       "disassembly_question_required": false
     },
     "expected_actions": ["create_or_update_direct_request", "offer_verification"],
-    "expected_message_intent": "acknowledge_direct_handoff_and_ask_verification_consent"
+    "expected_message_intent": "acknowledge_direct_handoff_and_ask_verification_consent",
+    "invariant_ids": ["REQ-001", "PARTY-001", "PARTY-002", "FACT-001", "FACT-002", "FACT-003", "FLOW-DIRECT-001", "FLOW-DIRECT-002"]
   },
   {
     "id": "open-donation-photo-first",
@@ -25,7 +26,8 @@
       "disassembly_question_required": true
     },
     "expected_actions": ["request_photo_before_details"],
-    "expected_message_intent": "ask_for_item_photo"
+    "expected_message_intent": "ask_for_item_photo",
+    "invariant_ids": ["REQ-001", "FACT-001", "FACT-002", "FACT-003", "FLOW-DONATE-001", "FLOW-DONATE-002"]
   },
   {
     "id": "rapid-multimodal-burst",
@@ -38,7 +40,8 @@
       "photo_required": true
     },
     "expected_actions": ["coalesce_turn", "extract_contact", "extract_location"],
-    "expected_message_intent": "one_response_after_burst"
+    "expected_message_intent": "one_response_after_burst",
+    "invariant_ids": ["CONV-001", "CONV-003", "FACT-001", "FACT-004", "FLOW-DONATE-001"]
   },
   {
     "id": "verification-two-party-consent",
@@ -51,6 +54,7 @@
       "receiver_verification": "not_offered"
     },
     "expected_actions": ["enqueue_verification_notice", "record_verification_state"],
-    "expected_message_intent": "confirm_verification_notice_only_after_outbox"
+    "expected_message_intent": "confirm_verification_notice_only_after_outbox",
+    "invariant_ids": ["PARTY-004", "FACT-005", "SCHED-001", "OUTBOX-001", "OUTBOX-003"]
   }
 ]

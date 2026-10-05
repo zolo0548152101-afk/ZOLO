@@ -33,6 +33,7 @@ export const commandSchema = z.discriminatedUnion("type", [
     type: z.literal("donate"),
     items: z.array(itemInput).min(1).max(20),
     counterparty_phone: str,
+    counterparty_name: str.optional(),
     direct: z.boolean().optional(),
     free: fact,
     working: fact,
@@ -75,6 +76,11 @@ export const commandSchema = z.discriminatedUnion("type", [
   }),
   z.strictObject({ type: z.literal("approve_self"), request_number: ref }),
   z.strictObject({
+    type: z.literal("approve_schedule"),
+    request_number: ref,
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  }),
+  z.strictObject({
     type: z.literal("select"),
     request_number: z.number().int().positive(),
   }),
@@ -100,6 +106,17 @@ export const commandSchema = z.discriminatedUnion("type", [
     type: z.literal("contact_counterparty"),
     request_number: ref,
     contact: z.boolean(),
+  }),
+  z.strictObject({
+    type: z.literal("counterparty_candidate"),
+    request_number: ref,
+    phone: z.string().min(3).max(40),
+    name: str,
+  }),
+  z.strictObject({
+    type: z.literal("confirm_counterparty"),
+    request_number: ref,
+    accept: z.boolean(),
   }),
   z.strictObject({ type: z.literal("next") }),
   z.strictObject({
@@ -162,6 +179,8 @@ export interface Party {
   approved_at: string | null;
   approved_by: string | null;
   schedule_approved: boolean;
+  schedule_approved_date: string | null;
+  schedule_approved_at: string | null;
 }
 export interface RequestLocation {
   role: Role;
@@ -186,6 +205,7 @@ export interface Request {
   locations?: RequestLocation[];
   verification_states?: VerificationState[];
   run_date: string | null;
+  proposed_run_date: string | null;
   earliest_run_date: string | null;
   preferred_time?: string | null;
   represents_both_parties?: boolean;
@@ -206,6 +226,7 @@ export interface Conversation {
   selected_request_id: string | null;
   version: number;
   pending_counterparty_name: string | null;
+  pending_counterparty_phone?: string | null;
 }
 export interface Incoming {
   id: string;

@@ -1,0 +1,64 @@
+{
+  "stage": "4",
+  "work_unit": "T19",
+  "title": "durable integration outbox dispatcher",
+  "evidence_schema_version": 1,
+  "baseline_sha": "42858e597656fcc452d0a66ca09f52bb1ea7af9b",
+  "source_sha": "570d97af357e1c284b81a456b681315194346afa",
+  "verification_started_at": "2026-10-04T11:27:00+03:00",
+  "verification_finished_at": "2026-10-04T11:32:45+03:00",
+  "runtime": {
+    "node": "24-bookworm-slim / Node 24",
+    "postgres": "17-alpine",
+    "host": "disposable Docker PostgreSQL",
+    "external_calls": false
+  },
+  "gates": {
+    "build": "PASS",
+    "unit": { "passed": 64, "total": 64 },
+    "integration": { "passed": 76, "total": 76, "failed": 0, "cancelled": 0 },
+    "regressions": { "passed": 26, "total": 26, "probes": 12 },
+    "golden": { "passed": 52, "total": 52 },
+    "spec": "PASS",
+    "offline_probes": { "passed": 12, "external_calls": false },
+    "prompt_wiring": "PASS",
+    "migration": "PASS",
+    "foreign_key_check_failures": 0,
+    "schema_checksums": "PASS",
+    "diff_check": "PASS",
+    "secret_scan": "PASS"
+  },
+  "dispatcher_contract": {
+    "states": ["pending", "active", "delivered", "dead_letter"],
+    "max_attempts": 3,
+    "ambiguous_delivery": "dead_letter_without_retry",
+    "idempotency": "stable integration:<integration>:<event_id> key and claim-once transition",
+    "ordering": "per-integration event_id predecessor gate",
+    "adapter_boundary": "versioned IntegrationAdapter with AbortSignal and no provider implementation",
+    "schema_version": 1,
+    "replay": "normal-admin, reason-required, terminal-only, attempts reset",
+    "observability": "bounded admin metrics/details plus operations stuck/dead-letter signal and replay audit event",
+    "transaction_io": "adapter invocation occurs after durable claim transaction completes",
+    "enabled_only": true,
+    "restart_recovery": "stale active rows return to pending and eligible due pending rows are re-enqueued by startup and periodic recovery",
+    "queue_trigger_safety": "replay schedules its target in the same transaction; periodic recovery schedules due rows only after predecessor ordering is satisfied",
+    "event_delivery_key": "explicit envelope delivery_keys map is projected into IntegrationEvent.deliveryKey and matches adapter idempotency options"
+  },
+  "safety": {
+    "production_access": false,
+    "server_access": false,
+    "ssh_access": false,
+    "easypanel_access": false,
+    "live_waha_access": false,
+    "live_db_access": false,
+    "real_messages_sent": false,
+    "real_external_integration_calls": false,
+    "deployment_performed": false,
+    "pr2_merged": false,
+    "t20_started": false
+  },
+  "blockers": [],
+  "known_limits": [
+    "No live external provider adapter was invoked; the adapter boundary is verified with a deterministic in-process fake adapter."
+  ]
+}

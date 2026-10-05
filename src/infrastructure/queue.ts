@@ -67,9 +67,11 @@ export class Queue {
     name: QueueName,
     data: JobData,
     key: string,
+    options: { startAfter?: number | string | Date } = {},
   ): Promise<string> {
     const id = await this.boss.send(name, data, {
       singletonKey: key,
+      ...options,
       db: { executeSql: (text, values) => client.query(text, values) },
     });
     if (!id) throw new RetryableError("job_not_enqueued");

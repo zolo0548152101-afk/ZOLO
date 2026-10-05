@@ -1,0 +1,11 @@
+{
+  "at": "2026-10-05T20:33:00+00:00",
+  "request": 12,
+  "status": "coordinated",
+  "run_date": "2026-10-06",
+  "commit": "0ac1dcb",
+  "prompt_mode": "git_instructions",
+  "method": "WAHA sendText from default (Israel real WhatsApp) + signed webhook for Tal inbound; bot outbound real to both phones",
+  "ok": true,
+  "notes": "Full handoff with decode/phrase from prompts/*.txt via Responses instructions"
+}

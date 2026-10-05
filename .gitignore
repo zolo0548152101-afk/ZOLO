@@ -1,7 +1,12 @@
 node_modules/
 dist/
 dist-tests/
+.worktrees/
 .env
 .env.*
 data/
 *.log
+artifacts/qa/reviewer-watcher*.json
+artifacts/qa/reviewer-watcher*.lock
+artifacts/qa/codex-review-run-*.log
+artifacts/qa/t21-t22-backup-drill/

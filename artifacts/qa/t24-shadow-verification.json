@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "work_unit": "T24",
+  "verified_at": "2026-10-04T17:51:13Z",
+  "mode": "isolated_shadow",
+  "live_waha_touched": false,
+  "production_touched": false,
+  "scenarios": {
+    "passed": 5,
+    "total": 5,
+    "names": [
+      "direct coordination separate conversations",
+      "open donation retains donor facts",
+      "self transfer distinct endpoints",
+      "general request without phantom request",
+      "restart idempotency"
+    ]
+  },
+  "canonical_gates": {
+    "unit": "64/64 PASS",
+    "integration": "77/77 PASS",
+    "t21_t22": "5/5 PASS",
+    "ai_contract": "9/9 PASS",
+    "regressions": "26/26 PASS",
+    "golden": "52/52 PASS",
+    "backup_restore": "PASS",
+    "t24_shadow": "5/5 PASS"
+  },
+  "blockers": [],
+  "source_sha": "616524f8f069454d1f24b000623bec8b9405d745"
+}

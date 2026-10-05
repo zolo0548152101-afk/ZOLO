@@ -1,0 +1,58 @@
+{
+  "stage": "T18",
+  "evidence_schema_version": 2,
+  "baseline_commit": "05bdd5ce61a27243a4b69623f3448380e59c7c71",
+  "verified_source_sha": "1a42e23c0784845c651419c2e5e9b42997a7cc08",
+  "verification_started_at": "2026-10-04T09:05:00+03:00",
+  "verification_finished_at": "2026-10-04T10:24:27+03:00",
+  "scope": "Phase 4 T18 safe-admin correction only; no deploy, production, live WAHA, live DB, T19 or T20",
+  "node_version": "v24.19.0",
+  "runtime": {
+    "package_manager": "pnpm",
+    "linux_container": "node:24-bookworm-slim",
+    "database": "disposable PostgreSQL 17 container",
+    "database_schema": "haim_core_test",
+    "external_provider": "not used"
+  },
+  "tests": {
+    "unit": { "passed": 64, "total": 64, "result": "PASS" },
+    "integration_linux": { "passed": 71, "total": 71, "failed": 0, "cancelled": 0, "result": "PASS" },
+    "regressions": { "passed": 26, "total": 26, "probes": 12, "result": "PASS" },
+    "golden": { "passed": 52, "total": 52, "forbidden_detector_passed": 6, "forbidden_detector_total": 6, "result": "PASS" }
+  },
+  "typecheck": { "build": "PASS", "tests": "PASS" },
+  "migration": { "result": "PASS", "fresh_schema": true },
+  "foreign_key_check": { "result": "PASS", "failures": 0, "foreign_key_constraints_observed": 41 },
+  "schema_checksum_rows": 21,
+  "secret_scan": { "result": "PASS", "scope": "staged source and evidence diff; no credentials or runtime data" },
+  "safe_admin_contract": {
+    "capabilities": ["read-only", "normal", "destructive"],
+    "capability_source": "server-configured credentials only",
+    "forged_header_escalation": "403",
+    "generic_patch_delete": "server-side unavailable with 404",
+    "read_only_mutation": "403",
+    "named_mutation_audit": "PASS",
+    "audit_fields": ["operation", "timestamp", "actor", "capability", "target", "result"],
+    "invalid_transition": "existing named state/version guards retained",
+    "destructive_confirmation": "exact Hebrew confirmation required",
+    "production_like_destructive": "blocked when NODE_ENV=production or BOT_MODE=live",
+    "csrf_same_origin": "PASS",
+    "rate_limit": "PASS",
+    "atomic_rejection": "PASS",
+    "duplicate_capability_credentials": "configuration rejected",
+    "audit_contract_assertions": "PASS (normal and destructive mutation classes)"
+  },
+  "verification_commands": [
+    "pnpm run build",
+    "pnpm test",
+    "pnpm run check:spec",
+    "pnpm run check:prompt-wiring",
+    "docker compose -f compose.test.yml up --build --abort-on-container-exit --exit-code-from tests"
+  ],
+  "blockers": [],
+  "architecture_deviations": [],
+  "live_systems_touched": false,
+  "deployment_performed": false,
+  "t19_started": false,
+  "t20_started": false
+}

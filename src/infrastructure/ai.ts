@@ -1,27 +1,49 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import OpenAI from "openai";
 import { z } from "zod";
 import type { Config } from "../config.js";
 import {
   AppError,
+  commandSchema,
+  planSchema,
   type Command,
   type Context,
-  type ItemKind,
   type Notice,
   type Plan,
   type Request,
 } from "../domain/types.js";
-import {
-  donationIntent,
-  directHandoffIntent,
-  explicitApproval,
-  grounded,
-  nextQuestion,
-} from "../domain/policies.js";
+import { nextQuestion } from "../domain/policies.js";
+import { rulePlan } from "../application/rule-planner.js";
+
+const here = dirname(fileURLToPath(import.meta.url));
+function loadPrompt(name: string): string {
+  const candidates = [
+    join(process.cwd(), "prompts", name),
+    join(here, "../../prompts", name),
+    join(here, "../../../prompts", name),
+  ];
+  for (const path of candidates) {
+    if (existsSync(path)) return readFileSync(path, "utf8");
+  }
+  throw new Error(`missing_prompt_file:${name}`);
+}
+const DECODE_PROMPT_TEXT = loadPrompt("decode.txt");
+const PHRASE_PROMPT_TEXT = loadPrompt("phrase.txt");
+
+export interface DecodeResult {
+  understood: boolean;
+  plan: Plan;
+  metadata: Record<string, unknown>;
+}
 
 export interface Planner {
-  plan(
+  plan(context: Context): Promise<DecodeResult>;
+  phraseReply(
+    canonical: string,
     context: Context,
-  ): Promise<{ plan: Plan; metadata: Record<string, unknown> }>;
+  ): Promise<{ text: string; metadata: Record<string, unknown> }>;
   phraseNotice(
     context: Context,
     notice: Notice,
@@ -30,6 +52,16 @@ export interface Planner {
   close(): Promise<void>;
 }
 
+const decodeResponseSchema = z
+  .object({
+    understood: z.boolean().default(true),
+    commands: z.array(z.unknown()).default([]),
+    evidence: z.string().default(""),
+    reply: z.string().optional(),
+  })
+  .passthrough();
+
+/** Legacy hosted-prompt shape still accepted while the decode prompt is rolled out. */
 const managedResponseSchema = z
   .object({
     reply: z.string().default(""),
@@ -48,27 +80,11 @@ const managedResponseSchema = z
       .default("unclear"),
     updates: z.record(z.string(), z.unknown()).default({}),
     actions: z.record(z.string(), z.unknown()).default({}),
+    understood: z.boolean().optional(),
+    commands: z.array(z.unknown()).optional(),
+    evidence: z.string().optional(),
   })
   .passthrough();
-type ManagedResponse = z.infer<typeof managedResponseSchema>;
-
-const textValue = (updates: Record<string, unknown>, key: string): string | null => {
-  const value = updates[key];
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed && trimmed.toLowerCase() !== "null" ? trimmed : null;
-};
-
-const numberValue = (
-  updates: Record<string, unknown>,
-  key: string,
-): number | null => {
-  const value = updates[key];
-  if (typeof value === "number" && Number.isInteger(value)) return value;
-  if (typeof value === "string" && /^\s*-?\d+\s*$/.test(value))
-    return Number(value);
-  return null;
-};
 
 const boolValue = (
   updates: Record<string, unknown>,
@@ -85,243 +101,248 @@ const boolValue = (
 const action = (actions: Record<string, unknown>, key: string): boolean =>
   actions[key] === true || actions[key] === "true" || actions[key] === "כן";
 
-// Keep the managed-prompt contract closed. A newly introduced action must be
-// deliberately mapped here (or rejected explicitly) before it can reach the
-// domain command layer.
-const managedActionKeys = new Set([
-  "search_for_match",
-  "check_donor_availability",
-  "notify_donor",
-  "notify_receiver",
-  "notify_other_party_of_cancellation",
-  "ready_for_coordination",
-  "needs_human",
-  "interest",
-  "self_move",
-]);
-
-function itemKind(value: string): ItemKind {
-  const t = value.toLowerCase();
-  if (/מיטה|bed/.test(t)) return "bed";
-  if (/ספה|כורס|sofa/.test(t)) return "sofa";
-  if (/ארון|wardrobe/.test(t)) return "wardrobe";
-  if (/מקרר|fridge/.test(t)) return "fridge";
-  if (/תנור|oven/.test(t)) return "oven";
-  if (/מכונת כביסה|washing/.test(t)) return "washing_machine";
-  if (/מייבש|dryer/.test(t)) return "dryer";
-  if (/מקפיא|freezer/.test(t)) return "freezer";
-  if (/מדיח|dishwasher/.test(t)) return "dishwasher";
-  if (/שולחן.*כיס|כיס.*שולחן/.test(t)) return "table_set";
-  if (/שולחן|table/.test(t)) return "table";
-  if (/כיסאות|כיסא|chairs/.test(t)) return "chairs";
-  if (/פסנתר|piano/.test(t)) return "piano";
-  if (/דירה מלאה|הובלת דירה|house.?move/.test(t)) return "house_move";
-  return "other";
-}
-
-function descriptionFrom(
+export function managedNeedsHuman(
+  actions: Record<string, unknown>,
   updates: Record<string, unknown>,
-  text: string,
-  request?: Request,
-): string {
-  const value = textValue(updates, "מה מעבירים");
-  if (value) return value;
-  const known = request?.items[0]?.description;
-  if (known) return known;
-  return text.replace(/\s+/g, " ").trim().slice(0, 120) || "פריט";
-}
-
-function phoneFrom(value: string | null): string | null {
-  if (!value) return null;
-  return value.replace(/\D/g, "").length >= 9 ? value : null;
-}
-
-function floorFrom(value: string | null): number | null {
-  if (!value) return null;
-  if (/קרקע|ground/i.test(value)) return 0;
-  const match = value.match(/-?\d+/);
-  return match ? Number(match[0]) : null;
-}
-
-function activeRequest(ctx: Context): Request | undefined {
-  const open = ctx.requests.filter(
-    (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
-  );
-  if (open.length === 1) return open[0];
+): boolean {
   return (
-    ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-    (ctx.requests.length === 1 ? ctx.requests[0] : undefined)
+    action(actions, "needs_human") ||
+    boolValue(updates, "נדרש טיפול אנושי") === true
   );
 }
 
-function translate(
-  managed: ManagedResponse,
+function asCommands(raw: unknown[]): Command[] {
+  const out: Command[] = [];
+  for (const entry of raw.slice(0, 5)) {
+    const parsed = commandSchema.safeParse(entry);
+    if (parsed.success) out.push(parsed.data);
+  }
+  return out;
+}
+
+/**
+ * Map a decode model payload into a validated Plan.
+ * Prefer an explicit commands array. Fall back to legacy updates/actions only
+ * for a few safe mappings while the hosted decode prompt is being published.
+ */
+export function translate(
+  payload: unknown,
   ctx: Context,
   text: string,
-): Plan {
-  const updates = managed.updates;
-  const actions = managed.actions;
-  const current = activeRequest(ctx);
-  const prior = ctx.history.at(-1)?.content ?? "";
+): { understood: boolean; plan: Plan } {
+  const decode = decodeResponseSchema.safeParse(payload);
+  if (decode.success && Array.isArray(decode.data.commands) && decode.data.commands.length) {
+    const commands = asCommands(decode.data.commands);
+    if (commands.length) {
+      return {
+        understood: decode.data.understood !== false,
+        plan: planSchema.parse({
+          commands,
+          evidence: (decode.data.evidence || text).slice(0, 2000),
+        }),
+      };
+    }
+  }
+
+  if (decode.success && decode.data.understood === false) {
+    return {
+      understood: false,
+      plan: { commands: [{ type: "next" }], evidence: text.slice(0, 2000) },
+    };
+  }
+
+  const managed = managedResponseSchema.safeParse(payload);
+  if (!managed.success) {
+    return {
+      understood: false,
+      plan: { commands: [{ type: "next" }], evidence: text.slice(0, 2000) },
+    };
+  }
+
+  if (managed.data.understood === false || managed.data.intent === "unclear") {
+    return {
+      understood: false,
+      plan: { commands: [{ type: "next" }], evidence: text.slice(0, 2000) },
+    };
+  }
+
+  if (managed.data.commands?.length) {
+    const commands = asCommands(managed.data.commands);
+    if (commands.length) {
+      return {
+        understood: true,
+        plan: planSchema.parse({
+          commands,
+          evidence: (managed.data.evidence || text).slice(0, 2000),
+        }),
+      };
+    }
+  }
+
   const commands: Command[] = [];
-  const pushOnce = (command: Command) => {
-    if (!commands.some((existing) => JSON.stringify(existing) === JSON.stringify(command)))
-      commands.push(command);
-  };
-  const unknownAction = Object.keys(actions).find(
-    (key) => action(actions, key) && !managedActionKeys.has(key),
+  const updates = managed.data.updates;
+  const actions = managed.data.actions;
+  const open = ctx.requests.find(
+    (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
   );
-  if (unknownAction)
-    throw new AppError("unsupported_managed_action", 422, "פעולת AI לא מוכרת");
+  const requestNumber = open?.number ?? null;
 
-  if (action(actions, "interest")) {
-    if (!current)
-      throw new AppError("interest_without_request", 409, "לא נמצאה פנייה מתאימה להתעניינות.");
-    pushOnce({ type: "interest", request_number: current.number });
-  }
-  if (action(actions, "notify_receiver") || action(actions, "notify_donor")) {
-    if (!current)
-      throw new AppError("verification_without_request", 409, "לא נמצאה פנייה מתאימה לאימות.");
-    pushOnce({ type: "contact_counterparty", request_number: current.number, contact: true });
-  }
-  if (managed.intent === "self_move" || action(actions, "self_move")) {
-    const description = descriptionFrom(updates, text);
-    pushOnce({
-      type: "donate",
-      items: [{ kind: itemKind(description), description, quantity: Math.max(1, Math.min(20, numberValue(updates, "כמות פריטים") ?? 1)) }],
-      counterparty_phone: ctx.conversation.phone,
-      direct: true,
-      free: true,
-      working: boolValue(updates, "תקינות") ?? boolValue(updates, "תקין") ?? true,
-    });
-  }
-
-  if (managed.intent === "cancellation") {
-    const choice = /(?:לגמרי|סופית|לא רלוונטי|לא צריך)/.test(text)
-      ? "final"
-      : /(?:שבוע הבא|רלוונטי)/.test(text)
-        ? "next_week"
-        : "ask";
-    commands.push({ type: "cancel", request_number: current?.number ?? null, choice });
-  } else if (action(actions, "needs_human") || textValue(updates, "נדרש טיפול אנושי")) {
+  if (managedNeedsHuman(actions, updates)) {
     commands.push({
       type: "escalate",
-      request_number: current?.number ?? null,
-      reason: /מנוף|חלון|גישה/.test(text)
-        ? "unusual_access"
-        : /גבול|מחוץ|יישוב/.test(text)
-          ? "borderline_area"
-          : "unclear",
+      request_number: requestNumber,
+      reason: "unclear",
     });
-  } else if (managed.intent === "donate" && (donationIntent(text) || !current)) {
-    const description = descriptionFrom(updates, text);
-    const quantity = numberValue(updates, "כמות פריטים") ?? 1;
-    commands.push({
-      type: "donate",
-      items: [
-        {
-          kind: itemKind(description),
-          description,
-          quantity: Math.max(1, Math.min(20, quantity)),
-        },
-      ],
-      counterparty_phone: phoneFrom(textValue(updates, "נייד מקבל")),
-      direct:
-        directHandoffIntent(text) ||
-        Boolean(phoneFrom(textValue(updates, "נייד מקבל"))),
-      free: true,
-      working: boolValue(updates, "תקינות") ?? boolValue(updates, "תקין"),
-    });
-  } else if (managed.intent === "request" && !current) {
-    const description = descriptionFrom(updates, text);
-    commands.push({ type: "seek", kind: itemKind(description) });
-  } else if (managed.intent === "transport" || current) {
-    const donorSettlement = textValue(updates, "עיר איסוף");
-    const donorAddress = textValue(updates, "כתובת איסוף");
-    const donorName = textValue(updates, "שם המוסר");
-    const donorFloor = floorFrom(textValue(updates, "קומה איסוף"));
-    const receiverSettlement = textValue(updates, "עיר יעד");
-    const receiverAddress = textValue(updates, "כתובת יעד");
-    const receiverName = textValue(updates, "שם המקבל");
-    const receiverFloor = floorFrom(textValue(updates, "קומה יעד"));
-
-    if (donorSettlement || donorAddress || donorName || donorFloor !== null)
-      commands.push({
-        type: "details",
-        request_number: current?.number ?? null,
-        role: "donor",
-        name: donorName,
-        settlement: donorSettlement,
-        address: donorAddress,
-        floor: donorFloor,
-      });
-    if (receiverSettlement || receiverAddress || receiverName || receiverFloor !== null)
-      commands.push({
-        type: "details",
-        request_number: current?.number ?? null,
-        role: "receiver",
-        name: receiverName,
-        settlement: receiverSettlement,
-        address: receiverAddress,
-        floor: receiverFloor,
-      });
-
-    const counterpartyPhone = phoneFrom(textValue(updates, "נייד מקבל"));
-    const counterpartyName = textValue(updates, "שם המקבל");
-    if (counterpartyPhone || (counterpartyName && !receiverSettlement && !receiverAddress))
-      commands.push({
-        type: "counterparty",
-        request_number: current?.number ?? null,
-        phone: counterpartyPhone,
-        name: counterpartyName,
-      });
-
-    const asksWorking = /תקין|שמיש|עובד/.test(prior);
-    const asksDisassembly = /פירוק/.test(prior);
-    const working = asksWorking
-      ? /לא\s*(?:תקין|שמיש|עובד)|מקולקל|שבור/.test(text)
-        ? false
-        : explicitApproval(text)
-          ? true
-          : null
-      : null;
-    const needsDisassembly = asksDisassembly
-      ? /^(?:לא|אין)/.test(text.trim())
-        ? false
-        : /כן|נדרש|צריך/.test(text)
-          ? true
-          : null
-      : null;
-    const newDescription = textValue(updates, "מה מעבירים");
-    const items = newDescription
-      ? [{ kind: itemKind(newDescription), description: newDescription, quantity: numberValue(updates, "כמות פריטים") ?? 1 }]
-      : current?.items.map((i) => ({ kind: i.kind, description: i.description, quantity: i.quantity })) ?? null;
-    const ovenType = /בילט/.test(text) ? "built_in" : /משולב/.test(text) ? "combined" : null;
-    if (items && (newDescription || working !== null || needsDisassembly !== null || ovenType))
-      commands.push({
-        type: "item_facts",
-        request_number: current?.number ?? null,
-        items,
-        free: null,
-        working,
-        needs_disassembly: needsDisassembly,
-        wardrobe_small_whole: null,
-        oven_type: ovenType,
-        evacuation: null,
-      });
-
-    if (
-      textValue(updates, "אישורמוסר") === "כן" ||
-      textValue(updates, "אישור מקבל") === "כן" ||
-      (explicitApproval(text) && /אשר|אישור|חלקך/.test(prior))
-    )
-      commands.push({ type: "approve_self", request_number: current?.number ?? null });
+  } else if (action(actions, "approve_schedule") || updates["מועד"] || updates["proposed_run_date"]) {
+    const date =
+      (typeof updates["proposed_run_date"] === "string" &&
+        /^\d{4}-\d{2}-\d{2}$/.test(updates["proposed_run_date"])
+        ? updates["proposed_run_date"]
+        : null) ??
+      open?.proposed_run_date?.slice(0, 10) ??
+      null;
+    if (date && requestNumber)
+      commands.push({ type: "approve_schedule", request_number: requestNumber, date });
+  } else if (
+    action(actions, "approve_self") ||
+    boolValue(updates, "אישור") === true ||
+    /(?:מאשר|מאשרת)/u.test(text)
+  ) {
+    if (requestNumber)
+      commands.push({ type: "approve_self", request_number: requestNumber });
   }
 
   if (!commands.length) commands.push({ type: "next" });
-  const plan = { commands: commands.slice(0, 5), evidence: text.slice(0, 2000) };
-  if (!grounded(plan, text)) throw new AppError("ungrounded_managed_prompt");
-  return plan;
+  return {
+    understood: true,
+    plan: planSchema.parse({
+      commands,
+      evidence: (managed.data.evidence || text).slice(0, 2000),
+    }),
+  };
+}
+
+function snapshotForDecode(ctx: Context) {
+  const open = ctx.requests.filter(
+    (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
+  );
+  const selected =
+    open.find((r) => r.id === ctx.conversation.selected_request_id) ?? open[0] ?? null;
+  return {
+    conversation: ctx.conversation,
+    selected_request: selected
+      ? {
+          number: selected.number,
+          status: selected.status,
+          origin: selected.origin,
+          proposed_run_date: selected.proposed_run_date,
+          verification_contacted: selected.verification_contacted,
+          parties: selected.parties,
+          items: selected.items,
+        }
+      : null,
+    open_requests: open.map((r) => ({
+      number: r.number,
+      status: r.status,
+      origin: r.origin,
+    })),
+    missing: selected
+      ? nextQuestion(selected, ctx.conversation.phone).text
+      : null,
+    history: ctx.history,
+  };
+}
+
+type PromptSource =
+  | { mode: "hosted"; id: string; version: string }
+  | { mode: "git"; instructions: string };
+
+function decodePromptSource(c: Config): PromptSource {
+  if (c.OPENAI_DECODE_PROMPT_ID)
+    return {
+      mode: "hosted",
+      id: c.OPENAI_DECODE_PROMPT_ID,
+      version: c.OPENAI_DECODE_PROMPT_VERSION || "1",
+    };
+  // Do not fall back to the legacy phrasing hosted prompt — it fights decode.
+  // OpenAI is also deprecating reusable prompt objects; git instructions are
+  // the supported production path.
+  return { mode: "git", instructions: DECODE_PROMPT_TEXT };
+}
+
+function phrasePromptSource(c: Config, canonical: string): PromptSource {
+  if (c.OPENAI_PHRASE_PROMPT_ID)
+    return {
+      mode: "hosted",
+      id: c.OPENAI_PHRASE_PROMPT_ID,
+      version: c.OPENAI_PHRASE_PROMPT_VERSION || "1",
+    };
+  return {
+    mode: "git",
+    instructions: PHRASE_PROMPT_TEXT.replace("{{canonical}}", canonical),
+  };
+}
+
+function extractPhraseText(raw: string, fallback: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return fallback;
+  try {
+    const parsed = managedResponseSchema.safeParse(JSON.parse(trimmed));
+    if (parsed.success && parsed.data.reply.trim())
+      return parsed.data.reply.trim();
+    const loose = JSON.parse(trimmed) as { reply?: string; text?: string };
+    const fromLoose = (loose.reply ?? loose.text ?? "").trim();
+    if (fromLoose) return fromLoose;
+  } catch {
+    /* plain text from git phrase instructions */
+  }
+  return trimmed;
+}
+
+const OPENING_COMMANDS = new Set(["donate", "receive_from_donor", "seek"]);
+
+function hasOpenRequest(ctx: Context): boolean {
+  return ctx.requests.some(
+    (request) =>
+      !["coordinated", "closed", "cancelled", "rejected", "cancel_pending"].includes(
+        request.status,
+      ),
+  );
+}
+
+/**
+ * AI decode is primary only when its commands can actually run.
+ * Bare details/approvals with no open request are not actionable openings —
+ * they must not override rulePlan's donate/seek for a new conversation.
+ */
+export function actionableAiPlan(
+  translated: { understood: boolean; plan: Plan },
+  ctx: Context,
+): boolean {
+  if (!translated.understood) return false;
+  const commands = translated.plan.commands.filter(
+    (command) => command.type !== "next",
+  );
+  if (!commands.length) return false;
+  if (hasOpenRequest(ctx)) return true;
+  return commands.some((command) => OPENING_COMMANDS.has(command.type));
+}
+
+/** Prefer rulePlan when it opens a flow and AI only returned follow-up facts. */
+export function selectDecodePlan(
+  translated: { understood: boolean; plan: Plan },
+  deterministic: Plan | null,
+  ctx: Context,
+): { plan: Plan; useAi: boolean; understood: boolean } {
+  const useAi = actionableAiPlan(translated, ctx);
+  if (useAi) return { plan: translated.plan, useAi: true, understood: true };
+  if (deterministic)
+    return { plan: deterministic, useAi: false, understood: true };
+  return {
+    plan: translated.plan,
+    useAi: false,
+    understood: translated.understood,
+  };
 }
 
 export class OpenAIPlanner implements Planner {
@@ -338,58 +359,127 @@ export class OpenAIPlanner implements Planner {
     // The OpenAI client has no lifecycle resources that need explicit shutdown.
   }
 
-  async plan(
-    ctx: Context,
-  ): Promise<{ plan: Plan; metadata: Record<string, unknown> }> {
+  async plan(ctx: Context): Promise<DecodeResult> {
     if (!this.c.AI_ENABLED) throw new AppError("ai_disabled");
     const text = ctx.message.transcript ?? ctx.message.text;
     const started = Date.now();
-    const existingRecord = {
-      conversation: ctx.conversation,
-      requests: ctx.requests,
-      candidates: ctx.candidates.map((candidate) => ({
-        number: candidate.request.number,
-        items: candidate.request.items,
-        state: candidate.state,
-        has_photo: candidate.request.photo_ids.length > 0,
-      })),
-      next_question: ctx.requests.length === 1 ? nextQuestion(ctx.requests[0]!, ctx.conversation.phone).text : null,
-      recent_history: ctx.history,
+    const snapshot = snapshotForDecode(ctx);
+    const source = decodePromptSource(this.c);
+    const userPayload = {
+      customer_message: {
+        current_message: text,
+        recent_history: ctx.history,
+        contacts: ctx.message.contacts,
+        has_location: ctx.message.location !== null,
+      },
+      sender_phone: ctx.conversation.phone,
+      existing_record: snapshot,
     };
     const response = await this.client.responses.create({
       model: this.c.OPENAI_MODEL,
-      prompt: {
-        id: this.c.OPENAI_PROMPT_ID,
-        version: this.c.OPENAI_PROMPT_VERSION,
-      },
-      input: [{ role: "user", content: JSON.stringify({
-          customer_message: JSON.stringify({
-            current_message: text,
-            recent_history: ctx.history,
-            contacts: ctx.message.contacts,
-            has_location: ctx.message.location !== null,
+      ...(source.mode === "hosted"
+        ? { prompt: { id: source.id, version: source.version } }
+        : {
+            instructions: source.instructions,
+            text: { format: { type: "json_object" as const } },
           }),
-          sender_phone: ctx.conversation.phone,
-          existing_record: JSON.stringify(existingRecord),
-        }) }],
+      input: [
+        {
+          role: "user",
+          content:
+            source.mode === "git"
+              ? `Return JSON only for this decode request:\n${JSON.stringify(userPayload)}`
+              : JSON.stringify({
+                  decode_instructions: DECODE_PROMPT_TEXT,
+                  ...userPayload,
+                }),
+        },
+      ],
       reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },
     });
-    let managed: ManagedResponse;
+    let payload: unknown;
     try {
-      managed = managedResponseSchema.parse(JSON.parse(response.output_text));
+      payload = JSON.parse(response.output_text);
     } catch {
       throw new AppError("invalid_managed_prompt_response");
     }
+    const translated = translate(payload, ctx, text);
+    // AI decode is primary when it returns runnable commands. rulePlan remains
+    // the safety net for unclear/empty AI output and for opening turns where
+    // the model returned only details without donate/seek.
+    const deterministic = rulePlan(ctx);
+    const selected = selectDecodePlan(translated, deterministic, ctx);
+    const { plan, useAi, understood } = selected;
     return {
-      plan: translate(managed, ctx, text),
+      understood,
+      plan,
       metadata: {
-        provider: "openai_responses_managed_prompt",
-        prompt_id: this.c.OPENAI_PROMPT_ID,
-        prompt_version: this.c.OPENAI_PROMPT_VERSION,
+        provider: "openai_responses_decode",
+        prompt_mode: source.mode,
+        prompt_id: source.mode === "hosted" ? source.id : "git:prompts/decode.txt",
+        prompt_version: source.mode === "hosted" ? source.version : "git",
         model: this.c.OPENAI_MODEL,
-        managed_reply: managed.reply,
-        managed_intent: managed.intent,
-        managed_actions: managed.actions,
+        action_source: useAi
+          ? "ai_decode"
+          : deterministic
+            ? "ai_decode_bridged_rules"
+            : translated.understood === false
+              ? "ai_decode_unclear"
+              : "ai_decode",
+        understood,
+        bridged_rules: !useAi && Boolean(deterministic),
+        response_id: response.id,
+        elapsed_ms: Date.now() - started,
+        usage: response.usage,
+      },
+    };
+  }
+
+  async phraseReply(
+    canonical: string,
+    ctx: Context,
+  ): Promise<{ text: string; metadata: Record<string, unknown> }> {
+    if (!this.c.AI_ENABLED) throw new AppError("ai_disabled");
+    const started = Date.now();
+    const source = phrasePromptSource(this.c, canonical);
+    const response = await this.client.responses.create({
+      model: this.c.OPENAI_MODEL,
+      ...(source.mode === "hosted"
+        ? { prompt: { id: source.id, version: source.version } }
+        : { instructions: source.instructions }),
+      input: [
+        {
+          role: "user",
+          content:
+            source.mode === "git"
+              ? "נסח מחדש בלבד את המשפט המחייב. החזר טקסט בלבד, בלי JSON."
+              : JSON.stringify({
+                  phrase_instructions: PHRASE_PROMPT_TEXT.replace(
+                    "{{canonical}}",
+                    canonical,
+                  ),
+                  customer_message: {
+                    current_message: `נסח מחדש בלבד: ${canonical}`,
+                    recent_history: ctx.history,
+                    has_location: false,
+                  },
+                  sender_phone: ctx.conversation.phone,
+                  existing_record: { canonical },
+                }),
+        },
+      ],
+      reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },
+    });
+    const text = extractPhraseText(response.output_text, canonical);
+    return {
+      text,
+      metadata: {
+        provider: "openai_responses_phrase",
+        prompt_mode: source.mode,
+        prompt_id:
+          source.mode === "hosted" ? source.id : "git:prompts/phrase.txt",
+        prompt_version: source.mode === "hosted" ? source.version : "git",
+        model: this.c.OPENAI_MODEL,
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,
@@ -404,48 +494,51 @@ export class OpenAIPlanner implements Planner {
   ): Promise<{ text: string; metadata: Record<string, unknown> }> {
     if (!this.c.AI_ENABLED) throw new AppError("ai_disabled");
     const started = Date.now();
+    const source = phrasePromptSource(this.c, notice.text);
     const response = await this.client.responses.create({
       model: this.c.OPENAI_MODEL,
-      prompt: {
-        id: this.c.OPENAI_PROMPT_ID,
-        version: this.c.OPENAI_PROMPT_VERSION,
-      },
-      input: [{ role: "user", content: JSON.stringify({
-          customer_message: JSON.stringify({
-            current_message:
-              `נסח הודעת WhatsApp קצרה ואנושית לצד השני לפי כללי הפרומפט. ` +
-              `זו טיוטת המערכת, אין לשנות את המשמעות: ${notice.text}`,
-            recent_history: ctx.history,
-            notice_recipient_phone: notice.phone,
-            notice_kind: "system_notice",
-            has_location: false,
-          }),
-          sender_phone: ctx.conversation.phone,
-          existing_record: JSON.stringify({
-            conversation: ctx.conversation,
-            request,
-            notice,
-          }),
-        }) }],
+      ...(source.mode === "hosted"
+        ? { prompt: { id: source.id, version: source.version } }
+        : { instructions: source.instructions }),
+      input: [
+        {
+          role: "user",
+          content:
+            source.mode === "git"
+              ? `נסח הודעת WhatsApp קצרה ואנושית לצד השני מהמשפט המחייב. החזר טקסט בלבד, בלי JSON.\nנמען: ${notice.phone}`
+              : JSON.stringify({
+                  phrase_instructions: PHRASE_PROMPT_TEXT.replace(
+                    "{{canonical}}",
+                    notice.text,
+                  ),
+                  customer_message: {
+                    current_message: `נסח הודעת WhatsApp קצרה ואנושית לצד השני. טיוטת המערכת: ${notice.text}`,
+                    recent_history: ctx.history,
+                    notice_recipient_phone: notice.phone,
+                    notice_kind: "system_notice",
+                    has_location: false,
+                  },
+                  sender_phone: ctx.conversation.phone,
+                  existing_record: {
+                    conversation: ctx.conversation,
+                    request,
+                    notice,
+                  },
+                }),
+        },
+      ],
       reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },
     });
-    let managed: ManagedResponse;
-    try {
-      managed = managedResponseSchema.parse(JSON.parse(response.output_text));
-    } catch {
-      throw new AppError("invalid_managed_prompt_response");
-    }
-    const text = managed.reply.trim();
-    if (!text) throw new AppError("empty_managed_notice_response");
+    const text = extractPhraseText(response.output_text, notice.text);
     return {
       text,
       metadata: {
-        provider: "openai_responses_managed_prompt",
-        prompt_id: this.c.OPENAI_PROMPT_ID,
-        prompt_version: this.c.OPENAI_PROMPT_VERSION,
+        provider: "openai_responses_phrase",
+        prompt_mode: source.mode,
+        prompt_id:
+          source.mode === "hosted" ? source.id : "git:prompts/phrase.txt",
+        prompt_version: source.mode === "hosted" ? source.version : "git",
         model: this.c.OPENAI_MODEL,
-        managed_intent: managed.intent,
-        managed_actions: managed.actions,
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,

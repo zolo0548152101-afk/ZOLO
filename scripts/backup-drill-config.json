@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "environment": "disposable",
+  "database_schema": "haim_core_test",
+  "media_scope": "payload-and-metadata"
+}
