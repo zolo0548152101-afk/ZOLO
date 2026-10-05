@@ -118,7 +118,7 @@ function addressWithSettlement(text: string): string | null {
 function explicitName(text: string): string | null {
   const normalized = norm(text);
   const match = normalized.match(
-    /(?:^|[,;.!?]\s*)(?:השם(?:\s+הוא)?|שמי|קוראים\s+לי)\s+([א-ת][א-ת׳״'’\-]*(?:\s+[א-ת][א-ת׳״'’\-]*){0,2})(?=\s*(?:[,;.!?]|$))/u,
+    /(?:^|[,;.!?]\s*)(?:השם(?:\s+(?:הוא|שלי))?|שמי|קוראים\s+לי)\s+([א-ת][א-ת׳״'’\-]*(?:\s+[א-ת][א-ת׳״'’\-]*){0,2})(?=\s*(?:[,;.!?]|$))/u,
   );
   if (match?.[1]) return match[1].trim();
   const introduction = normalized.match(

@@ -628,6 +628,62 @@ test("bare איסוף/מסירה without רחוב or comma still stores both end
     true,
   );
 });
+test("השם שלי extracts only the personal name", () => {
+  const direct = sampleRequest();
+  direct.origin = "direct";
+  direct.status = "collecting";
+  direct.verification_contacted = true;
+  direct.parties[0]!.role = "donor";
+  direct.parties[0]!.phone = "584152101";
+  direct.parties[0]!.name = null;
+  direct.parties[0]!.settlement = "בית שאן";
+  direct.parties[0]!.address = "רחוב העלייה 5";
+  direct.parties[0]!.floor = 2;
+  direct.parties[0]!.approved_at = "2026-10-05T15:00:00.000Z";
+  direct.parties[0]!.approved_by = "584152101";
+  direct.parties[1]!.role = "receiver";
+  direct.parties[1]!.phone = "536662043";
+  direct.parties[1]!.name = "טל";
+  direct.parties[1]!.settlement = "בית שאן";
+  direct.parties[1]!.address = "רחוב העלייה 8";
+  const context = {
+    conversation: {
+      id: "c-donor-name",
+      phone: "584152101",
+      chat_id: "972584152101@c.us",
+      mode: "bot",
+      selected_request_id: direct.id,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [direct],
+    candidates: [],
+    message: {
+      id: "m-donor-name",
+      seq: "1",
+      external_id: "e-donor-name",
+      trace_id: "t-donor-name",
+      mode: "live",
+      chat_id: "972584152101@c.us",
+      phone: "584152101",
+      kind: "text",
+      text: "השם שלי ישראל",
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+    history: [{ role: "assistant", content: "תודה. חסר רק השם." }],
+  } as Context;
+  const command = rulePlan(context)?.commands[0];
+  assert.equal(command?.type, "details");
+  if (command?.type === "details") assert.equal(command.name, "ישראל");
+});
 test("direct handoff does not require disassembly and preserves explicit broken fact", () => {
   const r = sampleRequest();
   r.origin = "direct";
