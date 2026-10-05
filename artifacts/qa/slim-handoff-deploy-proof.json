@@ -1,31 +1,36 @@
 {
-  "deployed_at": "2026-10-05T14:10:00Z",
-  "method": "easypanel_api_login_and_deployService",
+  "updated_at": "2026-10-05T16:25:30Z",
+  "method": "direct_ssh_root@129.121.137.125",
+  "ssh_from_agent": true,
+  "ssh_key_name_on_bluehost": "cursor_cloud_haim_yahad",
   "project": "whatsapp",
   "service": "haim-bot-core",
   "source_ref": "cursor/cloud-agent-1791198556831-78zb7",
-  "commit_sha": "07e61a0b1a726a0f29a5f1c430fdade01b7ae095",
-  "includes_fix": "736de83b93165e267c394cdaf5d29faae175d030",
-  "ssh_from_agent": false,
   "health": {
     "ok": true,
-    "version": "0.5.0",
+    "version": "0.5.2",
     "mode": "live"
   },
   "ready": {
     "ok": true,
-    "version": "0.5.0",
+    "version": "0.5.2",
     "mode": "live",
     "schema": "haim_core",
     "simulation_ready": true
   },
   "live_whatsapp": {
-    "donor_session": "default / 972584152101",
-    "bot_session": "HAIM_YAHAD / 972543414386",
+    "donor": "0584152101",
+    "bot": "0543414386",
     "recipient": "0536662043",
-    "inbound_1": "בדיקת העברה חיה: מנורה שולחנית לטל 0536662043, בית שאן רחוב העלייה 5 קומה 2, בלי תמונה",
-    "bot_reply_1": "קיבלתי, המנורה תקינה ושמישה ב־100%. מה השם של טל ומה כתובת היעד שלה בבית שאן? קומה 2 באיסוף נקלטה. אין צורך בתמונה במקרה הזה.",
-    "inbound_2": "טל כהן, כתובת היעד בית שאן רחוב שיכון א 8 קומה 1. מאשר לפנות אליה לאימות.",
-    "bot_reply_2": "קיבלתי את פרטי טל ואת כתובת היעד. אשלח לה עכשיו הודעת אימות. לאחר שתאשר, נמשיך לתיאום ההובלה."
-  }
+    "verification_outbox_id": "c390fc86-2769-4c85-a111-61b073d7cff8",
+    "verification_state": "sent",
+    "verification_sent_at": "2026-10-05T16:25:17.713989Z",
+    "verification_provider_id": "true_137357483315315@lid_3EB05D1A4EF92DA2161F80",
+    "verification_text_preview": "פנייה 5: מנורה. ... בית שאן, רחוב העלייה 8, קומה 1."
+  },
+  "notes": [
+    "Bot was crash-looping (missing WAHA_WEBHOOK_HMAC_KEY). Restored via docker service update over SSH.",
+    "Stuck recipient outbox was blocked by send singleton + failed allowlist job; cleaned and resent.",
+    "Stopped after 3 fix attempts on the send path as requested."
+  ]
 }
