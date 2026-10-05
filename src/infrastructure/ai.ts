@@ -15,6 +15,7 @@ import {
   type Request,
 } from "../domain/types.js";
 import { nextQuestion } from "../domain/policies.js";
+import { rulePlan } from "../application/rule-planner.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 function loadPrompt(name: string): string {
@@ -305,16 +306,30 @@ export class OpenAIPlanner implements Planner {
       throw new AppError("invalid_managed_prompt_response");
     }
     const translated = translate(payload, ctx, text);
+    // Until a dedicated decode prompt is hosted, the legacy phrasing prompt
+    // often returns prose-shaped JSON with no commands. Prefer an explicit
+    // rulePlan only as a bridge when the model understood but emitted only next.
+    const deterministic = rulePlan(ctx);
+    const onlyNext =
+      translated.understood &&
+      translated.plan.commands.length === 1 &&
+      translated.plan.commands[0]?.type === "next";
+    const plan =
+      onlyNext && deterministic && deterministic.commands.some((c) => c.type !== "next")
+        ? deterministic
+        : translated.plan;
     return {
       understood: translated.understood,
-      plan: translated.plan,
+      plan,
       metadata: {
         provider: "openai_responses_decode",
         prompt_id: promptId,
         prompt_version: promptVersion,
         model: this.c.OPENAI_MODEL,
-        action_source: "ai_decode",
+        action_source:
+          plan === deterministic ? "ai_decode_bridged_rules" : "ai_decode",
         understood: translated.understood,
+        bridged_rules: plan === deterministic,
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,
