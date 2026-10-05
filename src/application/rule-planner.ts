@@ -165,35 +165,56 @@ function selfTransferName(text: string, markerIndex: number): string | null {
   return match?.[1]?.trim() ?? null;
 }
 
-function selfTransferDetails(text: string): Command[] | null {
-  const self = text.match(/(?:מעביר|מעבירה|להעביר|רוצה להעביר)\s+(?:לעצמי|אליי)/u);
-  if (!self) return null;
-  const name = selfTransferName(text, self.index!);
-  const tail = text.slice(self.index! + self[0].length);
-  const pickupDropoff = tail.match(
+function placeFromFragment(value: string): {
+  settlement: string | null;
+  address: string | null;
+  floor: number | null;
+} {
+  const settlement = beitShean(value);
+  const addressMatch = value.match(/(?:רחוב|שיכון|שכונה|שכונת|שדרות|שד[׳']?)\s+[^,.;?]+/u);
+  const address = addressMatch?.[0]
+    ?.replace(/\s+ב?בית\s*[-־]?\s*שאן.*$/u, "")
+    .replace(/\s+(?:קומה|ק[׳'])\s*-?\d+(?:\s+עם\s+מעלית)?\s*$/u, "")
+    .trim() ?? null;
+  return { settlement, address, floor: floor(value) };
+}
+
+function sameOtherItem(existingDescription: string, nextDescription: string): boolean {
+  const a = norm(existingDescription).replace(/\s+/g, "");
+  const b = norm(nextDescription).replace(/\s+/g, "");
+  return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+}
+
+/** Parses "איסוף …, מסירה …" (and self-transfer pickup/dropoff) into two location facts. */
+function pickupAndDeliveryDetails(text: string, name: string | null = null): Command[] | null {
+  const normalized = norm(text);
+  const labeled = normalized.match(
+    /איסוף\s+(?<origin>.+?)(?:,\s*)?מסירה\s+(?<destination>.+?)(?=(?:[.!?]|,\s*(?:מאשר|ואפשר|אפשר)|$))/u,
+  );
+  const pickupDropoff = normalized.match(
     /אוספים\s+מ(?<origin>.+?)(?:,\s*)?ו?מביאים\s+ל(?<destination>.+?)(?=[.!?]|$)/u,
   );
-  const start = tail.search(/מ(?=(?:בית\s*[-־]?\s*שאן|רחוב|שיכון|שכונה|שדרות|שד[׳']?))/u);
-  const originStart = start + 1;
-  const destinationMatch = start < 0
-    ? null
-    : tail.slice(originStart).match(/\s+ל(?=(?:בית\s*[-־]?\s*שאן|רחוב|שיכון|שכונה|שדרות|שד[׳']?))/u);
-  const originText = pickupDropoff?.groups?.origin?.trim()
-    ?? (destinationMatch?.index === undefined ? null : tail.slice(originStart, originStart + destinationMatch.index).trim());
-  const destinationText = pickupDropoff?.groups?.destination?.trim()
-    ?? (destinationMatch?.index === undefined ? null : tail.slice(originStart + destinationMatch.index + destinationMatch[0].length).trim());
+  let originText = labeled?.groups?.origin?.trim() ?? pickupDropoff?.groups?.origin?.trim() ?? null;
+  let destinationText =
+    labeled?.groups?.destination?.trim() ?? pickupDropoff?.groups?.destination?.trim() ?? null;
+  if (!originText || !destinationText) {
+    const start = normalized.search(/מ(?=(?:בית\s*[-־]?\s*שאן|רחוב|שיכון|שכונה|שדרות|שד[׳']?))/u);
+    if (start >= 0) {
+      const originStart = start + 1;
+      const destinationMatch = normalized
+        .slice(originStart)
+        .match(/\s+ל(?=(?:בית\s*[-־]?\s*שאן|רחוב|שיכון|שכונה|שדרות|שד[׳']?))/u);
+      if (destinationMatch?.index !== undefined) {
+        originText = normalized.slice(originStart, originStart + destinationMatch.index).trim();
+        destinationText = normalized
+          .slice(originStart + destinationMatch.index + destinationMatch[0].length)
+          .trim();
+      }
+    }
+  }
   if (!originText || !destinationText) return null;
-  const place = (value: string) => {
-    const settlement = beitShean(value);
-    const addressMatch = value.match(/(?:רחוב|שיכון|שכונה|שכונת|שדרות|שד[׳']?)\s+[^,.;?]+/u);
-    const address = addressMatch?.[0]
-      ?.replace(/\s+ב?בית\s*[-־]?\s*שאן.*$/u, "")
-      .replace(/\s+(?:קומה|ק[׳'])\s*-?\d+(?:\s+עם\s+מעלית)?\s*$/u, "")
-      .trim() ?? null;
-    return { settlement, address, floor: floor(value) };
-  };
-  const origin = place(originText);
-  const destination = place(destinationText);
+  const origin = placeFromFragment(originText);
+  const destination = placeFromFragment(destinationText);
   const destinationSettlement = destination.settlement ?? origin.settlement;
   if (!origin.settlement || !origin.address || !destinationSettlement || !destination.address)
     return null;
@@ -217,6 +238,13 @@ function selfTransferDetails(text: string): Command[] | null {
       floor: destination.floor,
     },
   ];
+}
+
+function selfTransferDetails(text: string): Command[] | null {
+  const self = text.match(/(?:מעביר|מעבירה|להעביר|רוצה להעביר)\s+(?:לעצמי|אליי)/u);
+  if (!self) return null;
+  const name = selfTransferName(text, self.index!);
+  return pickupAndDeliveryDetails(text.slice(self.index! + self[0].length), name);
 }
 
 function suppliedPartyLocation(text: string, role: "donor" | "receiver"): Command | null {
@@ -359,7 +387,11 @@ export function rulePlan(ctx: Context): Plan | null {
     const existing = activeRequest(ctx);
     if (
       existing &&
-      existing.items.some((candidate) => candidate.kind === item.kind) &&
+      existing.items.some(
+        (candidate) =>
+          candidate.kind === item.kind &&
+          (item.kind !== "other" || sameOtherItem(candidate.description, item.description)),
+      ) &&
       !/(?:פנייה\s+חדשה|פריט\s+נוסף|עוד\s+פריט)/.test(text)
     ) {
       const recipientName = directHandoffIntent(text)
@@ -574,14 +606,25 @@ export function rulePlan(ctx: Context): Plan | null {
     const commands: Command[] = [];
     if (!party.approved_at)
       commands.push({ type: "approve_self", request_number: current.number });
-    // In a direct handoff the donor often sends the receiver's destination
-    // ("כתובת היעד…") together with consent to contact them. Store that on
-    // the receiver, not on the donor's pickup address.
-    const locationRole =
-      current.origin === "direct" ? directLocationRole(text) : party.role;
-    const suppliedLocation = suppliedPartyLocation(text, locationRole);
-    if (suppliedLocation?.type === "details")
-      commands.push({ ...suppliedLocation, request_number: current.number });
+    // Donors often send both pickup and destination in one consent message:
+    // "איסוף …, מסירה …, מאשר ליצור קשר".
+    const bothLocations =
+      current.origin === "direct" ? pickupAndDeliveryDetails(text) : null;
+    if (bothLocations) {
+      for (const location of bothLocations) {
+        if (location.type === "details")
+          commands.push({ ...location, request_number: current.number });
+      }
+    } else {
+      // In a direct handoff the donor often sends the receiver's destination
+      // ("כתובת היעד…") together with consent to contact them. Store that on
+      // the receiver, not on the donor's pickup address.
+      const locationRole =
+        current.origin === "direct" ? directLocationRole(text) : party.role;
+      const suppliedLocation = suppliedPartyLocation(text, locationRole);
+      if (suppliedLocation?.type === "details")
+        commands.push({ ...suppliedLocation, request_number: current.number });
+    }
     if (
       current.origin === "direct" &&
       /(?:נפנה|לפנות|ליצור\s+קשר|ליצור\s+אית(?:ה|ו)\s+קשר)/u.test(norm(text)) &&
