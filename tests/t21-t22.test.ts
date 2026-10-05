@@ -122,6 +122,22 @@ test("T22 redaction removes secrets recursively and admin secrets are strong", (
     LIVE_DEPENDENCIES_VERIFIED: "true",
     MEDIA_VOLUME_CONFIRMED: "true",
   }), /admin_token_too_weak/);
+  assert.equal(
+    readConfig({
+      NODE_ENV: "production",
+      DATABASE_URL: "postgres://test/test",
+      DB_SCHEMA: "haim_core",
+      BOT_MODE: "live",
+      AI_ENABLED: "false",
+      WAHA_WEBHOOK_HMAC_KEY: "h".repeat(32),
+      HAIM_ADMIN_TOKEN: "2101",
+      HAIM_ALLOW_SHORT_ADMIN_PIN: "true",
+      WAHA_API_KEY: "waha",
+      LIVE_DEPENDENCIES_VERIFIED: "true",
+      MEDIA_VOLUME_CONFIRMED: "true",
+    }).HAIM_ADMIN_TOKEN,
+    "2101",
+  );
   const strong = "A7!current-secret-rotation-2026-01";
   assert.throws(() => readConfig({
     NODE_ENV: "production",

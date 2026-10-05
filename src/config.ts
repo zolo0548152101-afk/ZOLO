@@ -49,6 +49,9 @@ const envSchema = z.object({
   // The deployment owner may deliberately use a short local admin PIN.
   // It is still required and never returned by the service.
   HAIM_ADMIN_TOKEN: z.string().min(4),
+  // When true, HAIM_ADMIN_TOKEN may be a short PIN (e.g. 2101) even in live.
+  // Capability tokens still require long secrets when set.
+  HAIM_ALLOW_SHORT_ADMIN_PIN: flag.default(false),
   // Optional distinct capabilities. Empty values fail closed and are never
   // accepted as credentials; callers cannot self-promote with a header.
   HAIM_ADMIN_READONLY_TOKEN: z.string().default(""),
@@ -102,7 +105,8 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (new Set(adminCapabilityTokens).size !== adminCapabilityTokens.length)
     throw new Error("admin_capability_credentials_must_be_distinct");
   if (c.NODE_ENV === "production" || c.BOT_MODE === "live") {
-    if (!validateAdminSecret(c.HAIM_ADMIN_TOKEN)) throw new Error("admin_token_too_weak");
+    if (!c.HAIM_ALLOW_SHORT_ADMIN_PIN && !validateAdminSecret(c.HAIM_ADMIN_TOKEN))
+      throw new Error("admin_token_too_weak");
     if (c.HAIM_ADMIN_READONLY_TOKEN && !validateAdminSecret(c.HAIM_ADMIN_READONLY_TOKEN))
       throw new Error("admin_readonly_token_too_weak");
     if (c.HAIM_ADMIN_DESTRUCTIVE_TOKEN && !validateAdminSecret(c.HAIM_ADMIN_DESTRUCTIVE_TOKEN))
