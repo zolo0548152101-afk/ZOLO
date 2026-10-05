@@ -1,4 +1,4 @@
-# build-id: d40dabc-followup-destination-20261005
+# build-id: 0c405d0-prompts-docker-20261006
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -8,6 +8,7 @@ COPY src ./src
 COPY tests ./tests
 COPY scripts ./scripts
 COPY config ./config
+COPY prompts ./prompts
 RUN npm run build && npm test
 
 FROM build AS verification
@@ -31,6 +32,7 @@ COPY --from=build /app/dist-tests ./dist-tests
 COPY db ./db
 COPY scripts ./scripts
 COPY config ./config
+COPY prompts ./prompts
 RUN mkdir -p /data/haim-yahad-media && chown -R node:node /data
 USER node
 EXPOSE 3000
