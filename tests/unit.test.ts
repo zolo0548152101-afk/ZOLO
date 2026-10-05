@@ -104,6 +104,107 @@ test("recipient approval keeps location facts supplied in the same message", () 
     assert.equal(location.floor, 2);
   }
 });
+test("approval targets the sole open request still needing this party even when an older open request is selected", () => {
+  const stale = sampleRequest();
+  stale.id = "stale-open-request";
+  stale.number = 5;
+  stale.status = "collecting";
+  stale.verification_contacted = true;
+  const staleReceiver = stale.parties.find((party) => party.role === "receiver")!;
+  staleReceiver.approved_at = "2026-10-05T12:00:00.000Z";
+  staleReceiver.approved_by = staleReceiver.phone;
+
+  const fresh = sampleRequest();
+  fresh.id = "fresh-open-request";
+  fresh.number = 6;
+  fresh.status = "collecting";
+  fresh.verification_contacted = true;
+  fresh.items[0]!.kind = "sofa";
+  fresh.items[0]!.description = "ספה";
+  fresh.items[0]!.needs_disassembly = true;
+  const freshReceiver = fresh.parties.find((party) => party.role === "receiver")!;
+  freshReceiver.name = "טל";
+  freshReceiver.approved_at = null;
+  freshReceiver.approved_by = null;
+
+  const context: Context = {
+    conversation: {
+      id: "c-stale-selected",
+      phone: freshReceiver.phone,
+      chat_id: "972536662043@c.us",
+      mode: "bot",
+      selected_request_id: stale.id,
+      version: 4,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [stale, fresh],
+    candidates: [],
+    message: {
+      id: "m-stale-selected",
+      seq: "1",
+      external_id: "e-stale-selected",
+      trace_id: "t-stale-selected",
+      mode: "live",
+      chat_id: "972536662043@c.us",
+      phone: freshReceiver.phone,
+      kind: "text",
+      text: "כן אני טל ומאשרת לקבל את הספה",
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+    history: [
+      {
+        role: "assistant",
+        content:
+          "שלום טל,\n\nפנייה 6: ספה. המוסר ביקש שנפנה אליך כדי לאמת את הפרטים.\n\nנא לאשר שאתה מאשר את קבלת",
+      },
+    ],
+  };
+  const commands = rulePlan(context)?.commands ?? [];
+  assert.equal(commands[0]?.type, "approve_self");
+  assert.equal(
+    commands[0] && "request_number" in commands[0]
+      ? commands[0].request_number
+      : null,
+    fresh.number,
+  );
+});
+test("מאשר את המועד is schedule approval, not a disassembly yes", () => {
+  const r = sampleRequest();
+  r.status = "collecting";
+  r.proposed_run_date = null;
+  r.items[0]!.kind = "sofa";
+  r.items[0]!.working = true;
+  r.items[0]!.needs_disassembly = null;
+  const donor = r.parties.find((party) => party.role === "donor")!;
+  donor.approved_at = "2026-10-05T12:00:00.000Z";
+  donor.approved_by = donor.phone;
+  const ctx = {
+    conversation: {
+      id: "conversation-disassembly-trap",
+      phone: donor.phone,
+      chat_id: `${donor.phone}@c.us`,
+      mode: "bot",
+      selected_request_id: r.id,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [r],
+    candidates: [],
+    message: { text: "מאשר את המועד", transcript: null, contacts: [] },
+    history: [{ role: "assistant", content: "הפרטים נשמרו. נעדכן." }],
+  } as unknown as Context;
+  const plan = rulePlan(ctx);
+  assert.ok(!plan?.commands.some((command) => command.type === "item_facts"));
+});
 test("date approval is a separate command and must match the current proposal prompt", () => {
   const r = sampleRequest();
   r.status = "awaiting_approval";

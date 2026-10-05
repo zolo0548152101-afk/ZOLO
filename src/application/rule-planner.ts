@@ -11,16 +11,47 @@ import {
   ownParty,
 } from "../domain/policies.js";
 
-const activeRequest = (ctx: Context): Request | undefined => {
-  const requests = ctx.requests ?? [];
-  const open = requests.filter(
+const openRequests = (ctx: Context): Request[] =>
+  (ctx.requests ?? []).filter(
     (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
   );
+
+const partyNeedsApproval = (request: Request, phone: string): boolean => {
+  try {
+    return !ownParty(request, phone).approved_at;
+  } catch {
+    return false;
+  }
+};
+
+const activeRequest = (ctx: Context): Request | undefined => {
+  const requests = ctx.requests ?? [];
+  const open = openRequests(ctx);
   const selected = requests.find((r) => r.id === ctx.conversation?.selected_request_id);
+  const phone = ctx.conversation?.phone;
+  const text = (ctx.message?.transcript ?? ctx.message?.text ?? "").trim();
   // A recipient can receive a new verification message before a conversation
   // row exists for that chat. On their first reply prefer the sole open
   // request over an older coordinated request that happens to be selected.
   if (open.length === 1) return open[0];
+  // Stale selected open requests (older handoffs still collecting) must not
+  // swallow an explicit approval meant for a newer request that still needs
+  // this party's consent. Prefer the sole open request still awaiting them.
+  if (
+    phone &&
+    text &&
+    (explicitApproval(text) ||
+      /מאשר(?:ת)?\s+(?:ליצור(?:\s+אית(?:ה|ו))?\s+קשר|לפנות)/u.test(norm(text)))
+  ) {
+    const needing = open.filter((request) => partyNeedsApproval(request, phone));
+    if (needing.length === 1) return needing[0];
+    if (
+      selected &&
+      needing.some((request) => request.id === selected.id)
+    )
+      return selected;
+  }
+  if (selected && open.some((request) => request.id === selected.id)) return selected;
   return selected ?? (requests.length === 1 ? requests[0] : undefined);
 };
 
@@ -28,6 +59,12 @@ const yes = (text: string): boolean =>
   /^(?:כן|בטח|בוודאי|נכון|מאשר|מאשרת)(?:[\s,!.]|$)/.test(norm(text));
 const no = (text: string): boolean =>
   /^(?:לא|אין)(?:[\s,!.]|$)/.test(norm(text));
+/** Affirmatives about a schedule/receipt must not answer item-fact yes/no gates. */
+const itemFactYesNo = (text: string): boolean =>
+  (yes(text) || no(text)) &&
+  !/(?:מועד|תאריך|\d{1,2}[/.]\d{1,2}[/.]\d{2,4}|לקבל|הקבלה|הפרטים)/u.test(
+    norm(text),
+  );
 
 function kindAndDescription(text: string): { kind: ItemKind; description: string } | null {
   const match: [RegExp, ItemKind, string][] = [
@@ -770,7 +807,7 @@ export function rulePlan(ctx: Context): Plan | null {
   if (
     donor &&
     items.some((item) => item.kind === "wardrobe" && item.wardrobe_small_whole === null) &&
-    (yes(text) || no(text))
+    itemFactYesNo(text)
   )
     return plan(text, [
       {
@@ -786,7 +823,7 @@ export function rulePlan(ctx: Context): Plan | null {
       },
     ]);
 
-  if (donor && items.some((item) => item.working === null) && (yes(text) || no(text)))
+  if (donor && items.some((item) => item.working === null) && itemFactYesNo(text))
     return plan(text, [
       {
         type: "item_facts",
@@ -826,7 +863,7 @@ export function rulePlan(ctx: Context): Plan | null {
   if (
     donor &&
     items.some((item) => !appliance(item) && item.kind !== "wardrobe" && item.needs_disassembly === null) &&
-    (yes(text) || no(text))
+    itemFactYesNo(text)
   )
     return plan(text, [
       {
