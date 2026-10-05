@@ -1,13 +1,11 @@
 {
-  "deployed_at": "2026-10-05T14:05:00Z",
+  "deployed_at": "2026-10-05T14:10:00Z",
   "method": "easypanel_api_login_and_deployService",
-  "auth": "EASYPANEL_EMAIL/EASYPANEL_PASSWORD secrets injected into Cloud Agent",
   "project": "whatsapp",
   "service": "haim-bot-core",
   "source_ref": "cursor/cloud-agent-1791198556831-78zb7",
-  "commit_sha": "d7d7b9ddfc74daeae53ccc6d2790e21e89bf5e36",
+  "commit_sha": "07e61a0b1a726a0f29a5f1c430fdade01b7ae095",
   "includes_fix": "736de83b93165e267c394cdaf5d29faae175d030",
-  "previous_image_note": "was clear-override-7335b3c before slim-handoff deploys",
   "ssh_from_agent": false,
   "health": {
     "ok": true,
@@ -21,21 +19,13 @@
     "schema": "haim_core",
     "simulation_ready": true
   },
-  "simulation_direct_handoff": {
-    "simulation_id": "3c7eea30-5f6d-429f-a263-32ccafa1df6f",
-    "request_number": 23,
-    "origin": "direct",
-    "donor_phone": "584152101",
-    "receiver_phone": "536662043",
-    "settlement": "בית שאן",
-    "address": "רחוב העלייה 3",
-    "floor": 1,
-    "outbox_reply": "הפרטים נשמרו. נעדכן."
-  },
-  "live_whatsapp_earlier": {
+  "live_whatsapp": {
     "donor_session": "default / 972584152101",
     "bot_session": "HAIM_YAHAD / 972543414386",
-    "bot_reply_observed": "האם הפריט תקין ושמיש ב־100%?",
-    "recorded_at": "2026-10-05T13:51:10Z"
+    "recipient": "0536662043",
+    "inbound_1": "בדיקת העברה חיה: מנורה שולחנית לטל 0536662043, בית שאן רחוב העלייה 5 קומה 2, בלי תמונה",
+    "bot_reply_1": "קיבלתי, המנורה תקינה ושמישה ב־100%. מה השם של טל ומה כתובת היעד שלה בבית שאן? קומה 2 באיסוף נקלטה. אין צורך בתמונה במקרה הזה.",
+    "inbound_2": "טל כהן, כתובת היעד בית שאן רחוב שיכון א 8 קומה 1. מאשר לפנות אליה לאימות.",
+    "bot_reply_2": "קיבלתי את פרטי טל ואת כתובת היעד. אשלח לה עכשיו הודעת אימות. לאחר שתאשר, נמשיך לתיאום ההובלה."
   }
 }
