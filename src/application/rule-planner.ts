@@ -3,6 +3,8 @@ import {
   appliance,
   canonicalPhone,
   donationIntent,
+  customerCancelIntent,
+  mentionedAllowedSettlement,
   directHandoffIntent,
   explicitApproval,
   ambiguousStreetCity,
@@ -68,6 +70,10 @@ const itemFactYesNo = (text: string): boolean =>
 
 function kindAndDescription(text: string): { kind: ItemKind; description: string } | null {
   const match: [RegExp, ItemKind, string][] = [
+    [/מיקרוגל|\bmicrowaves?\b/i, "other", "מיקרוגל"],
+    [/\bfridges?\b|\brefrigerators?\b/i, "fridge", "מקרר"],
+    [/\bbeds?\b/i, "bed", "מיטה"],
+    [/\bsofas?\b|\bcouches?\b/i, "sofa", "ספה"],
     [/מיטה/i, "bed", "מיטה"],
     [/שידה/i, "other", "שידה"],
     [/מנורת?\s*שולחן|מנורה/i, "other", "מנורה"],
@@ -114,7 +120,8 @@ const plan = (text: string, commands: Command[]): Plan => ({
 
 function floor(text: string): number | null {
   if (/קומת? קרקע/.test(text)) return 0;
-  const match = text.match(/קומה\s*(-?\d+)/);
+  const matches = [...text.matchAll(/קומה\s*(-?\d+)/g)];
+  const match = matches.at(-1);
   if (match) return Number(match[1]);
   // An apartment number is not a floor. Never invent קומה from «דירה N».
   return null;
@@ -126,7 +133,12 @@ function contactConsent(text: string): boolean {
 }
 
 function beitShean(text: string): string | null {
-  return /בית\s*[-־]?\s*שאן/.test(text) ? "בית שאן" : null;
+  const cleaned = text
+    .replace(/(?:ליד|קרוב\s*ל?|באזור|סמוך\s*ל?)\s*בית\s*[-־]?\s*שאן/gu, " ")
+    .replace(/\bnear\s+beit\s+she'?an\b/gi, " ");
+  if (/בית\s*[-־]?\s*שאן/.test(cleaned) || /\bbeit\s+she'?an\b/i.test(cleaned))
+    return "בית שאן";
+  return null;
 }
 
 /** First comma-separated place token, e.g. "טבריה" in "טבריה, רחוב …". */
@@ -469,6 +481,29 @@ function hasPartialNamedHandoff(ctx: Context): boolean {
 export function rulePlan(ctx: Context): Plan | null {
   const text = (ctx.message.transcript ?? ctx.message.text).trim();
   if (!text) return null;
+  if (customerCancelIntent(text)) {
+    const requests = ctx.requests ?? [];
+    const selected = requests.find(
+      (request) => request.id === ctx.conversation.selected_request_id,
+    );
+    const candidates = [
+      selected,
+      ...requests.filter(
+        (request) => !["closed", "cancelled", "rejected"].includes(request.status),
+      ),
+    ].filter((request): request is Request => Boolean(request));
+    for (const request of candidates) {
+      if (["closed", "cancelled", "rejected"].includes(request.status)) continue;
+      try {
+        ownParty(request, ctx.conversation.phone);
+      } catch {
+        continue;
+      }
+      return plan(text, [
+        { type: "cancel", request_number: request.number, choice: "final" },
+      ]);
+    }
+  }
 
   // Once a candidate photo has been presented, an affirmative reply is an
   // acceptance of that candidate—not a new generic search request.
@@ -476,11 +511,20 @@ export function rulePlan(ctx: Context): Plan | null {
   if (presented && yes(text))
     return plan(text, [{ type: "interest", request_number: presented.request.number }]);
 
+  const normalizedText = norm(text);
+  // "Near Beit She'an" is not Beit She'an. Ask which town and do not schedule.
+  if (
+    /(?:ליד|קרוב|באזור|סמוך)/u.test(normalizedText) &&
+    /בית\s*שאן|beit\s+she'?an/i.test(text) &&
+    !beitShean(text) &&
+    !activeRequest(ctx)
+  )
+    return plan(text, [{ type: "next" }]);
+
   // A new, explicit donation always starts a new request.  Do this before
   // looking at active requests: a contact may have older open requests, but
   // "אני רוצה למסור מיטה" must never be interpreted as an answer to one.
   const item = kindAndDescription(text);
-  const normalizedText = norm(text);
   const selfMove = /(?:להעביר|מעביר|מעבירה)\s+(?:לעצמי|אליי)|אני\s+(?:גם\s+)?(?:המוסר\s+וגם\s+המקבל|שני\s+הצדדים)/.test(
     normalizedText,
   );
@@ -565,6 +609,24 @@ export function rulePlan(ctx: Context): Plan | null {
       // them before entering the photo gate so they never need to be repeated.
       const location = suppliedPartyLocation(text, "donor");
       if (location) commands.push(location);
+    }
+    if (!commands.some((command) => command.type === "details")) {
+      const recent = (ctx.history ?? [])
+        .filter((entry) => entry.role === "user")
+        .map((entry) => entry.content)
+        .join("\n");
+      const settlement =
+        mentionedAllowedSettlement(text) ?? mentionedAllowedSettlement(recent);
+      if (settlement)
+        commands.push({
+          type: "details",
+          request_number: null,
+          role: "donor",
+          name: null,
+          settlement,
+          address: null,
+          floor: floor(text),
+        });
     }
     return plan(text, commands);
   }
@@ -651,7 +713,15 @@ export function rulePlan(ctx: Context): Plan | null {
   }
 
   const current = activeRequest(ctx);
-  if (!current) return null;
+  if (!current) {
+    if (
+      mentionedAllowedSettlement(text) ||
+      (/(?:ליד|קרוב|באזור|סמוך)/u.test(normalizedText) &&
+        /בית\s*שאן|beit\s+she'?an/i.test(text))
+    )
+      return plan(text, [{ type: "next" }]);
+    return null;
+  }
 
   let party;
   try {
@@ -1003,7 +1073,12 @@ export function rulePlan(ctx: Context): Plan | null {
 
   if (party.settlement && !party.address) {
     const address = norm(text);
-    if (address && !yes(address) && !no(address))
+    if (
+      address &&
+      !yes(address) &&
+      !no(address) &&
+      !/^(?:בעצם\s+)?קומה\s*-?\d+$/u.test(address)
+    )
       return plan(text, [
         {
           type: "details",
@@ -1023,6 +1098,20 @@ export function rulePlan(ctx: Context): Plan | null {
     /^(?:לא|אין(?: לי)?(?: מקבל| מספר)?)/.test(norm(text))
   )
     return plan(text, [{ type: "next" }]);
+
+  const correctedFloor = text.match(/בעצם\s+קומה\s*(-?\d+)/);
+  if (correctedFloor)
+    return plan(text, [
+      {
+        type: "details",
+        request_number: current.number,
+        role: party.role,
+        name: null,
+        settlement: null,
+        address: null,
+        floor: Number(correctedFloor[1]),
+      },
+    ]);
 
   return null;
 }

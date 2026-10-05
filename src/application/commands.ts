@@ -25,6 +25,7 @@ import {
   statusText,
   nextTuesday,
   norm,
+  mentionedAllowedSettlement,
 } from "../domain/policies.js";
 export interface Outcome {
   reply: string | null;
@@ -304,6 +305,16 @@ export class Commands {
     if (cmd.type === "escalate" && !ctx.requests.length)
       return { ...output(HUMAN_REPLY), humanReason: cmd.reason };
     if (cmd.type === "next" && !ctx.requests.length) {
+      const town = mentionedAllowedSettlement(text);
+      if (town && !donationIntent(text))
+        return output(`רשמתי את היישוב ${town}. מה תרצה למסור או לקבל?`);
+      if (
+        /(?:ליד|קרוב|באזור|סמוך)/u.test(norm(text)) &&
+        /בית\s*שאן|beit\s+she'?an/i.test(text)
+      )
+        return output(
+          "באיזה יישוב בדיוק? אנחנו פועלים בבית שאן, מסילות, ירדנה, בית אלפא, טירת צבי, כפר רופין ומחולה.",
+        );
       const pendingName = ctx.conversation.pending_counterparty_name;
       const handoffName = (() => {
         const names = [
@@ -497,14 +508,35 @@ export class Commands {
           r,
         );
       }
+      if (cmd.choice === "final") {
+        if (
+          !/(?:סופית|סופי|לגמרי|לא רלוונטי|לבטל|ביטול|תבטלו|תבטל|מבטל|מבטלת)/.test(
+            text,
+          )
+        )
+          throw new AppError("final_cancellation_not_explicit");
+        const wasCoordinated = r.status === "coordinated";
+        const items = r.items.map((item) => item.description).join(", ") || "פריט";
+        r.status = "cancelled";
+        r.run_date = null;
+        r.proposed_run_date = null;
+        r.closed_at = this.now().toISOString();
+        for (const party of r.parties) {
+          party.schedule_approved = false;
+          party.schedule_approved_date = null;
+          party.schedule_approved_at = null;
+        }
+        if (wasCoordinated)
+          for (const party of r.parties)
+            if (party.phone !== phone)
+              notices.push({
+                phone: party.phone,
+                text: `פנייה ${r.number} בוטלה: ${items}. לא תתואם הובלה.`,
+              });
+        return output(`פנייה ${r.number} בוטלה: ${items}. לא תתואם הובלה.`, r);
+      }
       if (r.status !== "cancel_pending")
         throw new AppError("cancellation_not_pending", 409);
-      if (cmd.choice === "final") {
-        if (!/(?:סופית|סופי|לגמרי|לא רלוונטי)/.test(text))
-          throw new AppError("final_cancellation_not_explicit");
-        r.status = "cancelled";
-        return output(`פנייה ${r.number} נסגרה לבקשתך.`, r);
-      }
       if (!/(?:שבוע הבא|רלוונטי|כן)/.test(text))
         throw new AppError("reschedule_not_explicit");
       r.status = "awaiting_approval";
@@ -545,7 +577,7 @@ export class Commands {
         ownParty(r, phone).floor_note_shown = true;
         return output(q.text, r);
       }
-      return output(q.text);
+      return output(q.text, r);
     }
     if (
       cmd.type === "details" &&
@@ -557,7 +589,7 @@ export class Commands {
       const latest = await c.query<{ event_type: string }>(
         `SELECT event_type FROM request_events
          WHERE request_id=$1
-         ORDER BY created_at DESC LIMIT 1`,
+         ORDER BY id DESC LIMIT 1`,
         [r.id],
       );
       const correctedRegion = await this.s.region(c, cmd.settlement);
@@ -630,7 +662,7 @@ export class Commands {
       }
       if (cmd.address) {
         const address = cmd.address.trim();
-        const looksLikeStreet = /^(?:רחוב|שכונת|שכונה|שדרות|שד[׳']?)\b/.test(address);
+        const looksLikeStreet = /^(?:רחוב|שכונת|שכונה|שדרות|שד[׳']?)(?=$|\s)/u.test(address);
         const known = looksLikeStreet ? await this.s.region(c, address) : null;
         p.address = address;
         if (known?.decision === "review")
@@ -639,7 +671,7 @@ export class Commands {
       if (p.settlement && p.settlement !== "בית שאן") p.floor = 0;
       else if (p.settlement === "בית שאן" && cmd.floor !== null)
         p.floor = cmd.floor;
-      if (cmd.address && /^(?:רחוב|שכונת|שכונה|שדרות|שד[׳']?)\b/.test(cmd.address.trim())) {
+      if (cmd.address && /^(?:רחוב|שכונת|שכונה|שדרות|שד[׳']?)(?=$|\s)/u.test(cmd.address.trim())) {
         const known = await this.s.region(c, cmd.address.trim());
         if (known.decision === "review")
           return output(`לא מצאתי את "${cmd.address.trim()}" במאגר הרחובות. אם זה שם מקומי או כינוי, אשר שזה נכון; אחרת כתוב את הרחוב/השכונה מחדש.`, r);

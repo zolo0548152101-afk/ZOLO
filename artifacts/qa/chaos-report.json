@@ -1,0 +1,372 @@
+{
+  "scenarios": 61,
+  "failed": [],
+  "report": [
+    {
+      "id": "tiberias-start",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "tiberias-mid",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "tiberias-long",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "tiberias-ai-details",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "afula-start",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "jerusalem-start",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "english-tel-aviv",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "english-tiberias",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "near-beit-shean",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "nir-david",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "allowed-mesilot",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "allowed-yardena",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "allowed-beit-alfa",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "allowed-tirat-zvi",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "allowed-kfar-ruppin",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "allowed-mehola",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "unknown-street",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "neighborhood-only",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "near-grocery",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "typo-town",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "apartment-not-floor",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "floor-correction",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "phone-not-consent",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "someone-else-phone",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "capacity-11",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "sunday",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "right-now",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "wednesday",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "photo-first",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "claim-guard",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "history-reopen",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "fault-first",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "two-unclear",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "partial-address",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "only-tomorrow",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "only-yes",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "emoji",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "question-mark",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "change-mind",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "microwave-burst",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "voice-note",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "image-no-text",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "sticker",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "link-only",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "english-fridge",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "arabic",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "russian",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "mixed-language",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "very-long",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "empty",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "digits",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "ignore-instructions",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "are-you-a-bot",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "manager-allowed",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "rude-urgent",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "threat",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "cancel-early",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "cancel-coordinated",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "cancel-irrelevant",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "cancel-then-new",
+      "phone": "0536662043",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "id": "admin-cleanup",
+      "phone": "0584152101",
+      "pass": true,
+      "detail": "ok"
+    }
+  ]
+}

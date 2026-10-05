@@ -271,9 +271,16 @@ export class Store {
        WHERE m.conversation_id=$1 AND m.seq<$2 AND m.processed_at IS NOT NULL
          AND coalesce(m.error_code,'') NOT LIKE 'coalesced_into:%'
          AND (cr.reset_at IS NULL OR m.received_at>cr.reset_at)
-         AND ($3::timestamptz IS NULL OR m.received_at>=$3::timestamptz)
+         AND (
+           $3::timestamptz IS NULL
+           OR m.received_at>=$3::timestamptz
+           OR EXISTS (
+             SELECT 1 FROM request_events e
+             WHERE e.message_id=m.id AND e.request_id=$4::uuid
+           )
+         )
        ORDER BY m.seq ASC`,
-      [conv.rows[0].id, message.seq, historySince],
+      [conv.rows[0].id, message.seq, historySince, selectedOpen?.id ?? null],
     );
     const history: Context["history"] = [];
     const important = /(מאשר|מאשרת|תיקון|טעיתי|בעצם|התכוונתי|אל תפנה|ליצור קשר)/u;
@@ -539,8 +546,20 @@ export class Store {
     c: DB,
     value: string,
   ): Promise<{ name: string; decision: "allowed" | "outside" | "review" }> {
+    const allowedExact: Record<string, string> = {
+      "בית שאן": "בית שאן",
+      "מסילות": "מסילות",
+      "ירדנה": "ירדנה",
+      "בית אלפא": "בית אלפא",
+      "טירת צבי": "טירת צבי",
+      "קיבוץ טירת צבי": "טירת צבי",
+      "כפר רופין": "כפר רופין",
+      "מחולה": "מחולה",
+    };
     const s = norm(value),
       lookup = s.replace(/^(?:רחוב|שכונת|שכונה|שדרות|שד[׳']?)\s+/, "").trim();
+    const exact = allowedExact[lookup];
+    if (exact) return { name: exact, decision: "allowed" };
     const candidates = [lookup, lookup.replace(/\s+\d+[א-ת]?\s*$/, "").trim()].filter(
       (value, index, all) => value && all.indexOf(value) === index,
     );
@@ -806,5 +825,142 @@ export class Store {
       admin_phone: this.config.ADMIN_PHONE,
     }, null);
     return approved ? "approved" : "denied";
+  }
+
+  /**
+   * Named cleanup for one phone: delete that phone's requests (so Tuesday
+   * capacity is freed) and reset the conversation, counters, and history.
+   * Safe in live: it does not use the destructive clear-all guard.
+   */
+  async purgePhone(phone: string): Promise<{ deletedRequests: number }> {
+    const canonical = canonicalPhone(phone);
+    return this.transaction(async (c) => {
+      const contacts = await c.query<{ id: string }>(
+        "SELECT id FROM contacts WHERE phone=$1 FOR UPDATE",
+        [canonical],
+      );
+      const contactIds = contacts.rows.map((row) => row.id);
+      const requests = await c.query<{ id: string }>(
+        `SELECT DISTINCT r.id
+           FROM requests r
+           JOIN request_parties p ON p.request_id=r.id
+           JOIN contacts co ON co.id=p.contact_id
+          WHERE co.phone=$1`,
+        [canonical],
+      );
+      const requestIds = requests.rows.map((row) => row.id);
+      if (requestIds.length) {
+        await c.query(
+          "UPDATE conversations SET selected_request_id=NULL WHERE selected_request_id=ANY($1::uuid[])",
+          [requestIds],
+        );
+        await c.query(
+          "DELETE FROM integration_outbox WHERE event_id IN (SELECT id FROM request_events WHERE request_id=ANY($1::uuid[]))",
+          [requestIds],
+        );
+        await c.query(
+          "DELETE FROM request_events WHERE request_id=ANY($1::uuid[])",
+          [requestIds],
+        );
+        await c.query(
+          "DELETE FROM request_verifications WHERE request_id=ANY($1::uuid[])",
+          [requestIds],
+        );
+        await c.query(
+          "DELETE FROM outbox WHERE request_id=ANY($1::uuid[])",
+          [requestIds],
+        );
+        await c.query("DELETE FROM matches WHERE request_id=ANY($1::uuid[])", [
+          requestIds,
+        ]);
+        await c.query(
+          "DELETE FROM request_media WHERE request_id=ANY($1::uuid[])",
+          [requestIds],
+        );
+        await c.query(
+          "DELETE FROM request_parties WHERE request_id=ANY($1::uuid[])",
+          [requestIds],
+        );
+        await c.query(
+          "DELETE FROM request_items WHERE request_id=ANY($1::uuid[])",
+          [requestIds],
+        );
+        await c.query("DELETE FROM requests WHERE id=ANY($1::uuid[])", [
+          requestIds,
+        ]);
+      }
+      if (!contactIds.length) return { deletedRequests: requestIds.length };
+      const conversations = await c.query<{ id: string }>(
+        "SELECT id FROM conversations WHERE contact_id=ANY($1::uuid[])",
+        [contactIds],
+      );
+      const conversationIds = conversations.rows.map((row) => row.id);
+      const messages = await c.query<{ id: string }>(
+        `SELECT id FROM messages
+          WHERE contact_id=ANY($1::uuid[])
+             OR conversation_id=ANY($2::uuid[])`,
+        [contactIds, conversationIds],
+      );
+      const messageIds = messages.rows.map((row) => row.id);
+      if (messageIds.length) {
+        await c.query(
+          "DELETE FROM request_events WHERE message_id=ANY($1::uuid[])",
+          [messageIds],
+        );
+        await c.query(
+          "DELETE FROM command_results WHERE message_id=ANY($1::uuid[])",
+          [messageIds],
+        );
+        await c.query(
+          "DELETE FROM outbox WHERE message_id=ANY($1::uuid[]) OR phone=$2",
+          [messageIds, canonical],
+        );
+        await c.query(
+          "DELETE FROM request_locations WHERE message_id=ANY($1::uuid[])",
+          [messageIds],
+        );
+        await c.query(
+          "DELETE FROM turn_messages WHERE message_id=ANY($1::uuid[])",
+          [messageIds],
+        );
+        await c.query(
+          "UPDATE messages SET media_id=NULL WHERE id=ANY($1::uuid[])",
+          [messageIds],
+        );
+        await c.query("DELETE FROM media WHERE message_id=ANY($1::uuid[])", [
+          messageIds,
+        ]);
+        await c.query(
+          "UPDATE messages SET turn_id=NULL WHERE id=ANY($1::uuid[])",
+          [messageIds],
+        );
+        await c.query("DELETE FROM messages WHERE id=ANY($1::uuid[])", [
+          messageIds,
+        ]);
+      } else {
+        await c.query("DELETE FROM outbox WHERE phone=$1", [canonical]);
+      }
+      if (conversationIds.length) {
+        await c.query(
+          "DELETE FROM conversation_resets WHERE conversation_id=ANY($1::uuid[])",
+          [conversationIds],
+        );
+        await c.query(
+          "DELETE FROM conversation_turns WHERE conversation_id=ANY($1::uuid[])",
+          [conversationIds],
+        );
+        await c.query(
+          `UPDATE conversations
+              SET mode='bot', selected_request_id=NULL, pending_counterparty_name=NULL,
+                  pending_counterparty_phone=NULL, version=version+1
+            WHERE id=ANY($1::uuid[])`,
+          [conversationIds],
+        );
+      }
+      await c.query("DELETE FROM searches WHERE contact_id=ANY($1::uuid[])", [
+        contactIds,
+      ]);
+      return { deletedRequests: requestIds.length };
+    });
   }
 }

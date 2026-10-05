@@ -708,6 +708,27 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
         runtime.log.warn({ trace_id: req.id, deleted }, "admin_database_cleared");
         return { ok: true, deleted };
       });
+      admin.post("/requests/cancel-phone", async (req) => {
+        const body = z
+          .strictObject({
+            phone: z.string().min(3).max(40),
+            confirm: z.literal("בטל פניות"),
+          })
+          .parse(req.body);
+        const phone = canonicalPhone(body.phone);
+        const s = runtime.requireStore();
+        const deleted = await s.purgePhone(phone);
+        await s.transaction(async (client) => {
+          await s.event(
+            client,
+            { trace_id: req.id },
+            "admin",
+            "admin_phone_requests_purged",
+            adminAuditRecord(req, "cancel_phone_requests", `phone:${phone}`, "success", deleted),
+          );
+        });
+        return { ok: true, phone, ...deleted };
+      });
       admin.post("/database/clear-phone", async (req) => {
         assertDestructiveAllowed(req, c);
         const body = z

@@ -35,12 +35,36 @@ export function probeReply(text: string): string {
   return CLARIFY_REPLY;
 }
 
-const CLAIM_RE =
-  /(?:נשמר|אושר|פנינו|נשלח|תואם|שלחתי|פניתי|נשלחה|בוצע|בוצעה|תואמה|התיאום הושלם)/u;
+const CLAIM_MARKERS = [
+  "התיאום הושלם",
+  "נשלחה",
+  "תואמה",
+  "בוצעה",
+  "נקבעה",
+  "מאושר",
+  "נשמר",
+  "אושר",
+  "פנינו",
+  "נשלח",
+  "תואם",
+  "שלחתי",
+  "פניתי",
+  "בוצע",
+  "נקבע",
+  "נאסוף",
+  "נבוא",
+  "ניקח",
+];
+
+function markersIn(text: string): Set<string> {
+  const found = new Set<string>();
+  for (const marker of CLAIM_MARKERS) if (text.includes(marker)) found.add(marker);
+  return found;
+}
 
 /** True when phrased text claims an operational outcome. */
 export function claimsOperationalOutcome(text: string): boolean {
-  return CLAIM_RE.test(text);
+  return markersIn(text).size > 0;
 }
 
 /**
@@ -50,14 +74,16 @@ export function claimsOperationalOutcome(text: string): boolean {
 export function applyClaimGuard(
   canonical: string,
   phrased: string | null | undefined,
-  proven: boolean,
+  _proven: boolean,
 ): { text: string; rejected: boolean } {
   const candidate = (phrased ?? "").trim();
   if (!candidate) return { text: canonical, rejected: false };
-  const invents =
-    claimsOperationalOutcome(candidate) &&
-    !claimsOperationalOutcome(canonical) &&
-    !proven;
-  if (invents) return { text: canonical, rejected: true };
+  const canonicalMarkers = markersIn(canonical);
+  const extra = [...markersIn(candidate)].filter(
+    (marker) => !canonicalMarkers.has(marker),
+  );
+  // Each claim token must already be in the committed sentence.
+  // A proven operational result does not license extra claims.
+  if (extra.length) return { text: canonical, rejected: true };
   return { text: candidate, rejected: false };
 }

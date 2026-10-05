@@ -11,6 +11,7 @@
     "start": "node --enable-source-maps dist/server.js",
     "migrate": "node dist/db/migrate-cli.js",
     "test": "tsc -p tsconfig.tests.json && node --test dist-tests/tests/unit.test.js",
+    "test:chaos": "tsc -p tsconfig.tests.json && TEST_DATABASE_URL=${TEST_DATABASE_URL:-postgres://postgres:disposable-test-only@127.0.0.1:5432/haim_chaos} node --test --test-concurrency=1 dist-tests/tests/chaos.test.js",
     "test:integration": "tsc -p tsconfig.tests.json && node --test --test-concurrency=1 dist-tests/tests/integration.test.js",
     "test:regressions": "node scripts/test-regressions.mjs",
     "test:golden": "node scripts/golden-e2e.mjs",

@@ -18,6 +18,9 @@ import {
   statusText,
   explicitApproval,
   directHandoffIntent,
+  namedOutsideSettlement,
+  customerCancelIntent,
+  mentionedAllowedSettlement,
 } from "../src/domain/policies.js";
 import { rulePlan } from "../src/application/rule-planner.js";
 import { Commands } from "../src/application/commands.js";
@@ -1958,8 +1961,141 @@ test("claim-guard drops invented save/approval claims", async () => {
     applyClaimGuard("הפרטים נשמרו. נעדכן.", "הפרטים נשמרו אצלנו.", true).rejected,
     false,
   );
+  assert.equal(
+    applyClaimGuard(
+      "הפרטים נשמרו. נעדכן.",
+      "מעולה, ההובלה נקבעה, אושר, ונאסוף אתכם",
+      true,
+    ).rejected,
+    true,
+  );
   assert.match(CLARIFY_REPLY, /כתוב את זה שוב/);
   assert.match(FAULT_REPLY, /תקלה/);
+});
+
+test("named outside towns reject in code, including English, and negation does not", () => {
+  assert.equal(namedOutsideSettlement("אני בטבריה"), "טבריה");
+  assert.equal(namedOutsideSettlement("I live in Tiberias"), "טבריה");
+  assert.equal(namedOutsideSettlement("Tel Aviv please"), "תל אביב");
+  assert.equal(namedOutsideSettlement("לא בטבריה, אני בבית שאן"), null);
+  assert.equal(namedOutsideSettlement("רחוב אילת 4"), null);
+  assert.equal(mentionedAllowedSettlement("ליד בית שאן"), null);
+  assert.equal(mentionedAllowedSettlement("אני בבית שאן"), "בית שאן");
+  assert.equal(mentionedAllowedSettlement("in Beit Shean"), "בית שאן");
+  assert.equal(customerCancelIntent("תבטלו בבקשה"), true);
+  assert.equal(customerCancelIntent("לא רלוונטי יותר"), true);
+});
+
+test("rules understand microwave, English donate, last floor, and cancel", () => {
+  const phone = "536662043";
+  const base = {
+    conversation: {
+      id: "c",
+      phone,
+      chat_id: `${phone}@c.us`,
+      mode: "bot" as const,
+      selected_request_id: null,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [],
+    candidates: [],
+    history: [],
+  };
+  const planFor = (text: string) =>
+    rulePlan({
+      ...base,
+      message: {
+        id: "m",
+        seq: "1",
+        external_id: "e",
+        trace_id: "t",
+        mode: "shadow",
+        chat_id: `${phone}@c.us`,
+        phone,
+        kind: "text",
+        text,
+        contacts: [],
+        location: null,
+        media_url: null,
+        media_id: null,
+        media_state: "none",
+        transcript: null,
+        processed_at: null,
+        ai_plan: null,
+      },
+    } as unknown as Context);
+  const microwave = planFor("שלום אני בבית שאן רוצה למסור מיקרוגל");
+  assert.equal(microwave?.commands[0]?.type, "donate");
+  if (microwave?.commands[0]?.type === "donate")
+    assert.equal(microwave.commands[0].items[0]?.description, "מיקרוגל");
+  const english = planFor("Hi I want to donate a fridge in Beit Shean");
+  assert.equal(english?.commands[0]?.type, "donate");
+  if (english?.commands[0]?.type === "donate")
+    assert.equal(english.commands[0].items[0]?.kind, "fridge");
+  const request = sampleRequest();
+  request.status = "collecting";
+  const donor = request.parties.find((party) => party.role === "donor")!;
+  donor.phone = phone;
+  donor.settlement = "בית שאן";
+  donor.address = "רחוב הרצל 3";
+  const floorPlan = rulePlan({
+    ...base,
+    conversation: { ...base.conversation, selected_request_id: request.id },
+    requests: [request],
+    message: {
+      id: "m2",
+      seq: "2",
+      external_id: "e2",
+      trace_id: "t",
+      mode: "shadow",
+      chat_id: `${phone}@c.us`,
+      phone,
+      kind: "text",
+      text: "קומה 3 בעצם קומה 5",
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+  } as unknown as Context);
+  const floorCommand = floorPlan?.commands.find((command) => command.type === "details");
+  assert.equal(floorCommand?.type, "details");
+  if (floorCommand?.type === "details") assert.equal(floorCommand.floor, 5);
+  const cancel = rulePlan({
+    ...base,
+    conversation: { ...base.conversation, selected_request_id: request.id },
+    requests: [{ ...request, status: "coordinated" }],
+    message: {
+      id: "m3",
+      seq: "3",
+      external_id: "e3",
+      trace_id: "t",
+      mode: "shadow",
+      chat_id: `${phone}@c.us`,
+      phone,
+      kind: "text",
+      text: "לבטל",
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+  } as unknown as Context);
+  assert.deepEqual(cancel?.commands[0], {
+    type: "cancel",
+    request_number: request.number,
+    choice: "final",
+  });
 });
 
 test("probeReply asks concrete follow-ups instead of generic unclear", async () => {

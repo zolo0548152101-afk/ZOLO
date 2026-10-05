@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { Store, type Outbound } from "../infrastructure/store.js";
 import { Commands, type Outcome } from "./commands.js";
-import type { Planner } from "../infrastructure/ai.js";
+import { selectDecodePlan, type Planner } from "../infrastructure/ai.js";
+import { rulePlan } from "./rule-planner.js";
 import {
   DeliveryError,
   type Channel,
@@ -23,7 +24,6 @@ import {
 } from "../domain/types.js";
 import {
   isStatus,
-  donationIntent,
   photoGate,
   quickReply,
   statusText,
@@ -31,7 +31,8 @@ import {
   PHOTO_FIRST,
   HUMAN_REPLY,
   OUTSIDE,
-  cityOutsideStreet,
+  namedOutsideSettlement,
+  customerCancelIntent,
   grounded,
   mutable,
   nextQuestion,
@@ -356,6 +357,11 @@ export class Engine {
       }
     }
     const text = ctx.message.transcript ?? ctx.message.text;
+    const outsideTown = this.outsideTown(ctx, text);
+    if (outsideTown) {
+      await this.finishOutside(id, outsideTown);
+      return;
+    }
     if (
       ctx.message.kind === "image" ||
       ctx.message.kind === "location" ||
@@ -376,16 +382,15 @@ export class Engine {
         return;
       }
     }
-    const capacityDecisionText =
-      /^(כן|לא)(?:\s+(?:\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4}))?\s*$/.test(text.trim());
     let supersessionCheck = false;
     // Resolve cheap deterministic messages outside the AI error/retry block;
     // a transient DB ordering retry must not be mislabeled as an OpenAI error.
+    // A bare כן/לא is not one of those: it may approve a party, confirm a
+    // handoff, or answer the admin's capacity question. finish() decides.
     if (
       !plan &&
-        (quickReply(text) !== null ||
+      (quickReply(text) !== null ||
         isStatus(text) ||
-        capacityDecisionText ||
         (ctx.conversation.phone === this.s.config.ADMIN_PHONE &&
           /^#פניות(?:\s+(?:ל)?חיים\s+יחד)?\s*$/.test(text.trim())))
     ) {
@@ -398,8 +403,14 @@ export class Engine {
         // commands.apply / policies after the model returns commands.
         const response = await this.ai.plan(ctx);
         supersessionCheck = true;
-        plan = planSchema.parse(response.plan);
-        if (response.understood && !grounded(plan, text))
+        const parsed = planSchema.parse(response.plan);
+        const selected = selectDecodePlan(
+          { understood: response.understood, plan: parsed },
+          rulePlan(ctx),
+          ctx,
+        );
+        plan = selected.plan;
+        if (selected.understood && selected.useAi && !grounded(plan, text))
           throw new AppError("ungrounded_tool");
         await this.s.pool.query(
           `UPDATE messages SET ai_plan=$2,plan_versions=$3,ai_metadata=$4 WHERE id=$1 AND ai_plan IS NULL AND processed_at IS NULL`,
@@ -410,7 +421,7 @@ export class Engine {
             JSON.stringify(response.metadata),
           ],
         );
-        if (response.understood === false) {
+        if (!selected.understood) {
           await this.finishUnclear(id);
           return;
         }
@@ -540,47 +551,33 @@ export class Engine {
         code: errorCode(error),
         fault_count: next,
       });
-      // Two clear AI/API failures → human. Conversational probes never escalate here.
-      if (next >= 2) {
-        const open =
-          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-          ctx.requests.find(
-            (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
-          ) ??
-          null;
-        if (open) {
-          open.status = "human";
-          open.human_reason = "ai_fault_after_retries";
-          await this.s.save(c, open);
-        }
-        await this.alert(c, ctx, "ai_fault_after_retries", FAULT_REPLY, open);
-        await this.s.outbound(
-          c,
-          ctx.message,
-          { phone, text: FAULT_REPLY },
-          `reply:${id}`,
-          open?.id ?? null,
-        );
-        await c.query(
-          "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
-          [id, FAULT_REPLY, "openai_failure_escalated"],
-        );
-        await c.query(
-          "UPDATE conversations SET mode='human',version=version+1 WHERE id=$1",
-          [ctx.conversation.id],
-        );
-        return;
+      // The first AI/API failure goes to a human. It does not count as unclear.
+      const open =
+        ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+        ctx.requests.find(
+          (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
+        ) ??
+        null;
+      if (open) {
+        open.status = "human";
+        open.human_reason = "ai_fault_after_retries";
+        await this.s.save(c, open);
       }
+      await this.alert(c, ctx, "ai_fault_after_retries", FAULT_REPLY, open);
       await this.s.outbound(
         c,
         ctx.message,
         { phone, text: FAULT_REPLY },
         `reply:${id}`,
-        null,
+        open?.id ?? null,
       );
       await c.query(
         "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
-        [id, FAULT_REPLY, "openai_failure"],
+        [id, FAULT_REPLY, "openai_failure_escalated"],
+      );
+      await c.query(
+        "UPDATE conversations SET mode='human',version=version+1 WHERE id=$1",
+        [ctx.conversation.id],
       );
     });
   }
@@ -592,8 +589,40 @@ export class Engine {
       const phone = ctx.conversation.phone;
       const prior = await this.unclearCount(ctx.conversation.id, ctx.message.seq, c);
       const next = prior + 1;
+      if (next >= 2) {
+        const open =
+          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+          ctx.requests.find(
+            (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
+          ) ??
+          null;
+        if (open) {
+          open.status = "human";
+          open.human_reason = "unclear_after_two_clarifications";
+          await this.s.save(c, open);
+        }
+        await this.alert(c, ctx, "unclear_after_two_clarifications", HUMAN_REPLY, open);
+        await this.s.outbound(
+          c,
+          ctx.message,
+          { phone, text: HUMAN_REPLY },
+          `reply:${id}`,
+          open?.id ?? null,
+        );
+        await this.s.event(c, ctx.message, phone, "unclear_escalated", {
+          unclear_count: next,
+        });
+        await c.query(
+          "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
+          [id, HUMAN_REPLY, "unclear_escalated"],
+        );
+        await c.query(
+          "UPDATE conversations SET mode='human',version=version+1 WHERE id=$1",
+          [ctx.conversation.id],
+        );
+        return;
+      }
       const reply = probeReply(ctx.message.text);
-      // Keep probing. Human escalation is reserved for repeated AI/API faults.
       await this.s.outbound(
         c,
         ctx.message,
@@ -608,6 +637,65 @@ export class Engine {
       await c.query(
         "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
         [id, reply],
+      );
+    });
+  }
+
+  /** Named out-of-area town in the customer's own words, before any plan runs. */
+  private outsideTown(ctx: Context, text: string): string | null {
+    if (!text.trim() || customerCancelIntent(text)) return null;
+    const town = namedOutsideSettlement(text);
+    if (!town) return null;
+    if (/(?:תיקון|טעיתי)/u.test(text)) {
+      const own = ctx.requests
+        .flatMap((request) => request.parties)
+        .find((party) => party.phone === ctx.conversation.phone && party.settlement);
+      if (own?.settlement && !namedOutsideSettlement(own.settlement)) return null;
+    }
+    return town;
+  }
+
+  private async finishOutside(id: string, settlement: string): Promise<void> {
+    await this.s.transaction(async (c) => {
+      const ctx = await this.s.context(id, c, true);
+      if (ctx.message.processed_at) return;
+      const phone = ctx.conversation.phone;
+      const terminal = ["coordinated", "closed", "cancelled", "rejected", "cancel_pending"];
+      const open =
+        ctx.requests.find(
+          (request) =>
+            request.id === ctx.conversation.selected_request_id &&
+            !terminal.includes(request.status),
+        ) ??
+        ctx.requests.find((request) => !terminal.includes(request.status)) ??
+        null;
+      let request: Request | null = null;
+      if (open) {
+        request = await this.s.request(open.id, c, true);
+        if (!terminal.includes(request.status)) {
+          request.status = "rejected";
+          request.human_reason = null;
+          await this.s.save(c, request);
+        }
+      }
+      await this.s.event(
+        c,
+        ctx.message,
+        phone,
+        "outside_area_rejected",
+        { settlement },
+        request?.id ?? null,
+      );
+      await this.s.outbound(
+        c,
+        ctx.message,
+        { phone, text: OUTSIDE },
+        `reply:${id}`,
+        request?.id ?? null,
+      );
+      await c.query(
+        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
+        [id, OUTSIDE, "outside_area_rejected"],
       );
     });
   }
@@ -628,42 +716,6 @@ export class Engine {
       if (ctx.message.processed_at) return;
       const text = ctx.message.transcript ?? ctx.message.text,
         phone = ctx.conversation.phone;
-      // Reject an explicitly named out-of-area endpoint before the donation
-      // photo gate.  Asking for a photo first creates a dead-end and hides the
-      // actual reason the request cannot be served.
-      if (donationIntent(text)) {
-        const outsideNames = [
-          "אילת",
-          "עפולה",
-          "ירושלים",
-          "תל אביב",
-          "חיפה",
-          "באר שבע",
-          "אשדוד",
-          "אשקלון",
-          "נתניה",
-          "ראשון לציון",
-        ];
-        const outsideName = outsideNames.find((name) => cityOutsideStreet(text, name));
-        if (outsideName && (await this.s.region(c, outsideName)).decision === "outside") {
-          await this.s.event(c, ctx.message, phone, "outside_area_rejected", {
-            settlement: outsideName,
-          });
-          await c.query(
-            "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
-            [id, OUTSIDE],
-          );
-          await this.s.outbound(c, ctx.message, { phone, text: OUTSIDE }, `reply:${id}`, null);
-          return {
-            trace_id: ctx.message.trace_id,
-            message_id: id,
-            mode: ctx.message.mode,
-            stage: "processed",
-            request_number: null,
-            code: "outside_area_rejected",
-          };
-        }
-      }
       const older = await c.query(
         "SELECT 1 FROM messages m JOIN contacts co ON co.id=m.contact_id WHERE co.phone=$1 AND m.seq<$2 AND m.processed_at IS NULL LIMIT 1",
         [phone, ctx.message.seq],
@@ -991,7 +1043,6 @@ export class Engine {
               // transition and let the receiver provide their own details.
               return !actorRole || actorRole === command.role;
             });
-            const initialRequestIds = new Set(ctx.requests.map((candidate) => candidate.id));
             let index = 0;
             const hasSameMessageDonorDetails = executableCommands.some(
               (candidate) =>
@@ -1005,7 +1056,8 @@ export class Engine {
                 request &&
                 photoGate(request) &&
                 !handoffTransitionPlanned &&
-                command.type !== "details"
+                command.type !== "details" &&
+                command.type !== "clarify_duplicate"
               ) {
                 reply = PHOTO_FIRST;
                 break;
@@ -1073,13 +1125,17 @@ export class Engine {
             // the first operational gate remains the photo request. A later
             // details command must not replace PHOTO-FIRST with a condition
             // or another detail question.
+            const explicitClarification = /כבר קיימת פנייה/.test(reply ?? "");
             if (
               request &&
               !reason &&
-              !initialRequestIds.has(request.id) &&
+              !explicitClarification &&
               request.origin === "donation" &&
               photoGate(request) &&
-              !handoffTransitionPlanned
+              !handoffTransitionPlanned &&
+              !["cancelled", "rejected", "human", "closed", "coordinated"].includes(
+                request.status,
+              )
             ) {
               reply = PHOTO_FIRST;
               intent = "ask_photo";
