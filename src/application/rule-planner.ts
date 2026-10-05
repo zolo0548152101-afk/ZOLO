@@ -78,7 +78,15 @@ const plan = (text: string, commands: Command[]): Plan => ({
 function floor(text: string): number | null {
   if (/קומת? קרקע/.test(text)) return 0;
   const match = text.match(/קומה\s*(-?\d+)/);
-  return match ? Number(match[1]) : null;
+  if (match) return Number(match[1]);
+  // WhatsApp shorthand often uses דירה when the floor is unknown.
+  const apartment = text.match(/דירה\s*(-?\d+)/);
+  return apartment ? Number(apartment[1]) : null;
+}
+
+/** "מאשר ליצור קשר" often trails an address line with no punctuation. */
+function contactConsent(text: string): boolean {
+  return /מאשר(?:ת)?\s+(?:ליצור(?:\s+אית(?:ה|ו))?\s+קשר|לפנות)/u.test(norm(text));
 }
 
 function beitShean(text: string): string | null {
@@ -170,13 +178,32 @@ function placeFromFragment(value: string): {
   address: string | null;
   floor: number | null;
 } {
-  const settlement = beitShean(value);
-  const addressMatch = value.match(/(?:רחוב|שיכון|שכונה|שכונת|שדרות|שד[׳']?)\s+[^,.;?]+/u);
-  const address = addressMatch?.[0]
-    ?.replace(/\s+ב?בית\s*[-־]?\s*שאן.*$/u, "")
-    .replace(/\s+(?:קומה|ק[׳'])\s*-?\d+(?:\s+עם\s+מעלית)?\s*$/u, "")
-    .trim() ?? null;
-  return { settlement, address, floor: floor(value) };
+  const cleaned = norm(value)
+    .replace(/\s+(?:מאשר(?:ת)?|ואפשר|אפשר)\b.*$/u, "")
+    .trim();
+  const settlement = beitShean(cleaned);
+  const streetToken = String.raw`(?!(?:קומה|דירה|בית)(?:\s|$))[א-ת][א-ת׳״'’\-]*`;
+  const withHouse = cleaned.match(
+    new RegExp(
+      String.raw`((?:רחוב|שיכון|שכונה|שכונת|שדרות|שד[׳']?)\s+${streetToken}(?:\s+${streetToken}){0,3}\s+\d+[א-ת]?)`,
+      "u",
+    ),
+  );
+  const withoutHouse = cleaned.match(/(?:רחוב|שיכון|שכונה|שכונת|שדרות|שד[׳']?)\s+[^,.;?]+/u);
+  const bare = cleaned.match(
+    new RegExp(
+      String.raw`(?:^|[\s,;])(?!(?:בית|רחוב|שיכון|שכונה|שכונת|שדרות|שד|קומה|דירה)\b)(${streetToken}(?:\s+${streetToken}){0,3})\s+(\d+[א-ת]?)`,
+      "u",
+    ),
+  );
+  const address =
+    withHouse?.[1]?.trim() ??
+    withoutHouse?.[0]
+      ?.replace(/\s+ב?בית\s*[-־]?\s*שאן.*$/u, "")
+      .replace(/\s+(?:קומה|ק[׳']|דירה)\s*-?\d+(?:\s+עם\s+מעלית)?\s*$/u, "")
+      .trim() ??
+    (bare?.[1] && bare[2] ? `רחוב ${bare[1].trim()} ${bare[2]}` : null);
+  return { settlement, address, floor: floor(cleaned) };
 }
 
 function sameOtherItem(existingDescription: string, nextDescription: string): boolean {
@@ -189,7 +216,7 @@ function sameOtherItem(existingDescription: string, nextDescription: string): bo
 function pickupAndDeliveryDetails(text: string, name: string | null = null): Command[] | null {
   const normalized = norm(text);
   const labeled = normalized.match(
-    /איסוף\s+(?<origin>.+?)(?:,\s*)?מסירה\s+(?<destination>.+?)(?=(?:[.!?]|,\s*(?:מאשר|ואפשר|אפשר)|$))/u,
+    /איסוף\s+(?<origin>.+?)(?:,\s*)?מסירה\s+(?<destination>.+?)(?=(?:[.!?]|[,\s]+(?:מאשר|ואפשר|אפשר)|$))/u,
   );
   const pickupDropoff = normalized.match(
     /אוספים\s+מ(?<origin>.+?)(?:,\s*)?ו?מביאים\s+ל(?<destination>.+?)(?=[.!?]|$)/u,
@@ -215,8 +242,12 @@ function pickupAndDeliveryDetails(text: string, name: string | null = null): Com
   if (!originText || !destinationText) return null;
   const origin = placeFromFragment(originText);
   const destination = placeFromFragment(destinationText);
-  const destinationSettlement = destination.settlement ?? origin.settlement;
-  if (!origin.settlement || !origin.address || !destinationSettlement || !destination.address)
+  // Labeled איסוף/מסירה almost always omits the city on WhatsApp. Default to
+  // בית שאן (the only in-area settlement) so both endpoints persist.
+  const originSettlement = origin.settlement ?? (origin.address ? "בית שאן" : null);
+  const destinationSettlement =
+    destination.settlement ?? originSettlement ?? (destination.address ? "בית שאן" : null);
+  if (!originSettlement || !origin.address || !destinationSettlement || !destination.address)
     return null;
   return [
     {
@@ -224,7 +255,7 @@ function pickupAndDeliveryDetails(text: string, name: string | null = null): Com
       request_number: null,
       role: "donor",
       name,
-      settlement: origin.settlement,
+      settlement: originSettlement,
       address: origin.address,
       floor: origin.floor,
     },
@@ -602,7 +633,9 @@ export function rulePlan(ctx: Context): Plan | null {
   // misclassified as a name and the approval is lost.
   // Donors are auto-approved when a direct handoff opens, so destination
   // ("כתובת היעד…") plus contact consent must still apply after approval.
-  if (explicitApproval(text)) {
+  // "מאשר ליצור קשר" often trails an address with no comma — treat that as
+  // consent too so the AI never invents a "I'll message them" reply.
+  if (explicitApproval(text) || contactConsent(text)) {
     const commands: Command[] = [];
     if (!party.approved_at)
       commands.push({ type: "approve_self", request_number: current.number });
@@ -627,7 +660,8 @@ export function rulePlan(ctx: Context): Plan | null {
     }
     if (
       current.origin === "direct" &&
-      /(?:נפנה|לפנות|ליצור\s+קשר|ליצור\s+אית(?:ה|ו)\s+קשר)/u.test(norm(text)) &&
+      (contactConsent(text) ||
+        /(?:נפנה|לפנות|ליצור\s+קשר|ליצור\s+אית(?:ה|ו)\s+קשר)/u.test(norm(text))) &&
       current.parties.some((item) => item.role !== party.role)
     )
       commands.push({
@@ -636,6 +670,28 @@ export function rulePlan(ctx: Context): Plan | null {
         contact: true,
       });
     if (commands.length) return plan(text, commands);
+  }
+
+  // Persist איסוף/מסירה even when the donor has not yet answered the
+  // verification question — otherwise the facts evaporate into AI replies.
+  if (current.origin === "direct") {
+    const bothLocations = pickupAndDeliveryDetails(text);
+    if (bothLocations?.length) {
+      const commands: Command[] = bothLocations
+        .filter((location) => location.type === "details")
+        .map((location) =>
+          location.type === "details"
+            ? { ...location, request_number: current.number }
+            : location,
+        );
+      if (contactConsent(text) && current.parties.some((item) => item.role !== party.role))
+        commands.push({
+          type: "contact_counterparty",
+          request_number: current.number,
+          contact: true,
+        });
+      if (commands.length) return plan(text, commands);
+    }
   }
 
   // A direct handoff commonly arrives as two WhatsApp messages: first the

@@ -548,6 +548,86 @@ test("איסוף and מסירה in one consent message store both pickup and des
     true,
   );
 });
+test("bare איסוף/מסירה without רחוב or comma still stores both endpoints and consent", () => {
+  const text = "איסוף העלייה 5 דירה 2 מסירה העלייה 8 דירה 1 מאשר ליצור קשר";
+  const direct = sampleRequest();
+  direct.origin = "direct";
+  direct.status = "collecting";
+  direct.items[0]!.kind = "other";
+  direct.items[0]!.description = "מנורה";
+  direct.verification_contacted = false;
+  direct.parties[0]!.role = "donor";
+  direct.parties[0]!.phone = "584152101";
+  direct.parties[0]!.settlement = null;
+  direct.parties[0]!.address = null;
+  direct.parties[0]!.floor = null;
+  direct.parties[0]!.approved_at = "2026-10-05T15:00:00.000Z";
+  direct.parties[0]!.approved_by = "584152101";
+  direct.parties[1]!.role = "receiver";
+  direct.parties[1]!.phone = "536662043";
+  direct.parties[1]!.name = "טל";
+  direct.parties[1]!.settlement = null;
+  direct.parties[1]!.address = null;
+  direct.parties[1]!.floor = null;
+  const context = {
+    conversation: {
+      id: "c-bare-pickup-dropoff",
+      phone: "584152101",
+      chat_id: "972584152101@c.us",
+      mode: "bot",
+      selected_request_id: direct.id,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [direct],
+    candidates: [],
+    message: {
+      id: "m-bare-pickup-dropoff",
+      seq: "1",
+      external_id: "e-bare-pickup-dropoff",
+      trace_id: "t-bare-pickup-dropoff",
+      mode: "live",
+      chat_id: "972584152101@c.us",
+      phone: "584152101",
+      kind: "text",
+      text,
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+    history: [
+      {
+        role: "assistant",
+        content: "האם תרצה שנפנה למקבל לצורך אימות הפרטים?",
+      },
+    ],
+  } as Context;
+  const commands = rulePlan(context)?.commands ?? [];
+  const donor = commands.find((command) => command.type === "details" && command.role === "donor");
+  const receiver = commands.find((command) => command.type === "details" && command.role === "receiver");
+  assert.equal(donor?.type, "details");
+  assert.equal(receiver?.type, "details");
+  if (donor?.type === "details") {
+    assert.equal(donor.settlement, "בית שאן");
+    assert.equal(donor.address, "רחוב העלייה 5");
+    assert.equal(donor.floor, 2);
+  }
+  if (receiver?.type === "details") {
+    assert.equal(receiver.settlement, "בית שאן");
+    assert.equal(receiver.address, "רחוב העלייה 8");
+    assert.equal(receiver.floor, 1);
+  }
+  assert.equal(
+    commands.some((command) => command.type === "contact_counterparty" && command.contact === true),
+    true,
+  );
+});
 test("direct handoff does not require disassembly and preserves explicit broken fact", () => {
   const r = sampleRequest();
   r.origin = "direct";
