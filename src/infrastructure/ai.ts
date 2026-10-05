@@ -299,14 +299,50 @@ function extractPhraseText(raw: string, fallback: string): string {
   return trimmed;
 }
 
-function actionableAiPlan(translated: {
-  understood: boolean;
-  plan: Plan;
-}): boolean {
-  return (
-    translated.understood &&
-    translated.plan.commands.some((command) => command.type !== "next")
+const OPENING_COMMANDS = new Set(["donate", "receive_from_donor", "seek"]);
+
+function hasOpenRequest(ctx: Context): boolean {
+  return ctx.requests.some(
+    (request) =>
+      !["coordinated", "closed", "cancelled", "rejected", "cancel_pending"].includes(
+        request.status,
+      ),
   );
+}
+
+/**
+ * AI decode is primary only when its commands can actually run.
+ * Bare details/approvals with no open request are not actionable openings —
+ * they must not override rulePlan's donate/seek for a new conversation.
+ */
+export function actionableAiPlan(
+  translated: { understood: boolean; plan: Plan },
+  ctx: Context,
+): boolean {
+  if (!translated.understood) return false;
+  const commands = translated.plan.commands.filter(
+    (command) => command.type !== "next",
+  );
+  if (!commands.length) return false;
+  if (hasOpenRequest(ctx)) return true;
+  return commands.some((command) => OPENING_COMMANDS.has(command.type));
+}
+
+/** Prefer rulePlan when it opens a flow and AI only returned follow-up facts. */
+export function selectDecodePlan(
+  translated: { understood: boolean; plan: Plan },
+  deterministic: Plan | null,
+  ctx: Context,
+): { plan: Plan; useAi: boolean; understood: boolean } {
+  const useAi = actionableAiPlan(translated, ctx);
+  if (useAi) return { plan: translated.plan, useAi: true, understood: true };
+  if (deterministic)
+    return { plan: deterministic, useAi: false, understood: true };
+  return {
+    plan: translated.plan,
+    useAi: false,
+    understood: translated.understood,
+  };
 }
 
 export class OpenAIPlanner implements Planner {
@@ -368,18 +404,12 @@ export class OpenAIPlanner implements Planner {
       throw new AppError("invalid_managed_prompt_response");
     }
     const translated = translate(payload, ctx, text);
-    // AI decode is primary when it returns real commands. rulePlan remains a
-    // safety net for unclear/empty AI output and for hard Hebrew corpus cases.
+    // AI decode is primary when it returns runnable commands. rulePlan remains
+    // the safety net for unclear/empty AI output and for opening turns where
+    // the model returned only details without donate/seek.
     const deterministic = rulePlan(ctx);
-    const useAi = actionableAiPlan(translated);
-    const plan = useAi
-      ? translated.plan
-      : (deterministic ?? translated.plan);
-    const understood = useAi
-      ? true
-      : deterministic
-        ? true
-        : translated.understood;
+    const selected = selectDecodePlan(translated, deterministic, ctx);
+    const { plan, useAi, understood } = selected;
     return {
       understood,
       plan,

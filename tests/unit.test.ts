@@ -2092,3 +2092,152 @@ test("דירה without קומה does not set floor", () => {
     if (command.type === "details") assert.equal(command.floor, null);
   }
 });
+
+test("AI details-only without open request does not override rulePlan opening", async () => {
+  const { selectDecodePlan } = await import("../src/infrastructure/ai.js");
+  const emptyCtx = {
+    conversation: { phone: "584152101" },
+    requests: [],
+    candidates: [],
+    message: { text: "יש לי מנורה למסירה ישירות לטל 0536662043" },
+    history: [],
+  } as unknown as Context;
+  const aiDetailsOnly = {
+    understood: true,
+    plan: {
+      commands: [
+        {
+          type: "details" as const,
+          request_number: null,
+          role: "donor" as const,
+          name: null,
+          settlement: "בית שאן",
+          address: null,
+          floor: null,
+        },
+      ],
+      evidence: "מנורה",
+    },
+  };
+  const rules = rulePlan({
+    ...emptyCtx,
+    conversation: {
+      id: "c",
+      phone: "584152101",
+      chat_id: "972584152101@c.us",
+      mode: "bot",
+      selected_request_id: null,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    message: {
+      id: "m",
+      seq: "1",
+      external_id: "e",
+      trace_id: "t",
+      mode: "live",
+      chat_id: "972584152101@c.us",
+      phone: "584152101",
+      kind: "text",
+      text: "יש לי מנורה שולחנית תקינה למסירה ישירות לטל 0536662043. אני מבית שאן.",
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+  } as Context);
+  assert.ok(rules?.commands.some((command) => command.type === "donate"));
+  const selected = selectDecodePlan(aiDetailsOnly, rules, emptyCtx);
+  assert.equal(selected.useAi, false);
+  assert.equal(selected.plan.commands[0]?.type, "donate");
+});
+
+test("self-transfer rulePlan does not invent receiver name עצמי", () => {
+  const text =
+    "אני רוצה להעביר לעצמי שולחן מבית שאן רחוב העלייה קומה 1 לבית שאן רחוב העלייה קומה 2";
+  const plan = rulePlan({
+    conversation: {
+      id: "c-self",
+      phone: "584152101",
+      chat_id: "972584152101@c.us",
+      mode: "bot",
+      selected_request_id: null,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [],
+    candidates: [],
+    message: {
+      id: "m-self",
+      seq: "1",
+      external_id: "e-self",
+      trace_id: "t-self",
+      mode: "live",
+      chat_id: "972584152101@c.us",
+      phone: "584152101",
+      kind: "text",
+      text,
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+    history: [],
+  } as Context);
+  const donate = plan?.commands.find((command) => command.type === "donate");
+  assert.equal(donate?.type, "donate");
+  if (donate?.type === "donate") {
+    assert.equal(donate.counterparty_phone, "584152101");
+    assert.equal(donate.counterparty_name ?? null, null);
+    assert.equal(donate.direct, true);
+  }
+});
+
+test("seeker opening uses seek and not donate", () => {
+  const text = "אני מחפש לקבל מיטה זוגית בבית שאן";
+  const plan = rulePlan({
+    conversation: {
+      id: "c-seek",
+      phone: "584152101",
+      chat_id: "972584152101@c.us",
+      mode: "bot",
+      selected_request_id: null,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [],
+    candidates: [],
+    message: {
+      id: "m-seek",
+      seq: "1",
+      external_id: "e-seek",
+      trace_id: "t-seek",
+      mode: "live",
+      chat_id: "972584152101@c.us",
+      phone: "584152101",
+      kind: "text",
+      text,
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+    history: [],
+  } as Context);
+  assert.equal(plan?.commands[0]?.type, "seek");
+});

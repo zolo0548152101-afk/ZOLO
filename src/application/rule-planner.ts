@@ -404,7 +404,35 @@ function contactCardName(text: string): string | null {
 function namedRecipientName(text: string): string | null {
   const names = [...norm(text).matchAll(/(?:^|\s)ל([א-ת]{2,})(?=$|[\s,.;!?])/gu)]
     .map((match) => match[1]!)
-    .filter((name) => !["מסירה", "תרומה", "מישהו", "מישהי", "אדם", "בית", "עפולה", "צמח", "קרקע"].includes(name));
+    .filter(
+      (name) =>
+        ![
+          "מסירה",
+          "תרומה",
+          "מישהו",
+          "מישהי",
+          "אדם",
+          "בית",
+          "עפולה",
+          "צמח",
+          "קרקע",
+          "עצמי",
+          "אליי",
+          // Infinitive stems after ל־ (להעביר / למסור / לקבל…)
+          "העביר",
+          "העבירה",
+          "מסור",
+          "מסורה",
+          "קבל",
+          "קבלת",
+          "תת",
+          "תרום",
+          "תאאם",
+          "תאם",
+          "חפש",
+          "חפשת",
+        ].includes(name),
+    );
   return names.at(-1) ?? null;
 }
 
@@ -717,9 +745,12 @@ export function rulePlan(ctx: Context): Plan | null {
     } else {
       // In a direct handoff the donor often sends the receiver's destination
       // ("כתובת היעד…") together with consent to contact them. Store that on
-      // the receiver, not on the donor's pickup address.
+      // the receiver, not on the donor's pickup address. A receiver approving
+      // their own address always writes to their own role.
       const locationRole =
-        current.origin === "direct" ? directLocationRole(text) : party.role;
+        current.origin === "direct" && party.role === "donor"
+          ? directLocationRole(text)
+          : party.role;
       const suppliedLocation = suppliedPartyLocation(text, locationRole);
       if (suppliedLocation?.type === "details")
         commands.push({ ...suppliedLocation, request_number: current.number });

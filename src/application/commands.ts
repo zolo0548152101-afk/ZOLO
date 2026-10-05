@@ -734,6 +734,8 @@ export class Commands {
           if (item.working === null) item.working = true;
       await c.query("UPDATE conversations SET pending_counterparty_name=NULL,version=version+1 WHERE id=$1", [ctx.conversation.id]);
       r.origin = "direct";
+      if (r.parties.length === 2 && r.parties[0]!.phone === r.parties[1]!.phone)
+        r.represents_both_parties = true;
       // In a direct handoff, receiving a phone number is not permission to
       // contact that person. The initiating party must explicitly choose the
       // verification-message option first.

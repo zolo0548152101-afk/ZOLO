@@ -8,10 +8,14 @@ understood=false רק כשאי אפשר להבין את הכוונה. אז comma
 אם יש רמז חלקי (למשל «אני רוצה למסור» בלי למי) עדיף understood=true עם הפקודות החלקיות שיש, והקוד ישאל את מה שחסר.
 
 פקודות:
-- donate: פתיחת מסירה. items, counterparty_phone, counterparty_name, direct, free, working.
+- donate: פתיחת מסירה/תרומה. items, counterparty_phone, counterparty_name, direct, free, working.
+  מסירה ישירה לטל/מספר = donate עם direct=true ו־counterparty_phone.
+  העברה לעצמי/אליי = donate עם counterparty_phone של השולח ו־direct=true.
+- seek: חיפוש לקבל פריט («אני מחפש/מבקש/צריך לקבל»). kind בלבד. לא donate ולא תמונה.
 - details: request_number, role donor|receiver, name, settlement, address, floor.
   איסוף = donor. מסירה = receiver. «השם שלי» = name של השולח.
   דירה היא לא קומה. אל תמלא floor מתוך «דירה N».
+  details לבד בלי פנייה פתוחה אינו פותח פנייה — חייב donate או seek קודם.
 - item_facts: working, free, needs_disassembly, wardrobe_small_whole, oven_type.
   «מאשר את המועד» אינו פירוק ואין לשלוח needs_disassembly.
 - approve_self: אישור זהות של השולח בלבד. לא מאשר אדם אחר.
