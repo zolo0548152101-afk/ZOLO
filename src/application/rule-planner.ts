@@ -116,9 +116,8 @@ function floor(text: string): number | null {
   if (/קומת? קרקע/.test(text)) return 0;
   const match = text.match(/קומה\s*(-?\d+)/);
   if (match) return Number(match[1]);
-  // WhatsApp shorthand often uses דירה when the floor is unknown.
-  const apartment = text.match(/דירה\s*(-?\d+)/);
-  return apartment ? Number(apartment[1]) : null;
+  // An apartment number is not a floor. Never invent קומה from «דירה N».
+  return null;
 }
 
 /** "מאשר ליצור קשר" often trails an address line with no punctuation. */

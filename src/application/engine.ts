@@ -38,7 +38,11 @@ import {
   nextTuesday,
   readyToProposeSchedule,
 } from "../domain/policies.js";
-import { rulePlan } from "./rule-planner.js";
+import {
+  applyClaimGuard,
+  CLARIFY_REPLY,
+  FAULT_REPLY,
+} from "../domain/ai-guards.js";
 
 export class Engine {
   private readonly commands: Commands;
@@ -350,7 +354,6 @@ export class Engine {
         return;
       }
     }
-    const deterministic = plan ? null : rulePlan(ctx);
     const capacityDecisionText =
       /^(כן|לא)(?:\s+(?:\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4}))?\s*$/.test(text.trim());
     let supersessionCheck = false;
@@ -358,7 +361,6 @@ export class Engine {
     // a transient DB ordering retry must not be mislabeled as an OpenAI error.
     if (
       !plan &&
-      !deterministic &&
         (quickReply(text) !== null ||
         isStatus(text) ||
         capacityDecisionText ||
@@ -370,17 +372,13 @@ export class Engine {
     }
     if (!plan) {
       try {
-        // Deterministic intents must not spend an AI call. Free-form text is
-        // delegated to the managed prompt; both paths persist one plan.
-        const response = deterministic
-          ? {
-              plan: deterministic,
-              metadata: { provider: "deterministic_rules", action_source: "deterministic_flow" },
-            }
-          : await this.ai.plan(ctx);
-        if (!deterministic) supersessionCheck = true;
+        // Free-form Hebrew is decoded by the AI. Hard limits stay in
+        // commands.apply / policies after the model returns commands.
+        const response = await this.ai.plan(ctx);
+        supersessionCheck = true;
         plan = planSchema.parse(response.plan);
-        if (!grounded(plan, text)) throw new AppError("ungrounded_tool");
+        if (response.understood && !grounded(plan, text))
+          throw new AppError("ungrounded_tool");
         await this.s.pool.query(
           `UPDATE messages SET ai_plan=$2,plan_versions=$3,ai_metadata=$4 WHERE id=$1 AND ai_plan IS NULL AND processed_at IS NULL`,
           [
@@ -390,10 +388,14 @@ export class Engine {
             JSON.stringify(response.metadata),
           ],
         );
+        if (response.understood === false) {
+          await this.finishUnclear(id);
+          return;
+        }
       } catch (e) {
         if (!lastAiAttempt && !(e instanceof AppError))
           throw new RetryableError("openai_retry");
-        await this.finish(id, null, "openai_failure");
+        await this.finishFault(id, e);
         return;
       }
     }
@@ -451,6 +453,110 @@ export class Engine {
       { reason },
       r?.id ?? null,
     );
+  }
+
+  private async unclearCount(
+    conversationId: string,
+    beforeSeq: string,
+    c: { query: Store["pool"]["query"] } = this.s.pool,
+  ): Promise<number> {
+    const rows = await c.query<{ reply: string | null }>(
+      `SELECT reply FROM messages
+        WHERE conversation_id=$1 AND seq<$2 AND processed_at IS NOT NULL
+          AND coalesce(error_code,'') NOT LIKE 'coalesced_into:%'
+        ORDER BY seq DESC LIMIT 8`,
+      [conversationId, beforeSeq],
+    );
+    let count = 0;
+    for (const row of rows.rows) {
+      if ((row.reply ?? "").trim() === CLARIFY_REPLY) count += 1;
+      else break;
+    }
+    return count;
+  }
+
+  private async finishFault(id: string, error: unknown): Promise<void> {
+    await this.s.transaction(async (c) => {
+      const ctx = await this.s.context(id, c, true);
+      if (ctx.message.processed_at) return;
+      const phone = ctx.conversation.phone;
+      await this.s.event(c, ctx.message, "system", "ai_fault", {
+        code: errorCode(error),
+      });
+      await this.s.outbound(
+        c,
+        ctx.message,
+        { phone, text: FAULT_REPLY },
+        `reply:${id}`,
+        null,
+      );
+      await c.query(
+        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
+        [id, FAULT_REPLY, "openai_failure"],
+      );
+    });
+  }
+
+  private async finishUnclear(id: string): Promise<void> {
+    const deferred: {
+      outboxId: string;
+      notice: Notice;
+      requestId: string | null;
+    }[] = [];
+    await this.s.transaction(async (c) => {
+      const ctx = await this.s.context(id, c, true);
+      if (ctx.message.processed_at) return;
+      const phone = ctx.conversation.phone;
+      const prior = await this.unclearCount(ctx.conversation.id, ctx.message.seq, c);
+      const next = prior + 1;
+      if (next >= 3) {
+        const open =
+          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+          ctx.requests.find(
+            (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
+          ) ??
+          null;
+        if (open) {
+          open.status = "human";
+          open.human_reason = "unclear_after_two_clarifications";
+          await this.s.save(c, open);
+          await this.alert(
+            c,
+            ctx,
+            "unclear_after_two_clarifications",
+            HUMAN_REPLY,
+            open,
+          );
+        }
+        await this.s.event(c, ctx.message, phone, "unclear_escalated", {
+          unclear_count: next,
+        }, open?.id ?? null);
+        await c.query(
+          "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
+          [id, null, "unclear_escalated"],
+        );
+        await c.query(
+          "UPDATE conversations SET mode='human',version=version+1 WHERE id=$1",
+          [ctx.conversation.id],
+        );
+        return;
+      }
+      await this.s.outbound(
+        c,
+        ctx.message,
+        { phone, text: CLARIFY_REPLY },
+        `reply:${id}`,
+        null,
+      );
+      await this.s.event(c, ctx.message, phone, "unclear_clarify", {
+        unclear_count: next,
+      });
+      await c.query(
+        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
+        [id, CLARIFY_REPLY],
+      );
+    });
+    void deferred;
   }
 
   private async finish(
@@ -1057,60 +1163,19 @@ export class Engine {
         reason = "no_plan";
         intent = "human_escalation";
       }
-      const metadata = await c.query<{ ai_metadata: Record<string, unknown> | null }>(
-        "SELECT ai_metadata FROM messages WHERE id=$1",
-        [id],
-      );
-      const candidateReply = metadata.rows[0]?.ai_metadata?.managed_reply;
-      const managedReply =
-        typeof candidateReply === "string" ? candidateReply.trim() : "";
-      const actionSource = metadata.rows[0]?.ai_metadata?.action_source;
-      const operationalClaim = /(?:שלחתי|נשלחה|נשלח|פניתי|פנינו|בוצע|בוצעה|תואם|תואמה|התיאום הושלם)/i.test(
-        managedReply,
-      );
-      const noticeEvidence = await c.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM outbox
-         WHERE message_id=$1 AND phone<>$2 AND state NOT IN ('cancelled','failed')`,
-        [id, phone],
-      );
-      const sideEffectProven =
-        noticeEvidence.rows[0]!.n > 0 || request?.status === "coordinated";
-      const managedReplyContradictsState =
-        request?.origin === "direct" && /תמונה/.test(managedReply);
-      // The prompt may never override an operational failure, a human handoff,
-      // or a missing reply. A deterministic flow question is also protected:
-      // the prompt is consulted and logged, but cannot replace the next safe
-      // operational step with a contradictory question.
-      const managedDecidesOutcome =
-        /(?:לא נוכל לסייע|מחוץ לאזור|האיסוף מ)/.test(managedReply);
-      if (
-        !reason &&
-        reply &&
-        managedReply &&
-        !protectedReply &&
-        !managedReplyContradictsState &&
-        !managedDecidesOutcome &&
-        actionSource !== "deterministic_flow" &&
-        (!operationalClaim || sideEffectProven)
-      )
-        reply = managedReply;
-      else if (managedReplyContradictsState || managedDecidesOutcome)
-        await this.s.event(c, ctx.message, "system", "prompt_state_contradiction_rejected", {
-          claim: managedReply.slice(0, 500),
-          origin: request?.origin,
-        }, request?.id ?? null);
-      else if (managedReply && operationalClaim && !sideEffectProven)
-        await this.s.event(c, ctx.message, "system", "prompt_claim_rejected", {
-          claim: managedReply.slice(0, 500),
-        }, request?.id ?? null);
+      // protectedReply still marks operational replies that must not be
+      // replaced by free model text; claim-guard handles phrasing instead.
+      void protectedReply;
       if (reason) await this.alert(c, ctx, reason, reply, request);
+      let customerOutboxId: string | null = null;
       if (reply)
-        await this.s.outbound(
+        customerOutboxId = await this.s.outbound(
           c,
           ctx.message,
           { phone, text: reply },
           `reply:${id}`,
           request?.id ?? null,
+          "pending",
         );
       await c.query(
         "INSERT INTO command_results(message_id,command,result) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
@@ -1147,9 +1212,57 @@ export class Engine {
         stage: "processed",
         request_number: request?.number ?? null,
         code: reason ?? "ok",
+        customerOutboxId,
+        canonicalReply: reply,
+        requestId: request?.id ?? null,
+        provenOperational:
+          request?.status === "coordinated" ||
+          deferredNotices.length > 0,
       };
     });
     if (committed) this.log.info(committed);
+    // Phrase the customer reply only after COMMIT. Claim-guard rejects any
+    // invented save/send/approval wording.
+    if (
+      committed &&
+      "customerOutboxId" in committed &&
+      committed.customerOutboxId &&
+      committed.canonicalReply
+    ) {
+      const ctx = await this.s.context(id);
+      let text = committed.canonicalReply;
+      let rejected = false;
+      try {
+        const phrased = await this.ai.phraseReply(committed.canonicalReply, ctx);
+        const guarded = applyClaimGuard(
+          committed.canonicalReply,
+          phrased.text,
+          Boolean(committed.provenOperational),
+        );
+        text = guarded.text;
+        rejected = guarded.rejected;
+      } catch (e) {
+        this.log.error({
+          code: errorCode(e),
+          outbox_id: committed.customerOutboxId,
+          stage: "customer_phrase",
+        });
+      }
+      await this.s.transaction(async (c) => {
+        await c.query(
+          "UPDATE outbox SET text=$2,format_state='ready' WHERE id=$1 AND format_state='pending'",
+          [committed.customerOutboxId, text],
+        );
+        await c.query(
+          "UPDATE messages SET reply=$2 WHERE id=$1",
+          [id, text],
+        );
+        if (rejected)
+          await this.s.event(c, ctx.message, "system", "phrase_claim_rejected", {
+            claim: text.slice(0, 500),
+          }, committed.requestId);
+      });
+    }
     // Notice wording is AI-assisted, but it is never allowed to hold the
     // business transaction open. Outbox rows wait in format_state=pending;
     // send() refuses them until this post-commit formatting step completes.
@@ -1163,6 +1276,8 @@ export class Engine {
             ? await this.s.request(item.requestId)
             : null;
           text = (await this.ai.phraseNotice(ctx, item.notice, request)).text;
+          const guarded = applyClaimGuard(item.notice.text, text, true);
+          text = guarded.text;
         } catch (e) {
           state = "failed";
           this.log.error({ code: errorCode(e), outbox_id: item.outboxId, stage: "notice_format" });

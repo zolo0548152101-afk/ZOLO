@@ -22,6 +22,13 @@ const envSchema = z.object({
     .string()
     .default("pmpt_6a9d0c66737881938a0f60f5df9088cb0806a26699929a86"),
   OPENAI_PROMPT_VERSION: z.string().default("23"),
+  // Decode and phrase prompts are pinned separately. Empty decode/phrase ids
+  // fall back to OPENAI_PROMPT_ID so an older deploy keeps working while the
+  // hosted decode prompt is published.
+  OPENAI_DECODE_PROMPT_ID: z.string().default(""),
+  OPENAI_DECODE_PROMPT_VERSION: z.string().default(""),
+  OPENAI_PHRASE_PROMPT_ID: z.string().default(""),
+  OPENAI_PHRASE_PROMPT_VERSION: z.string().default(""),
   OPENAI_REASONING_EFFORT: z.enum(["none", "low", "medium"]).default("low"),
   OPENAI_TIMEOUT_MS: z.coerce
     .number()

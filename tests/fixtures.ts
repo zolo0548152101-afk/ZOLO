@@ -13,6 +13,7 @@ import type {
 import type { Planner } from "../src/infrastructure/ai.js";
 import type { Channel, Delivery } from "../src/infrastructure/waha.js";
 import { asItem } from "../src/application/commands.js";
+import { rulePlan } from "../src/application/rule-planner.js";
 import { setTimeout as delay } from "node:timers/promises";
 export const log = { info: () => {}, warn: () => {}, error: () => {} };
 export const JPEG = Buffer.from([
@@ -39,25 +40,51 @@ export function config(extra: Partial<Config> = {}): Config {
 }
 export class FakePlanner implements Planner {
   readonly plans = new Map<string, Plan>();
+  readonly understood = new Map<string, boolean>();
   calls = 0;
   fail = false;
   planDelayMs = 0;
   phraseNoticePrefix = "";
+  phraseReplyText = "";
   managedReply = "";
   async plan(
     ctx: Context,
-  ): Promise<{ plan: Plan; metadata: Record<string, unknown> }> {
+  ): Promise<{
+    understood: boolean;
+    plan: Plan;
+    metadata: Record<string, unknown>;
+  }> {
     this.calls++;
     if (this.fail) throw new Error("simulated_openai_timeout");
     if (this.planDelayMs) await delay(this.planDelayMs);
-    const plan = this.plans.get(ctx.message.id);
-    if (!plan) throw new Error("missing_test_plan");
+    const explicit = this.plans.get(ctx.message.id);
+    const deterministic = rulePlan(ctx);
+    const plan =
+      explicit ??
+      deterministic ??
+      ({
+        commands: [{ type: "next" }],
+        evidence: (ctx.message.transcript ?? ctx.message.text).slice(0, 2000),
+      } satisfies Plan);
     return {
+      understood: this.understood.get(ctx.message.id) ?? true,
       plan,
       metadata: {
         test_double: true,
+        action_source: explicit ? "ai_decode" : deterministic ? "deterministic_rules" : "ai_decode",
         ...(this.managedReply ? { managed_reply: this.managedReply } : {}),
       },
+    };
+  }
+  async phraseReply(
+    canonical: string,
+    _ctx: Context,
+  ): Promise<{ text: string; metadata: Record<string, unknown> }> {
+    this.calls++;
+    if (this.fail) throw new Error("simulated_openai_timeout");
+    return {
+      text: this.phraseReplyText || this.managedReply || canonical,
+      metadata: { test_double: true },
     };
   }
   async phraseNotice(

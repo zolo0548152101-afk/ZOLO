@@ -826,12 +826,12 @@ test("bare איסוף/מסירה without רחוב or comma still stores both end
   if (donor?.type === "details") {
     assert.equal(donor.settlement, "בית שאן");
     assert.equal(donor.address, "רחוב העלייה 5");
-    assert.equal(donor.floor, 2);
+    assert.equal(donor.floor, null, "דירה is not a floor");
   }
   if (receiver?.type === "details") {
     assert.equal(receiver.settlement, "בית שאן");
     assert.equal(receiver.address, "רחוב העלייה 8");
-    assert.equal(receiver.floor, 1);
+    assert.equal(receiver.floor, null, "דירה is not a floor");
   }
   assert.equal(
     commands.some((command) => command.type === "contact_counterparty" && command.contact === true),
@@ -1940,4 +1940,147 @@ test("רחוב אילת is a street and bare אילת asks instead of rejecting"
 test("required response constants preserved exactly", () => {
   assert.equal(PHOTO_THANKS, "תודה, התמונה התקבלה.");
   assert.ok(OUTSIDE.endsWith("לא נוכל לסייע בהובלה הזו."));
+});
+
+test("claim-guard drops invented save/approval claims", async () => {
+  const { applyClaimGuard, CLARIFY_REPLY, FAULT_REPLY } = await import(
+    "../src/domain/ai-guards.js"
+  );
+  assert.equal(
+    applyClaimGuard("נא לאשר את המועד.", "תודה, האישור נשמר.", false).text,
+    "נא לאשר את המועד.",
+  );
+  assert.equal(
+    applyClaimGuard("נא לאשר את המועד.", "תודה, האישור נשמר.", false).rejected,
+    true,
+  );
+  assert.equal(
+    applyClaimGuard("הפרטים נשמרו. נעדכן.", "הפרטים נשמרו אצלנו.", true).rejected,
+    false,
+  );
+  assert.match(CLARIFY_REPLY, /כתוב את זה שוב/);
+  assert.match(FAULT_REPLY, /תקלה/);
+});
+
+test("translate maps explicit approve_self and refuses unclear", async () => {
+  const { translate } = await import("../src/infrastructure/ai.js");
+  const request = sampleRequest();
+  request.status = "collecting";
+  request.verification_contacted = true;
+  const receiver = request.parties.find((party) => party.role === "receiver")!;
+  receiver.approved_at = null;
+  const ctx = {
+    conversation: {
+      id: "c-translate",
+      phone: receiver.phone,
+      chat_id: "972536662043@c.us",
+      mode: "bot",
+      selected_request_id: request.id,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [request],
+    candidates: [],
+    message: {
+      id: "m-translate",
+      seq: "1",
+      external_id: "e",
+      trace_id: "t",
+      mode: "live",
+      chat_id: "972536662043@c.us",
+      phone: receiver.phone,
+      kind: "text",
+      text: "כן אני טל ומאשרת לקבל את הספה",
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+    history: [],
+  } as Context;
+  const ok = translate(
+    {
+      understood: true,
+      commands: [{ type: "approve_self", request_number: request.number }],
+      evidence: "כן אני טל ומאשרת לקבל את הספה",
+    },
+    ctx,
+    "כן אני טל ומאשרת לקבל את הספה",
+  );
+  assert.equal(ok.understood, true);
+  assert.equal(ok.plan.commands[0]?.type, "approve_self");
+  const schedule = translate(
+    {
+      understood: true,
+      commands: [
+        {
+          type: "approve_schedule",
+          request_number: request.number,
+          date: "2026-10-06",
+        },
+      ],
+      evidence: "מאשר את המועד 06/10/2026",
+    },
+    ctx,
+    "מאשר את המועד 06/10/2026",
+  );
+  assert.equal(schedule.plan.commands[0]?.type, "approve_schedule");
+  assert.equal(
+    schedule.plan.commands.some((command) => command.type === "item_facts"),
+    false,
+  );
+  const unclear = translate(
+    { understood: false, commands: [], evidence: "" },
+    ctx,
+    "asdf",
+  );
+  assert.equal(unclear.understood, false);
+});
+
+test("דירה without קומה does not set floor", () => {
+  const text = "איסוף העלייה 5 דירה 2 מסירה העלייה 8 דירה 1 מאשר ליצור קשר";
+  const direct = sampleRequest();
+  direct.origin = "direct";
+  direct.status = "collecting";
+  direct.verification_contacted = false;
+  direct.parties[0]!.phone = "584152101";
+  direct.parties[0]!.settlement = null;
+  direct.parties[0]!.address = null;
+  direct.parties[0]!.floor = null;
+  direct.parties[0]!.approved_at = "2026-10-05T15:00:00.000Z";
+  direct.parties[0]!.approved_by = "584152101";
+  direct.parties[1]!.phone = "536662043";
+  direct.parties[1]!.settlement = null;
+  direct.parties[1]!.address = null;
+  direct.parties[1]!.floor = null;
+  const commands =
+    rulePlan({
+      conversation: {
+        id: "c-apt",
+        phone: "584152101",
+        chat_id: "972584152101@c.us",
+        mode: "bot",
+        selected_request_id: direct.id,
+        version: 1,
+        pending_counterparty_name: null,
+        pending_counterparty_phone: null,
+      },
+      requests: [direct],
+      candidates: [],
+      message: { text, transcript: null, contacts: [] },
+      history: [
+        {
+          role: "assistant",
+          content: "האם תרצה שנפנה למקבל לצורך אימות הפרטים?",
+        },
+      ],
+    } as unknown as Context)?.commands ?? [];
+  for (const command of commands) {
+    if (command.type === "details") assert.equal(command.floor, null);
+  }
 });

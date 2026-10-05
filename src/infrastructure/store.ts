@@ -242,6 +242,25 @@ export class Store {
       [id],
     );
     if (!conv.rows[0]) throw new AppError("conversation_missing", 409);
+    const reset = await c.query<{ reset_at: string | null }>(
+      "SELECT reset_at::text FROM conversation_resets WHERE conversation_id=$1",
+      [conv.rows[0].id],
+    );
+    const resetAt = reset.rows[0]?.reset_at ?? null;
+    const requests = (await this.active(message.phone, c)).filter(
+      (r) => !resetAt || r.created_at > resetAt,
+    );
+    // History for the open business conversation only. A finished/coordinated
+    // handoff is out of scope. Prefer the selected open request, else the
+    // earliest still-open request for this phone.
+    const open = requests.filter(
+      (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
+    );
+    const selectedOpen =
+      open.find((r) => r.id === conv.rows[0]!.selected_request_id) ??
+      [...open].sort((a, b) => a.created_at.localeCompare(b.created_at))[0] ??
+      null;
+    const historySince = selectedOpen?.created_at ?? resetAt;
     const h = await c.query<{
       text: string;
       transcript: string | null;
@@ -252,11 +271,31 @@ export class Store {
        WHERE m.conversation_id=$1 AND m.seq<$2 AND m.processed_at IS NOT NULL
          AND coalesce(m.error_code,'') NOT LIKE 'coalesced_into:%'
          AND (cr.reset_at IS NULL OR m.received_at>cr.reset_at)
-       ORDER BY m.seq DESC LIMIT 8`,
-      [conv.rows[0].id, message.seq],
+         AND ($3::timestamptz IS NULL OR m.received_at>=$3::timestamptz)
+       ORDER BY m.seq ASC`,
+      [conv.rows[0].id, message.seq, historySince],
     );
     const history: Context["history"] = [];
-    for (const row of h.rows.reverse()) {
+    const important = /(מאשר|מאשרת|תיקון|טעיתי|בעצם|התכוונתי|אל תפנה|ליצור קשר)/u;
+    const rows = h.rows;
+    const MAX_TURNS = 40;
+    const selectedRows =
+      rows.length <= MAX_TURNS
+        ? rows
+        : [
+            ...rows.slice(0, 4),
+            ...rows.slice(4, -12).filter((row) =>
+              important.test(`${row.transcript ?? row.text}\n${row.reply ?? ""}`),
+            ),
+            ...rows.slice(-12),
+          ];
+    if (rows.length > MAX_TURNS) {
+      history.push({
+        role: "assistant",
+        content: `סיכום שיחה פתוחה: נשמרו ${rows.length} הודעות; מוצגות ההודעות הראשונות, אישורים/תיקונים, וההודעות האחרונות.`,
+      });
+    }
+    for (const row of selectedRows) {
       history.push({
         role: "user",
         content: (row.transcript ?? row.text).slice(0, 2000),
@@ -269,22 +308,15 @@ export class Store {
        LEFT JOIN conversation_resets cr ON cr.conversation_id=current.conversation_id
        WHERE o.phone=$1 AND o.state IN ('sent','shadow','simulation') AND o.created_at<=current.received_at
          AND (cr.reset_at IS NULL OR o.created_at>cr.reset_at)
+         AND ($3::timestamptz IS NULL OR o.created_at>=$3::timestamptz)
        ORDER BY o.seq DESC LIMIT 1`,
-      [message.phone, id],
+      [message.phone, id, historySince],
     );
     if (latest.rows[0] && history.at(-1)?.content !== latest.rows[0].text)
       history.push({
         role: "assistant",
         content: latest.rows[0].text.slice(0, 2000),
       });
-    const reset = await c.query<{ reset_at: string | null }>(
-      "SELECT reset_at::text FROM conversation_resets WHERE conversation_id=$1",
-      [conv.rows[0].id],
-    );
-    const resetAt = reset.rows[0]?.reset_at ?? null;
-    const requests = (await this.active(message.phone, c)).filter(
-      (r) => !resetAt || r.created_at > resetAt,
-    );
     const messageText = (message.transcript ?? message.text).trim();
     if (/(?:טעיתי|תיקון|בעצם|התכוונתי)/.test(messageText)) {
       const correction = await c.query<{ id: string }>(
