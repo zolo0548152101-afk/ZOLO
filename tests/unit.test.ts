@@ -356,8 +356,9 @@ test("destination address wording is stored on the receiver in a direct handoff"
   direct.parties[0]!.settlement = "בית שאן";
   direct.parties[0]!.address = "רחוב העלייה 5";
   direct.parties[0]!.floor = 2;
-  direct.parties[0]!.approved_at = null;
-  direct.parties[0]!.approved_by = null;
+  // Donors are auto-approved when a direct handoff opens.
+  direct.parties[0]!.approved_at = "2026-10-05T15:00:00.000Z";
+  direct.parties[0]!.approved_by = "584152101";
   direct.parties[0]!.schedule_approved = false;
   direct.parties[0]!.schedule_approved_date = null;
   direct.parties[0]!.schedule_approved_at = null;
@@ -404,7 +405,10 @@ test("destination address wording is stored on the receiver in a direct handoff"
       ai_plan: null,
     },
     history: [
-      { role: "assistant", content: "מה השם של טל ומה כתובת היעד שלה בבית שאן?" },
+      {
+        role: "assistant",
+        content: "האם תרצה שנפנה למקבל לצורך אימות הפרטים?",
+      },
     ],
   } as Context;
   const commands = rulePlan(context)?.commands ?? [];

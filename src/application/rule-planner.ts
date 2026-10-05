@@ -568,10 +568,12 @@ export function rulePlan(ctx: Context): Plan | null {
   // A recipient can introduce themself and explicitly consent in one
   // message. Consent must win over profile extraction, otherwise it is
   // misclassified as a name and the approval is lost.
-  if (!party.approved_at && explicitApproval(text)) {
-    const commands: Command[] = [
-      { type: "approve_self", request_number: current.number },
-    ];
+  // Donors are auto-approved when a direct handoff opens, so destination
+  // ("כתובת היעד…") plus contact consent must still apply after approval.
+  if (explicitApproval(text)) {
+    const commands: Command[] = [];
+    if (!party.approved_at)
+      commands.push({ type: "approve_self", request_number: current.number });
     // In a direct handoff the donor often sends the receiver's destination
     // ("כתובת היעד…") together with consent to contact them. Store that on
     // the receiver, not on the donor's pickup address.
@@ -590,7 +592,7 @@ export function rulePlan(ctx: Context): Plan | null {
         request_number: current.number,
         contact: true,
       });
-    return plan(text, commands);
+    if (commands.length) return plan(text, commands);
   }
 
   // A direct handoff commonly arrives as two WhatsApp messages: first the
@@ -619,15 +621,22 @@ export function rulePlan(ctx: Context): Plan | null {
     askedVerification &&
     current.origin === "direct" &&
     current.parties.some((item) => item.role !== party.role) &&
-    (yes(text) || no(text))
-  )
-    return plan(text, [
-      {
-        type: "contact_counterparty",
-        request_number: current.number,
-        contact: yes(text),
-      },
-    ]);
+    (yes(text) || no(text) || explicitApproval(text))
+  ) {
+    const consent = !no(text);
+    const commands: Command[] = [];
+    if (consent) {
+      const location = suppliedPartyLocation(text, directLocationRole(text));
+      if (location?.type === "details")
+        commands.push({ ...location, request_number: current.number });
+    }
+    commands.push({
+      type: "contact_counterparty",
+      request_number: current.number,
+      contact: consent,
+    });
+    return plan(text, commands);
+  }
 
   if (
     donor &&
