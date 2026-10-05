@@ -64,6 +64,21 @@ function beitShean(text: string): string | null {
   return /בית\s*[-־]?\s*שאן/.test(text) ? "בית שאן" : null;
 }
 
+/** First comma-separated place token, e.g. "טבריה" in "טבריה, רחוב …". */
+function leadingSettlement(text: string): string | null {
+  const first = norm(text)
+    .split(/[,;]/)
+    .map((part) => part.trim())
+    .find(Boolean);
+  if (!first) return null;
+  if (/^(?:רחוב|שכונת|שכונה|שיכון|שדרות|שד[׳']?)(?:\s|$)/u.test(first)) return null;
+  if (/^קומה\s*-?\d+/u.test(first)) return null;
+  const beit = beitShean(first);
+  if (beit) return beit;
+  if (!/^[א-ת][א-ת\s\-]{1,40}$/u.test(first)) return null;
+  return first;
+}
+
 function addressWithSettlement(text: string): string | null {
   const match = norm(text).match(
     /(?:[,;]\s*|בית\s*[-־]?\s*שאן\s+)((?:רחוב|שכונת|שכונה|שיכון|שדרות|שד[׳']?)\s+.+)$/,
@@ -654,18 +669,22 @@ export function rulePlan(ctx: Context): Plan | null {
   // A street prefix is an address. It must be saved before any city list sees
   // the same word, so "רחוב אילת" is never an out-of-area rejection.
   const street = streetPhrase(text);
-  if (street && !party.address)
+  if (street && !party.address) {
+    const withoutStreet = text.replace(street, " ");
+    const settlement =
+      beitShean(text) ?? beitShean(withoutStreet) ?? leadingSettlement(withoutStreet);
     return plan(text, [
       {
         type: "details",
         request_number: current.number,
         role: party.role,
         name: null,
-        settlement: beitShean(text.replace(street, " ")),
+        settlement,
         address: street,
         floor: floor(text),
       },
     ]);
+  }
   if (!party.address && ambiguousStreetCity(text))
     return plan(text, [{ type: "next" }]);
 

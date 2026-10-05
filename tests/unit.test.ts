@@ -1261,6 +1261,28 @@ test("split handoff messages keep the name until the item arrives", () => {
     assert.equal(donate.items[0]?.kind, "bed");
   }
 });
+test("city before street keeps settlement for outside-area rejection", () => {
+  const request = sampleRequest();
+  request.origin = "direct";
+  const receiver = request.parties.find((party) => party.role === "receiver")!;
+  receiver.approved_at = new Date().toISOString();
+  receiver.settlement = null;
+  receiver.address = null;
+  const context: Context = {
+    conversation: { id: "c-tiberias-street", phone: receiver.phone, chat_id: `${receiver.phone}@c.us`, mode: "bot", selected_request_id: request.id, version: 1, pending_counterparty_name: null, pending_counterparty_phone: null },
+    requests: [request],
+    candidates: [],
+    message: { id: "m", seq: "1", external_id: "e", trace_id: "t", mode: "live", chat_id: `${receiver.phone}@c.us`, phone: receiver.phone, kind: "text", text: "טבריה, רחוב הגליל 10, קומה 1", contacts: [], location: null, media_url: null, media_id: null, media_state: "none", transcript: null, processed_at: null, ai_plan: null },
+    history: [],
+  };
+  const details = rulePlan(context)?.commands.find((command) => command.type === "details");
+  assert.equal(details?.type, "details");
+  if (details?.type === "details") {
+    assert.equal(details.settlement, "טבריה");
+    assert.equal(details.address, "רחוב הגליל 10");
+    assert.equal(details.floor, 1);
+  }
+});
 test("רחוב אילת is a street and bare אילת asks instead of rejecting", async () => {
   const request = sampleRequest();
   request.origin = "direct";
