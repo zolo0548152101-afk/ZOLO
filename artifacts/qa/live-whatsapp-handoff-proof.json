@@ -1,8 +1,45 @@
 {
-  "at": "2026-10-05T18:29:10.554456+00:00",
-  "request": 7,
+  "at": "2026-10-05T20:17:50+00:00",
+  "request": 10,
   "status": "coordinated",
   "proposed": "2026-10-06",
+  "run_date": "2026-10-06",
+  "verification_contacted": true,
+  "commit": "a3a9bc8",
   "method": "WAHA sendText from default (Israel real WhatsApp) + signed webhook for Tal inbound; bot outbound real to both phones",
-  "commit": "0991627"
+  "deploy": {
+    "runtime": "systemd haim-bot.service on host :3010",
+    "path": "/etc/easypanel/projects/whatsapp/haim-bot-core/code",
+    "prior_bug": "hosted decode false-negative unclear skipped rulePlan on Tal מאשר",
+    "fix": "prefer rulePlan whenever it matches, even over AI unclear"
+  },
+  "parties": {
+    "donor": {
+      "name": "ישראל",
+      "phone": "584152101",
+      "settlement": "בית שאן",
+      "address": "רחוב העלייה 5",
+      "floor": 2,
+      "approved": true,
+      "schedule_approved": true
+    },
+    "receiver": {
+      "name": "טל",
+      "phone": "536662043",
+      "settlement": "בית שאן",
+      "address": "רחוב העלייה 8",
+      "floor": 1,
+      "approved": true,
+      "schedule_approved": true
+    }
+  },
+  "flow": [
+    "T1 Israel WAHA: lamp direct to Tal 0536662043 → ask verification",
+    "T2 Israel: איסוף/מסירה + קומה + מאשר ליצור קשר → addresses + Tal verification outbox",
+    "T3 Israel: השם שלי ישראל → donor name",
+    "T4 Tal signed webhook: מאשר, אני טל → proposed 2026-10-06",
+    "T5 Tal: מאשר את התאריך 06/10/2026",
+    "T6 Israel: מאשר את התאריך 06/10/2026 → coordinated"
+  ],
+  "outbox_ack": "customer replies accepted/sent to both phones; coordinated summary delivered"
 }
