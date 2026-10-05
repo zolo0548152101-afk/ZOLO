@@ -276,6 +276,153 @@ test("an open donation that may help someone is not a direct handoff", () => {
   assert.equal(directHandoffIntent("יש לי כיסא למסירה, אולי יעזור למישהו."), false);
   assert.equal(directHandoffIntent("יש לי כיסא למסור למישהו ספציפי."), true);
 });
+test("a lamp direct handoff opens a new request even when a bed donation is already open", () => {
+  const text =
+    "בדיקת העברה חיה: יש לי מנורה שולחנית תקינה למסירה ישירות לטל 0536662043. אני מבית שאן, האיסוף מרחוב העלייה 5 קומה 2. אין לי תמונה כרגע.";
+  const openBed = sampleRequest();
+  openBed.origin = "donation";
+  openBed.status = "collecting";
+  openBed.items[0]!.kind = "bed";
+  openBed.items[0]!.description = "מיטה";
+  openBed.items[0]!.working = null;
+  openBed.parties = openBed.parties.filter((party) => party.role === "donor");
+  openBed.parties[0]!.phone = "584152101";
+  openBed.parties[0]!.settlement = "בית שאן";
+  openBed.parties[0]!.address = "רחוב הגפן 1";
+  openBed.parties[0]!.floor = 1;
+  const context = {
+    conversation: {
+      id: "c-lamp-direct",
+      phone: "584152101",
+      chat_id: "972584152101@c.us",
+      mode: "bot",
+      selected_request_id: openBed.id,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [openBed],
+    candidates: [],
+    message: {
+      id: "m-lamp-direct",
+      seq: "1",
+      external_id: "e-lamp-direct",
+      trace_id: "t-lamp-direct",
+      mode: "live",
+      chat_id: "972584152101@c.us",
+      phone: "584152101",
+      kind: "text",
+      text,
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+    history: [],
+  } as Context;
+  const commands = rulePlan(context)?.commands ?? [];
+  const donate = commands.find((command) => command.type === "donate");
+  assert.equal(donate?.type, "donate");
+  if (donate?.type === "donate") {
+    assert.equal(donate.direct, true);
+    assert.equal(donate.items[0]?.kind, "other");
+    assert.equal(donate.items[0]?.description, "מנורה");
+    assert.equal(donate.counterparty_phone, "536662043");
+  }
+  const details = commands.find((command) => command.type === "details");
+  assert.equal(details?.type, "details");
+  if (details?.type === "details") {
+    assert.equal(details.role, "donor");
+    assert.equal(details.settlement, "בית שאן");
+    assert.equal(details.address, "רחוב העלייה 5");
+    assert.equal(details.floor, 2);
+  }
+});
+test("destination address wording is stored on the receiver in a direct handoff", () => {
+  const text = "טל כהן, כתובת היעד בית שאן רחוב שיכון א 8 קומה 1. מאשר לפנות אליה לאימות.";
+  const direct = sampleRequest();
+  direct.origin = "direct";
+  direct.status = "collecting";
+  direct.items[0]!.kind = "other";
+  direct.items[0]!.description = "מנורה";
+  direct.items[0]!.working = true;
+  direct.verification_contacted = false;
+  direct.parties[0]!.role = "donor";
+  direct.parties[0]!.phone = "584152101";
+  direct.parties[0]!.settlement = "בית שאן";
+  direct.parties[0]!.address = "רחוב העלייה 5";
+  direct.parties[0]!.floor = 2;
+  direct.parties[0]!.approved_at = null;
+  direct.parties[0]!.approved_by = null;
+  direct.parties[0]!.schedule_approved = false;
+  direct.parties[0]!.schedule_approved_date = null;
+  direct.parties[0]!.schedule_approved_at = null;
+  direct.parties[1]!.role = "receiver";
+  direct.parties[1]!.phone = "536662043";
+  direct.parties[1]!.settlement = null;
+  direct.parties[1]!.address = null;
+  direct.parties[1]!.floor = null;
+  direct.parties[1]!.approved_at = null;
+  direct.parties[1]!.approved_by = null;
+  direct.parties[1]!.schedule_approved = false;
+  direct.parties[1]!.schedule_approved_date = null;
+  direct.parties[1]!.schedule_approved_at = null;
+  const context = {
+    conversation: {
+      id: "c-dest",
+      phone: "584152101",
+      chat_id: "972584152101@c.us",
+      mode: "bot",
+      selected_request_id: direct.id,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [direct],
+    candidates: [],
+    message: {
+      id: "m-dest",
+      seq: "2",
+      external_id: "e-dest",
+      trace_id: "t-dest",
+      mode: "live",
+      chat_id: "972584152101@c.us",
+      phone: "584152101",
+      kind: "text",
+      text,
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+    history: [
+      { role: "assistant", content: "מה השם של טל ומה כתובת היעד שלה בבית שאן?" },
+    ],
+  } as Context;
+  const commands = rulePlan(context)?.commands ?? [];
+  const details = commands.find((command) => command.type === "details");
+  assert.equal(details?.type, "details");
+  if (details?.type === "details") {
+    assert.equal(details.role, "receiver");
+    assert.equal(details.settlement, "בית שאן");
+    assert.equal(details.address, "רחוב שיכון א 8");
+    assert.equal(details.floor, 1);
+  }
+  assert.equal(
+    commands.some(
+      (command) => command.type === "contact_counterparty" && command.contact === true,
+    ),
+    true,
+  );
+});
 test("direct handoff does not require disassembly and preserves explicit broken fact", () => {
   const r = sampleRequest();
   r.origin = "direct";

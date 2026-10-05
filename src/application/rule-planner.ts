@@ -33,6 +33,13 @@ function kindAndDescription(text: string): { kind: ItemKind; description: string
   const match: [RegExp, ItemKind, string][] = [
     [/מיטה/i, "bed", "מיטה"],
     [/שידה/i, "other", "שידה"],
+    [/מנורת?\s*שולחן|מנורה/i, "other", "מנורה"],
+    [/גוף\s*תאורה/i, "other", "גוף תאורה"],
+    [/כוננית|מדף/i, "other", "מדף"],
+    [/שטיח/i, "other", "שטיח"],
+    [/טלוויז|מסך/i, "other", "טלוויזיה"],
+    [/מחשב|לפטופ/i, "other", "מחשב"],
+    [/אופניים/i, "other", "אופניים"],
     [/ספה|כורס/i, "sofa", "ספה"],
     [/ארון/i, "wardrobe", "ארון"],
     [/מקרר/i, "fridge", "מקרר"],
@@ -46,7 +53,21 @@ function kindAndDescription(text: string): { kind: ItemKind; description: string
     [/כיסאות|כיסא/i, "chairs", "כיסאות"],
   ];
   const found = match.find(([pattern]) => pattern.test(text));
-  return found ? { kind: found[1], description: found[2] } : null;
+  if (found) return { kind: found[1], description: found[2] };
+  // Direct handoffs often name uncommon items ("יש לי מנורה…"). Keep them
+  // deterministic as `other` so they open a new request instead of mutating
+  // an unrelated open donation.
+  const inferred = norm(text).match(
+    /יש\s+לי\s+([א-ת][א-ת׳״'’\-]*(?:\s+[א-ת][א-ת׳״'’\-]*){0,3})(?=\s+(?:תקינ|קטנ|גדול|למסירה|למסור|ישירות|למספר)|[,.!]|$)/u,
+  );
+  if (!inferred?.[1]) return null;
+  const description = inferred[1].trim();
+  if (
+    /^(?:גם|עוד|רק|כבר|כאן|שם|תמונה|כתובת|קומה|בית|רחוב)$/u.test(description) ||
+    beitShean(description)
+  )
+    return null;
+  return { kind: "other", description };
 }
 
 const plan = (text: string, commands: Command[]): Plan => ({
@@ -275,6 +296,8 @@ function namedRecipientName(text: string): string | null {
 
 function directLocationRole(text: string): "donor" | "receiver" {
   const normalized = norm(text);
+  if (/(?:כתובת\s+היעד|(?:^|[\s,;])יעד(?:\s|$)|כתובת\s+המקבל|אצל\s+(?:המקבל|המקבלת))/u.test(normalized))
+    return "receiver";
   if (/(?:האיסוף|כתובת\s+האיסוף|הפריט\s+(?:נמצא|נמצאת)|אצלי)/u.test(normalized))
     return "donor";
   const recipientName = namedRecipientName(text);
@@ -549,9 +572,24 @@ export function rulePlan(ctx: Context): Plan | null {
     const commands: Command[] = [
       { type: "approve_self", request_number: current.number },
     ];
-    const suppliedLocation = suppliedPartyLocation(text, party.role);
+    // In a direct handoff the donor often sends the receiver's destination
+    // ("כתובת היעד…") together with consent to contact them. Store that on
+    // the receiver, not on the donor's pickup address.
+    const locationRole =
+      current.origin === "direct" ? directLocationRole(text) : party.role;
+    const suppliedLocation = suppliedPartyLocation(text, locationRole);
     if (suppliedLocation?.type === "details")
       commands.push({ ...suppliedLocation, request_number: current.number });
+    if (
+      current.origin === "direct" &&
+      /(?:נפנה|לפנות|ליצור\s+קשר|ליצור\s+אית(?:ה|ו)\s+קשר)/u.test(norm(text)) &&
+      current.parties.some((item) => item.role !== party.role)
+    )
+      commands.push({
+        type: "contact_counterparty",
+        request_number: current.number,
+        contact: true,
+      });
     return plan(text, commands);
   }
 
