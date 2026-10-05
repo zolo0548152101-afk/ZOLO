@@ -275,6 +275,115 @@ test("role approval records participation only and cannot approve a proposed dat
 test("an open donation that may help someone is not a direct handoff", () => {
   assert.equal(directHandoffIntent("יש לי כיסא למסירה, אולי יעזור למישהו."), false);
   assert.equal(directHandoffIntent("יש לי כיסא למסור למישהו ספציפי."), true);
+  assert.equal(directHandoffIntent("שלום, יש לי ספה תקינה למסירה לטל 0536662043"), true);
+  assert.equal(directHandoffIntent("יש לי מיטה למסירה"), false);
+});
+test("למסירה לטל stores the recipient name on the direct request", () => {
+  const text = "שלום, יש לי ספה תקינה למסירה לטל 0536662043";
+  const context = {
+    conversation: {
+      id: "c-sofa-named",
+      phone: "584152101",
+      chat_id: "972584152101@c.us",
+      mode: "bot",
+      selected_request_id: null,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [],
+    candidates: [],
+    message: {
+      id: "m-sofa-named",
+      seq: "1",
+      external_id: "e-sofa-named",
+      trace_id: "t-sofa-named",
+      mode: "live",
+      chat_id: "972584152101@c.us",
+      phone: "584152101",
+      kind: "text",
+      text,
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+    history: [],
+  } as Context;
+  const command = rulePlan(context)?.commands[0];
+  assert.equal(command?.type, "donate");
+  if (command?.type === "donate") {
+    assert.equal(command.direct, true);
+    assert.equal(command.counterparty_phone, "536662043");
+    assert.equal(command.counterparty_name, "טל");
+  }
+});
+test("schedule approval phrasing is never stored as a person name", () => {
+  const direct = sampleRequest();
+  direct.origin = "direct";
+  direct.status = "awaiting_approval";
+  direct.verification_contacted = true;
+  direct.proposed_run_date = "2026-10-06";
+  direct.parties[0]!.role = "receiver";
+  direct.parties[0]!.phone = "536662043";
+  direct.parties[0]!.name = null;
+  direct.parties[0]!.settlement = "בית שאן";
+  direct.parties[0]!.address = "רחוב העלייה 8";
+  direct.parties[0]!.approved_at = "2026-10-05T15:00:00.000Z";
+  direct.parties[0]!.approved_by = "536662043";
+  direct.parties[1]!.role = "donor";
+  direct.parties[1]!.phone = "584152101";
+  direct.parties[1]!.name = "ישראל";
+  direct.parties[1]!.settlement = "בית שאן";
+  direct.parties[1]!.address = "רחוב העלייה 5";
+  const context = {
+    conversation: {
+      id: "c-bad-name",
+      phone: "536662043",
+      chat_id: "972536662043@c.us",
+      mode: "bot",
+      selected_request_id: direct.id,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [direct],
+    candidates: [],
+    message: {
+      id: "m-bad-name",
+      seq: "1",
+      external_id: "e-bad-name",
+      trace_id: "t-bad-name",
+      mode: "live",
+      chat_id: "972536662043@c.us",
+      phone: "536662043",
+      kind: "text",
+      text: "מאשרת את המועד",
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+    history: [
+      {
+        role: "assistant",
+        content: "הוצע מועד ההובלה ליום שלישי 06/10/2026, בין 16:00–20:00. נא לאשר את המועד במפורש.",
+      },
+    ],
+  } as Context;
+  const commands = rulePlan(context)?.commands ?? [];
+  assert.equal(
+    commands.some((command) => command.type === "details" && command.name === "מאשרת את המועד"),
+    false,
+  );
 });
 test("a lamp direct handoff opens a new request even when a bed donation is already open", () => {
   const text =

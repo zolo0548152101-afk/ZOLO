@@ -120,12 +120,18 @@ export function directHandoffIntent(t: string): boolean {
   // Require an explicit qualifier when no real recipient name/phone exists.
   if (/(?:מקבל(?:ת)?\s+(?:מסוים|מוגדר)|ל(?:מישהו|מישהי|אדם)\s+(?:מסוים|מסוימת|ספציפי(?:ת)?|מוגדר(?:ת)?))/ .test(text))
     return /(?:להעביר|למסור|מסירה|מסירה ישירה)/.test(text);
-  // A named recipient is often written naturally as "למסור מיטה לטל".
-  // Do not classify a normal open donation or a place name as direct.
-  if (!/(?:להעביר|למסור|מעביר|מעבירה|מוסר|מוסרת|ישירות)/.test(text)) return false;
-  if (/(?:למסירה|לתרומה|לבית שאן|לעפולה|לתל אביב|לצמח|לקרקע)/.test(text))
-    return false;
-  return /(?:להעביר|למסור|מעביר|מעבירה|מוסר|מוסרת).{0,80}\sל[א-ת]{2,}(?:\s+[א-ת]{2,})?(?=$|[\s,.;!?])/.test(text);
+  // A named recipient is often written naturally as "למסור מיטה לטל" or
+  // "למסירה לטל". Bare "למסירה" / place names stay open donations.
+  if (!/(?:להעביר|למסור|מעביר|מעבירה|מוסר|מוסרת|ישירות|למסירה)/.test(text)) return false;
+  if (/(?:לבית שאן|לעפולה|לתל אביב|לצמח|לקרקע)/.test(text)) return false;
+  return (
+    /(?:להעביר|למסור|מעביר|מעבירה|מוסר|מוסרת|למסירה|ישירות).{0,80}\sל(?!מישהו|מישהי|אדם(?:\s|$))([א-ת]{2,})(?:\s+[א-ת]{2,})?(?=$|[\s,.;!?]|0)/u.test(
+      text,
+    ) ||
+    /(?:להעביר|למסור|מעביר|מעבירה|מוסר|מוסרת|למסירה|ישירות).{0,80}\sל(?:מישהו|מישהי)\s+[א-ת]{2,}(?=$|[\s,.;!?])/u.test(
+      text,
+    )
+  );
 }
 export function grounded(plan: Plan, text: string): boolean {
   return (

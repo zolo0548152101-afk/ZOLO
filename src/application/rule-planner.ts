@@ -120,15 +120,34 @@ function explicitName(text: string): string | null {
   const match = normalized.match(
     /(?:^|[,;.!?]\s*)(?:השם(?:\s+(?:הוא|שלי))?|שמי|קוראים\s+לי)\s+([א-ת][א-ת׳״'’\-]*(?:\s+[א-ת][א-ת׳״'’\-]*){0,2})(?=\s*(?:[,;.!?]|$))/u,
   );
-  if (match?.[1]) return match[1].trim();
+  if (match?.[1]) {
+    const name = match[1].trim();
+    return looksLikePersonName(name) ? name : null;
+  }
   const introduction = normalized.match(
-    /(?:^|[.!?]\s*)אני\s+([א-ת][א-ת׳״'’\-]*(?:\s+[א-ת][א-ת׳״'’\-]*)?)(?=\s*(?:[,;.!?]|$))/u,
+    /(?:^|[.!?]\s*)אני\s+([א-ת][א-ת׳״'’\-]*(?:\s+[א-ת][א-ת׳״'’\-]*)?)(?=\s*(?:[,;.!?]|$)|(?:\s+(?:ו)?מאשר))/u,
   );
   if (!introduction?.[1]) return null;
   const name = introduction[1].trim();
-  return /^(?:רוצה|צריך|צריכה|מוסר|מוסרת|מעביר|מעבירה|מחפש|מחפשת|מבקש|מבקשת)(?:\s|$)/.test(name)
-    ? null
-    : name;
+  if (
+    /^(?:רוצה|צריך|צריכה|מוסר|מוסרת|מעביר|מעבירה|מחפש|מחפשת|מבקש|מבקשת|מאשר|מאשרת)(?:\s|$)/.test(
+      name,
+    )
+  )
+    return null;
+  return looksLikePersonName(name) ? name : null;
+}
+
+function looksLikePersonName(name: string): boolean {
+  const value = norm(name);
+  if (!value) return false;
+  if (
+    /(?:מאשר|מאשרת|מועד|המועד|הפרטים|כתובת|איסוף|מסירה|ליצור|קשר|שלישי|רביעי)/u.test(
+      value,
+    )
+  )
+    return false;
+  return /^[א-ת][א-ת׳״'’\-]*(?:\s+[א-ת][א-ת׳״'’\-]*){0,2}$/u.test(value);
 }
 
 function addressAndName(text: string): { address: string; name: string | null } | null {
@@ -462,7 +481,7 @@ export function rulePlan(ctx: Context): Plan | null {
         type: "donate",
         items: [{ ...item, quantity: 1 }],
         counterparty_phone: other,
-        counterparty_name: directHandoffIntent(text) ? namedRecipientName(text) : null,
+        counterparty_name: namedRecipientName(text),
         direct: Boolean(other) || directHandoffIntent(text),
         free: true,
         working:
@@ -639,6 +658,17 @@ export function rulePlan(ctx: Context): Plan | null {
     const commands: Command[] = [];
     if (!party.approved_at)
       commands.push({ type: "approve_self", request_number: current.number });
+    const selfName = explicitName(text);
+    if (selfName && (!party.name || !looksLikePersonName(party.name) || party.name !== selfName))
+      commands.push({
+        type: "details",
+        request_number: current.number,
+        role: party.role,
+        name: selfName,
+        settlement: null,
+        address: null,
+        floor: null,
+      });
     // Donors often send both pickup and destination in one consent message:
     // "איסוף …, מסירה …, מאשר ליצור קשר".
     const bothLocations =
@@ -870,15 +900,33 @@ export function rulePlan(ctx: Context): Plan | null {
       },
     ]);
 
-  if (party.settlement && !party.name) {
+  if (party.settlement && (!party.name || !looksLikePersonName(party.name))) {
     const withoutSettlement = norm(text).replace(/בית\s*[-־]?\s*שאן/g, "").trim();
-    if (withoutSettlement && !/\d|רחוב|שד[׳']|שדרות/.test(withoutSettlement))
+    const name = explicitName(withoutSettlement);
+    if (name)
       return plan(text, [
         {
           type: "details",
           request_number: current.number,
           role: party.role,
-          name: explicitName(withoutSettlement) ?? withoutSettlement,
+          name,
+          settlement: null,
+          address: null,
+          floor: null,
+        },
+      ]);
+    if (
+      !party.name &&
+      withoutSettlement &&
+      !/\d|רחוב|שד[׳']|שדרות/.test(withoutSettlement) &&
+      looksLikePersonName(withoutSettlement)
+    )
+      return plan(text, [
+        {
+          type: "details",
+          request_number: current.number,
+          role: party.role,
+          name: withoutSettlement,
           settlement: null,
           address: null,
           floor: null,
