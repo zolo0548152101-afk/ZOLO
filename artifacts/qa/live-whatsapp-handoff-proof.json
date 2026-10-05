@@ -1,0 +1,8 @@
+{
+  "at": "2026-10-05T18:29:10.554456+00:00",
+  "request": 7,
+  "status": "coordinated",
+  "proposed": "2026-10-06",
+  "method": "WAHA sendText from default (Israel real WhatsApp) + signed webhook for Tal inbound; bot outbound real to both phones",
+  "commit": "0991627"
+}
