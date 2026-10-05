@@ -1,0 +1,81 @@
+name: deploy-bluehost
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Docker image tag on the VPS (e.g. slim-handoff-f0b6243)
+        required: true
+        type: string
+      branch:
+        description: Git branch to build from
+        required: false
+        default: cursor/cloud-agent-1791198556831-78zb7
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Load SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.BLUEHOST_SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.BLUEHOST_SSH_HOST }}
+          SSH_USER: ${{ secrets.BLUEHOST_SSH_USER }}
+        run: |
+          if [ -z "$SSH_PRIVATE_KEY" ]; then
+            echo "Missing repository secret BLUEHOST_SSH_PRIVATE_KEY"
+            exit 1
+          fi
+          HOST="${SSH_HOST:-129.121.137.125}"
+          USER="${SSH_USER:-root}"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/bluehost
+          chmod 600 ~/.ssh/bluehost
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          echo "SSH_TARGET=${USER}@${HOST}" >> "$GITHUB_ENV"
+
+      - name: Sync source and build image on VPS
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          tar czf /tmp/haim-src.tgz --exclude=node_modules --exclude=dist --exclude=dist-tests --exclude=.git .
+          scp -i ~/.ssh/bluehost -o BatchMode=yes /tmp/haim-src.tgz "${SSH_TARGET}:/tmp/haim-src.tgz"
+          ssh -i ~/.ssh/bluehost -o BatchMode=yes "${SSH_TARGET}" bash -s <<EOF
+          set -euo pipefail
+          rm -rf /root/haim-slim-build && mkdir -p /root/haim-slim-build
+          tar xzf /tmp/haim-src.tgz -C /root/haim-slim-build
+          cd /root/haim-slim-build
+          docker build -t "haim-bot-core:${IMAGE_TAG}" .
+          EOF
+
+      - name: Update Swarm service with rollback
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          ssh -i ~/.ssh/bluehost -o BatchMode=yes "${SSH_TARGET}" bash -s <<EOF
+          set -euo pipefail
+          docker service update \
+            --image "haim-bot-core:${IMAGE_TAG}" \
+            --update-order start-first \
+            --update-failure-action rollback \
+            whatsapp_haim-bot-core
+          docker service ps whatsapp_haim-bot-core --no-trunc | head -5
+          EOF
+
+      - name: Verify public health
+        run: |
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS https://whatsapp-haim-bot-core.cdpvmq.easypanel.host/health | grep -q '"ok":true'; then
+              curl -fsS https://whatsapp-haim-bot-core.cdpvmq.easypanel.host/ready
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Health check did not pass in time"
+          exit 1
