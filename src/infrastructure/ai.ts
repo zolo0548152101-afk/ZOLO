@@ -14,6 +14,9 @@ import {
   donationIntent,
   directHandoffIntent,
   explicitApproval,
+  ambiguousStreetCity,
+  cityOutsideStreet,
+  streetPhrase,
   grounded,
   nextQuestion,
 } from "../domain/policies.js";
@@ -264,12 +267,18 @@ function translate(
     const description = descriptionFrom(updates, text);
     commands.push({ type: "seek", kind: itemKind(description) });
   } else if (managed.intent === "transport" || current) {
-    const donorSettlement = textValue(updates, "עיר איסוף");
-    const donorAddress = textValue(updates, "כתובת איסוף");
+    const street = streetPhrase(text);
+    const groundedCity = (value: string | null): string | null => {
+      if (!value || ambiguousStreetCity(text) || !cityOutsideStreet(text, value))
+        return null;
+      return value;
+    };
+    const donorSettlement = groundedCity(textValue(updates, "עיר איסוף"));
+    const donorAddress = textValue(updates, "כתובת איסוף") ?? (street && /איסוף|מוסר|אצלי/.test(text) ? street : null);
     const donorName = textValue(updates, "שם המוסר");
     const donorFloor = floorFrom(textValue(updates, "קומה איסוף"));
-    const receiverSettlement = textValue(updates, "עיר יעד");
-    const receiverAddress = textValue(updates, "כתובת יעד");
+    const receiverSettlement = groundedCity(textValue(updates, "עיר יעד"));
+    const receiverAddress = textValue(updates, "כתובת יעד") ?? (street && /יעד|מקבל/.test(text) ? street : null);
     const receiverName = textValue(updates, "שם המקבל");
     const receiverFloor = floorFrom(textValue(updates, "קומה יעד"));
 

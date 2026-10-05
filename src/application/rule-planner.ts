@@ -5,6 +5,8 @@ import {
   donationIntent,
   directHandoffIntent,
   explicitApproval,
+  ambiguousStreetCity,
+  streetPhrase,
   norm,
   ownParty,
 } from "../domain/policies.js";
@@ -359,7 +361,7 @@ export function rulePlan(ctx: Context): Plan | null {
         type: "donate",
         items: [{ ...item, quantity: 1 }],
         counterparty_phone: other,
-        counterparty_name: other && directHandoffIntent(text) ? namedRecipientName(text) : null,
+        counterparty_name: directHandoffIntent(text) ? namedRecipientName(text) : null,
         direct: Boolean(other) || directHandoffIntent(text),
         free: true,
         working:
@@ -504,7 +506,10 @@ export function rulePlan(ctx: Context): Plan | null {
           type: "counterparty",
           request_number: current.number,
           phone: supplied,
-          name: ctx.message.contacts[0]?.name ?? null,
+          name:
+            ctx.message.contacts[0]?.name ??
+            ctx.conversation.pending_counterparty_name ??
+            null,
         },
       ]);
   }
@@ -599,6 +604,24 @@ export function rulePlan(ctx: Context): Plan | null {
         evacuation: null,
       },
     ]);
+
+  // A street prefix is an address. It must be saved before any city list sees
+  // the same word, so "רחוב אילת" is never an out-of-area rejection.
+  const street = streetPhrase(text);
+  if (street && !party.address)
+    return plan(text, [
+      {
+        type: "details",
+        request_number: current.number,
+        role: party.role,
+        name: null,
+        settlement: beitShean(text.replace(street, " ")),
+        address: street,
+        floor: floor(text),
+      },
+    ]);
+  if (!party.address && ambiguousStreetCity(text))
+    return plan(text, [{ type: "next" }]);
 
   if (!party.settlement) {
     const settlement = beitShean(text);

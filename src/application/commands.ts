@@ -15,6 +15,7 @@ import {
   OUTSIDE,
   canonicalPhone,
   donationIntent,
+  ambiguousStreetCity,
   explicitApproval,
   itemError,
   ownParty,
@@ -222,6 +223,13 @@ export class Commands {
         "UPDATE conversations SET selected_request_id=$2 WHERE id=$1",
         [ctx.conversation.id, r.id],
       );
+      if (!other && cmd.type === "donate" && cmd.counterparty_name) {
+        await c.query(
+          "UPDATE conversations SET pending_counterparty_name=$2,version=version+1 WHERE id=$1",
+          [ctx.conversation.id, cmd.counterparty_name],
+        );
+        ctx.conversation.pending_counterparty_name = cmd.counterparty_name;
+      }
       for (const p of parties)
         if (p.phone !== phone && !direct)
           notices.push({
@@ -442,6 +450,12 @@ export class Commands {
     }
     if (cmd.type === "next") {
       const previous = ctx.history.at(-1)?.content ?? "";
+      const speaker = ownParty(r, phone);
+      if (ambiguousStreetCity(text) && !speaker.address)
+        return output(
+          "האם הכוונה לרחוב אילת, או ליישוב אילת שמחוץ לאזור הפעילות?",
+          r,
+        );
       if (
         ownParty(r, phone).role === "donor" &&
         !r.parties.some((p) => p.role === "receiver") &&
@@ -531,7 +545,12 @@ export class Commands {
           throw error;
         p = receiver;
       }
-      if (cmd.settlement) {
+      const settlementIsTheStreet =
+        Boolean(cmd.settlement) &&
+        Boolean(cmd.address) &&
+        /^(?:רחוב|שיכון|שכונה|שכונת|שדרות|שד)/.test(cmd.address ?? "") &&
+        (cmd.address ?? "").includes(cmd.settlement ?? "");
+      if (cmd.settlement && !settlementIsTheStreet) {
         const reg = await this.s.region(c, cmd.settlement);
         if (reg.decision === "outside") {
           r.status = "rejected";
@@ -709,7 +728,19 @@ export class Commands {
         }
     }
     if (r.parties.length === 1 && r.photo_ids.length) r.status = "available";
-    const q = nextQuestion(r, phone);
+    let q = nextQuestion(r, phone);
+    const previous = ctx.history.at(-1)?.content ?? "";
+    if (
+      (cmd.type === "details" || cmd.type === "item_facts") &&
+      previous &&
+      q.text.slice(0, 24) &&
+      previous.includes(q.text.slice(0, 24))
+    ) {
+      const asked = r.verification_contacted;
+      r.verification_contacted = true;
+      q = nextQuestion(r, phone);
+      r.verification_contacted = asked;
+    }
     if (q.floorNote) ownParty(r, phone).floor_note_shown = true;
     return output(q.text, r);
   }

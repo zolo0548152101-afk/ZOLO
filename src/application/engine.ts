@@ -31,6 +31,7 @@ import {
   PHOTO_FIRST,
   HUMAN_REPLY,
   OUTSIDE,
+  cityOutsideStreet,
   grounded,
   mutable,
   nextQuestion,
@@ -484,7 +485,7 @@ export class Engine {
           "נתניה",
           "ראשון לציון",
         ];
-        const outsideName = outsideNames.find((name) => text.includes(name));
+        const outsideName = outsideNames.find((name) => cityOutsideStreet(text, name));
         if (outsideName && (await this.s.region(c, outsideName)).decision === "outside") {
           await this.s.event(c, ctx.message, phone, "outside_area_rejected", {
             settlement: outsideName,
@@ -756,6 +757,11 @@ export class Engine {
             if (
               cmd.type === "details" &&
               cmd.settlement &&
+              !(
+                cmd.address &&
+                /^(?:רחוב|שיכון|שכונה|שכונת|שדרות|שד)/.test(cmd.address) &&
+                cmd.address.includes(cmd.settlement)
+              ) &&
               (await this.s.region(c, cmd.settlement)).decision === "outside"
             )
               outside.push(cmd);
@@ -1075,17 +1081,20 @@ export class Engine {
       // or a missing reply. A deterministic flow question is also protected:
       // the prompt is consulted and logged, but cannot replace the next safe
       // operational step with a contradictory question.
+      const managedDecidesOutcome =
+        /(?:לא נוכל לסייע|מחוץ לאזור|האיסוף מ)/.test(managedReply);
       if (
         !reason &&
         reply &&
         managedReply &&
         !protectedReply &&
         !managedReplyContradictsState &&
+        !managedDecidesOutcome &&
         actionSource !== "deterministic_flow" &&
         (!operationalClaim || sideEffectProven)
       )
         reply = managedReply;
-      else if (managedReplyContradictsState)
+      else if (managedReplyContradictsState || managedDecidesOutcome)
         await this.s.event(c, ctx.message, "system", "prompt_state_contradiction_rejected", {
           claim: managedReply.slice(0, 500),
           origin: request?.origin,

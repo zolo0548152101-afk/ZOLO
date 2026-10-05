@@ -85,6 +85,26 @@ export function donationIntent(t: string): boolean {
     t,
   );
 }
+export function streetPhrase(text: string): string | null {
+  const match = norm(text).match(
+    /(?:רחוב|שיכון|שכונה|שכונת|שדרות|שד[׳']?)\s+[א-ת0-9׳״'"’.-]+(?:\s+[א-ת0-9׳״'"’.-]+){0,4}/u,
+  );
+  return (
+    match?.[0]
+      ?.replace(/\s+(?:קומה|ק[׳'])\s*-?\d+(?:\s+עם\s+מעלית)?\s*$/u, "")
+      .trim() ?? null
+  );
+}
+/** אילת is both a street in the service area and a city outside it. */
+export function ambiguousStreetCity(text: string): boolean {
+  if (streetPhrase(text)) return false;
+  return /(?:^|[\s,])(?:מ|ב|ל)?אילת(?:$|[\s,.;!?])/u.test(norm(text));
+}
+export function cityOutsideStreet(text: string, name: string): boolean {
+  const street = streetPhrase(text);
+  const rest = street ? norm(text).replace(street, " ") : norm(text);
+  return rest.includes(name);
+}
 export function directHandoffIntent(t: string): boolean {
   const text = norm(t);
   // A common direct-handoff sentence names the recipient and explains their

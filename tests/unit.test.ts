@@ -1203,6 +1203,73 @@ test("media SSRF, redirects and oversized downloads are blocked", async () => {
     ),
   );
 });
+test("a following phone answers the named handoff", () => {
+  const opening = rulePlan({
+    conversation: { id: "c", phone: "584152101", chat_id: "972584152101@c.us", mode: "bot", selected_request_id: null, version: 1, pending_counterparty_name: null, pending_counterparty_phone: null },
+    requests: [],
+    candidates: [],
+    message: { text: "אני רוצה להעביר לטל שולחן", transcript: null, contacts: [] },
+    history: [],
+  } as unknown as Context);
+  const donate = opening?.commands[0];
+  assert.equal(donate?.type, "donate");
+  if (donate?.type === "donate") {
+    assert.equal(donate.direct, true);
+    assert.equal(donate.counterparty_phone, null);
+    assert.equal(donate.counterparty_name, "טל");
+  }
+  const request = sampleRequest();
+  request.origin = "direct";
+  request.verification_contacted = false;
+  request.parties = request.parties.filter((party) => party.role === "donor");
+  request.parties[0]!.phone = "584152101";
+  const followUp = rulePlan({
+    conversation: { id: "c", phone: "584152101", chat_id: "972584152101@c.us", mode: "bot", selected_request_id: request.id, version: 2, pending_counterparty_name: "טל", pending_counterparty_phone: null },
+    requests: [request],
+    candidates: [],
+    message: { text: "0536662043", transcript: null, contacts: [] },
+    history: [{ role: "assistant", content: "האם תרצה שנפנה למקבל לצורך אימות הפרטים? אם כן, נא לשלוח מספר טלפון או כרטיס איש קשר." }],
+  } as unknown as Context);
+  assert.deepEqual(followUp?.commands, [
+    { type: "counterparty", request_number: request.number, phone: "536662043", name: "טל" },
+  ]);
+});
+test("רחוב אילת is a street and bare אילת asks instead of rejecting", async () => {
+  const request = sampleRequest();
+  request.origin = "direct";
+  request.verification_contacted = false;
+  const donor = request.parties.find((party) => party.role === "donor")!;
+  donor.settlement = null;
+  donor.address = null;
+  donor.floor = null;
+  const context = (text: string): Context => ({
+    conversation: { id: "c", phone: donor.phone, chat_id: `${donor.phone}@c.us`, mode: "bot", selected_request_id: request.id, version: 1, pending_counterparty_name: null, pending_counterparty_phone: null },
+    requests: [request],
+    candidates: [],
+    message: { id: "m", seq: "1", external_id: "e", trace_id: "t", mode: "live", chat_id: `${donor.phone}@c.us`, phone: donor.phone, kind: "text", text, contacts: [], location: null, media_url: null, media_id: null, media_state: "none", transcript: null, processed_at: null, ai_plan: null },
+    history: [{ role: "assistant", content: "האם תרצה שנפנה למקבל לצורך אימות הפרטים?" }],
+  });
+  const street = rulePlan(context("רחוב אילת"))?.commands[0];
+  assert.equal(street?.type, "details");
+  if (street?.type === "details") {
+    assert.equal(street.address, "רחוב אילת");
+    assert.equal(street.settlement, null);
+  }
+  const ambiguous = rulePlan(context("זה מאילת"));
+  assert.deepEqual(ambiguous?.commands, [{ type: "next" }]);
+  const store = {
+    request: async () => request,
+    region: async () => { throw new Error("region must not run"); },
+  } as unknown as Store;
+  const outcome = await new Commands(store, () => new Date("2026-10-05T12:00:00.000Z")).apply(
+    null as never,
+    context("זה מאילת"),
+    { type: "next" },
+  );
+  assert.equal(request.status, "collecting");
+  assert.match(outcome.reply ?? "", /רחוב אילת/);
+  assert.doesNotMatch(outcome.reply ?? "", /לא נוכל לסייע/);
+});
 test("required response constants preserved exactly", () => {
   assert.equal(PHOTO_THANKS, "תודה, התמונה התקבלה.");
   assert.ok(OUTSIDE.endsWith("לא נוכל לסייע בהובלה הזו."));
