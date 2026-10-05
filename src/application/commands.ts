@@ -189,7 +189,14 @@ export class Commands {
           !["closed", "cancelled", "rejected", "cancel_pending"].includes(existing.status) &&
           existing.parties.some((p) => p.role === "donor" && p.phone === phone) &&
           existing.items.length === items.length &&
-          existing.items.every((item, index) => item.kind === items[index]?.kind),
+          existing.items.every((item, index) => {
+            const next = items[index];
+            if (!next || item.kind !== next.kind) return false;
+            if (item.kind !== "other") return true;
+            const a = item.description.replace(/\s+/g, "");
+            const b = next.description.replace(/\s+/g, "");
+            return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+          }),
       );
       if (!sameOpenRequest) {
         const duplicate = await c.query<{ id: string }>(
@@ -199,9 +206,16 @@ export class Commands {
            JOIN request_items i ON i.request_id=r.id
            WHERE co.phone=$1 AND p.role='donor'
              AND r.status NOT IN ('coordinated','closed','cancelled','rejected','cancel_pending')
-             AND i.kind=ANY($2::text[])
+             AND (
+               (i.kind = ANY($2::text[]) AND i.kind <> 'other')
+               OR (i.kind = 'other' AND i.description = ANY($3::text[]))
+             )
            ORDER BY r.number LIMIT 1`,
-          [phone, items.map((item) => item.kind)],
+          [
+            phone,
+            items.map((item) => item.kind),
+            items.filter((item) => item.kind === "other").map((item) => item.description),
+          ],
         );
         if (duplicate.rows[0]) sameOpenRequest = await this.s.request(duplicate.rows[0].id, c);
       }
