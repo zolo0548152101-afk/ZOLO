@@ -22,9 +22,9 @@ const envSchema = z.object({
     .string()
     .default("pmpt_6a9d0c66737881938a0f60f5df9088cb0806a26699929a86"),
   OPENAI_PROMPT_VERSION: z.string().default("23"),
-  // Decode and phrase prompts are pinned separately. Empty decode/phrase ids
-  // fall back to OPENAI_PROMPT_ID so an older deploy keeps working while the
-  // hosted decode prompt is published.
+  // Optional hosted prompt overrides. When empty, decode/phrase use the git
+  // files prompts/decode.txt and prompts/phrase.txt via Responses instructions
+  // (preferred — reusable OpenAI prompt objects are being deprecated).
   OPENAI_DECODE_PROMPT_ID: z.string().default(""),
   OPENAI_DECODE_PROMPT_VERSION: z.string().default(""),
   OPENAI_PHRASE_PROMPT_ID: z.string().default(""),

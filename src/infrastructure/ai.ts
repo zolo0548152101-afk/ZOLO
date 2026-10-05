@@ -253,6 +253,62 @@ function snapshotForDecode(ctx: Context) {
   };
 }
 
+type PromptSource =
+  | { mode: "hosted"; id: string; version: string }
+  | { mode: "git"; instructions: string };
+
+function decodePromptSource(c: Config): PromptSource {
+  if (c.OPENAI_DECODE_PROMPT_ID)
+    return {
+      mode: "hosted",
+      id: c.OPENAI_DECODE_PROMPT_ID,
+      version: c.OPENAI_DECODE_PROMPT_VERSION || "1",
+    };
+  // Do not fall back to the legacy phrasing hosted prompt — it fights decode.
+  // OpenAI is also deprecating reusable prompt objects; git instructions are
+  // the supported production path.
+  return { mode: "git", instructions: DECODE_PROMPT_TEXT };
+}
+
+function phrasePromptSource(c: Config, canonical: string): PromptSource {
+  if (c.OPENAI_PHRASE_PROMPT_ID)
+    return {
+      mode: "hosted",
+      id: c.OPENAI_PHRASE_PROMPT_ID,
+      version: c.OPENAI_PHRASE_PROMPT_VERSION || "1",
+    };
+  return {
+    mode: "git",
+    instructions: PHRASE_PROMPT_TEXT.replace("{{canonical}}", canonical),
+  };
+}
+
+function extractPhraseText(raw: string, fallback: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return fallback;
+  try {
+    const parsed = managedResponseSchema.safeParse(JSON.parse(trimmed));
+    if (parsed.success && parsed.data.reply.trim())
+      return parsed.data.reply.trim();
+    const loose = JSON.parse(trimmed) as { reply?: string; text?: string };
+    const fromLoose = (loose.reply ?? loose.text ?? "").trim();
+    if (fromLoose) return fromLoose;
+  } catch {
+    /* plain text from git phrase instructions */
+  }
+  return trimmed;
+}
+
+function actionableAiPlan(translated: {
+  understood: boolean;
+  plan: Plan;
+}): boolean {
+  return (
+    translated.understood &&
+    translated.plan.commands.some((command) => command.type !== "next")
+  );
+}
+
 export class OpenAIPlanner implements Planner {
   private readonly client: OpenAI;
   constructor(private readonly c: Config) {
@@ -272,29 +328,35 @@ export class OpenAIPlanner implements Planner {
     const text = ctx.message.transcript ?? ctx.message.text;
     const started = Date.now();
     const snapshot = snapshotForDecode(ctx);
-    const promptId = this.c.OPENAI_DECODE_PROMPT_ID || this.c.OPENAI_PROMPT_ID;
-    const promptVersion =
-      this.c.OPENAI_DECODE_PROMPT_VERSION || this.c.OPENAI_PROMPT_VERSION;
+    const source = decodePromptSource(this.c);
+    const userPayload = {
+      customer_message: {
+        current_message: text,
+        recent_history: ctx.history,
+        contacts: ctx.message.contacts,
+        has_location: ctx.message.location !== null,
+      },
+      sender_phone: ctx.conversation.phone,
+      existing_record: snapshot,
+    };
     const response = await this.client.responses.create({
       model: this.c.OPENAI_MODEL,
-      prompt: {
-        id: promptId,
-        version: promptVersion,
-      },
+      ...(source.mode === "hosted"
+        ? { prompt: { id: source.id, version: source.version } }
+        : {
+            instructions: source.instructions,
+            text: { format: { type: "json_object" as const } },
+          }),
       input: [
         {
           role: "user",
-          content: JSON.stringify({
-            decode_instructions: DECODE_PROMPT_TEXT,
-            customer_message: {
-              current_message: text,
-              recent_history: ctx.history,
-              contacts: ctx.message.contacts,
-              has_location: ctx.message.location !== null,
-            },
-            sender_phone: ctx.conversation.phone,
-            existing_record: snapshot,
-          }),
+          content:
+            source.mode === "git"
+              ? `Return JSON only for this decode request:\n${JSON.stringify(userPayload)}`
+              : JSON.stringify({
+                  decode_instructions: DECODE_PROMPT_TEXT,
+                  ...userPayload,
+                }),
         },
       ],
       reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },
@@ -306,30 +368,36 @@ export class OpenAIPlanner implements Planner {
       throw new AppError("invalid_managed_prompt_response");
     }
     const translated = translate(payload, ctx, text);
-    // The hosted OpenAI prompt is still the old phrasing shape, so it often
-    // invents approve_self from any «מאשר» and skips addresses/consent — and
-    // also false-negatives short approvals as unclear. Until a dedicated
-    // decode prompt is published, prefer rulePlan whenever it matches, even
-    // over AI unclear. AI still owns unclear only when rules miss, plus
-    // post-commit phrasing.
+    // AI decode is primary when it returns real commands. rulePlan remains a
+    // safety net for unclear/empty AI output and for hard Hebrew corpus cases.
     const deterministic = rulePlan(ctx);
-    const plan = deterministic ?? translated.plan;
-    const understood = deterministic ? true : translated.understood;
+    const useAi = actionableAiPlan(translated);
+    const plan = useAi
+      ? translated.plan
+      : (deterministic ?? translated.plan);
+    const understood = useAi
+      ? true
+      : deterministic
+        ? true
+        : translated.understood;
     return {
       understood,
       plan,
       metadata: {
         provider: "openai_responses_decode",
-        prompt_id: promptId,
-        prompt_version: promptVersion,
+        prompt_mode: source.mode,
+        prompt_id: source.mode === "hosted" ? source.id : "git:prompts/decode.txt",
+        prompt_version: source.mode === "hosted" ? source.version : "git",
         model: this.c.OPENAI_MODEL,
-        action_source: deterministic
-          ? "ai_decode_bridged_rules"
-          : translated.understood === false
-            ? "ai_decode_unclear"
-            : "ai_decode",
+        action_source: useAi
+          ? "ai_decode"
+          : deterministic
+            ? "ai_decode_bridged_rules"
+            : translated.understood === false
+              ? "ai_decode_unclear"
+              : "ai_decode",
         understood,
-        bridged_rules: Boolean(deterministic),
+        bridged_rules: !useAi && Boolean(deterministic),
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,
@@ -343,54 +411,44 @@ export class OpenAIPlanner implements Planner {
   ): Promise<{ text: string; metadata: Record<string, unknown> }> {
     if (!this.c.AI_ENABLED) throw new AppError("ai_disabled");
     const started = Date.now();
-    const promptId = this.c.OPENAI_PHRASE_PROMPT_ID || this.c.OPENAI_PROMPT_ID;
-    const promptVersion =
-      this.c.OPENAI_PHRASE_PROMPT_VERSION || this.c.OPENAI_PROMPT_VERSION;
+    const source = phrasePromptSource(this.c, canonical);
     const response = await this.client.responses.create({
       model: this.c.OPENAI_MODEL,
-      prompt: {
-        id: promptId,
-        version: promptVersion,
-      },
+      ...(source.mode === "hosted"
+        ? { prompt: { id: source.id, version: source.version } }
+        : { instructions: source.instructions }),
       input: [
         {
           role: "user",
-          content: JSON.stringify({
-            phrase_instructions: PHRASE_PROMPT_TEXT.replace(
-              "{{canonical}}",
-              canonical,
-            ),
-            customer_message: {
-              current_message: `נסח מחדש בלבד: ${canonical}`,
-              recent_history: ctx.history,
-              has_location: false,
-            },
-            sender_phone: ctx.conversation.phone,
-            existing_record: { canonical },
-          }),
+          content:
+            source.mode === "git"
+              ? "נסח מחדש בלבד את המשפט המחייב. החזר טקסט בלבד, בלי JSON."
+              : JSON.stringify({
+                  phrase_instructions: PHRASE_PROMPT_TEXT.replace(
+                    "{{canonical}}",
+                    canonical,
+                  ),
+                  customer_message: {
+                    current_message: `נסח מחדש בלבד: ${canonical}`,
+                    recent_history: ctx.history,
+                    has_location: false,
+                  },
+                  sender_phone: ctx.conversation.phone,
+                  existing_record: { canonical },
+                }),
         },
       ],
       reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },
     });
-    let text = "";
-    try {
-      const parsed = managedResponseSchema.parse(JSON.parse(response.output_text));
-      text = parsed.reply.trim();
-    } catch {
-      try {
-        const raw = JSON.parse(response.output_text) as { reply?: string; text?: string };
-        text = (raw.reply ?? raw.text ?? "").trim();
-      } catch {
-        text = response.output_text.trim();
-      }
-    }
-    if (!text) text = canonical;
+    const text = extractPhraseText(response.output_text, canonical);
     return {
       text,
       metadata: {
         provider: "openai_responses_phrase",
-        prompt_id: promptId,
-        prompt_version: promptVersion,
+        prompt_mode: source.mode,
+        prompt_id:
+          source.mode === "hosted" ? source.id : "git:prompts/phrase.txt",
+        prompt_version: source.mode === "hosted" ? source.version : "git",
         model: this.c.OPENAI_MODEL,
         response_id: response.id,
         elapsed_ms: Date.now() - started,
@@ -406,57 +464,51 @@ export class OpenAIPlanner implements Planner {
   ): Promise<{ text: string; metadata: Record<string, unknown> }> {
     if (!this.c.AI_ENABLED) throw new AppError("ai_disabled");
     const started = Date.now();
-    const promptId = this.c.OPENAI_PHRASE_PROMPT_ID || this.c.OPENAI_PROMPT_ID;
-    const promptVersion =
-      this.c.OPENAI_PHRASE_PROMPT_VERSION || this.c.OPENAI_PROMPT_VERSION;
+    const source = phrasePromptSource(this.c, notice.text);
     const response = await this.client.responses.create({
       model: this.c.OPENAI_MODEL,
-      prompt: {
-        id: promptId,
-        version: promptVersion,
-      },
+      ...(source.mode === "hosted"
+        ? { prompt: { id: source.id, version: source.version } }
+        : { instructions: source.instructions }),
       input: [
         {
           role: "user",
-          content: JSON.stringify({
-            phrase_instructions: PHRASE_PROMPT_TEXT.replace(
-              "{{canonical}}",
-              notice.text,
-            ),
-            customer_message: {
-              current_message: `נסח הודעת WhatsApp קצרה ואנושית לצד השני. טיוטת המערכת: ${notice.text}`,
-              recent_history: ctx.history,
-              notice_recipient_phone: notice.phone,
-              notice_kind: "system_notice",
-              has_location: false,
-            },
-            sender_phone: ctx.conversation.phone,
-            existing_record: {
-              conversation: ctx.conversation,
-              request,
-              notice,
-            },
-          }),
+          content:
+            source.mode === "git"
+              ? `נסח הודעת WhatsApp קצרה ואנושית לצד השני מהמשפט המחייב. החזר טקסט בלבד, בלי JSON.\nנמען: ${notice.phone}`
+              : JSON.stringify({
+                  phrase_instructions: PHRASE_PROMPT_TEXT.replace(
+                    "{{canonical}}",
+                    notice.text,
+                  ),
+                  customer_message: {
+                    current_message: `נסח הודעת WhatsApp קצרה ואנושית לצד השני. טיוטת המערכת: ${notice.text}`,
+                    recent_history: ctx.history,
+                    notice_recipient_phone: notice.phone,
+                    notice_kind: "system_notice",
+                    has_location: false,
+                  },
+                  sender_phone: ctx.conversation.phone,
+                  existing_record: {
+                    conversation: ctx.conversation,
+                    request,
+                    notice,
+                  },
+                }),
         },
       ],
       reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },
     });
-    let managed: z.infer<typeof managedResponseSchema>;
-    try {
-      managed = managedResponseSchema.parse(JSON.parse(response.output_text));
-    } catch {
-      throw new AppError("invalid_managed_prompt_response");
-    }
-    const text = managed.reply.trim() || notice.text;
+    const text = extractPhraseText(response.output_text, notice.text);
     return {
       text,
       metadata: {
         provider: "openai_responses_phrase",
-        prompt_id: promptId,
-        prompt_version: promptVersion,
+        prompt_mode: source.mode,
+        prompt_id:
+          source.mode === "hosted" ? source.id : "git:prompts/phrase.txt",
+        prompt_version: source.mode === "hosted" ? source.version : "git",
         model: this.c.OPENAI_MODEL,
-        managed_intent: managed.intent,
-        managed_actions: managed.actions,
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,
