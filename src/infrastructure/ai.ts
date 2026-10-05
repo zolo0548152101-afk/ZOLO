@@ -306,18 +306,15 @@ export class OpenAIPlanner implements Planner {
       throw new AppError("invalid_managed_prompt_response");
     }
     const translated = translate(payload, ctx, text);
-    // Until a dedicated decode prompt is hosted, the legacy phrasing prompt
-    // often returns prose-shaped JSON with no commands. Prefer an explicit
-    // rulePlan only as a bridge when the model understood but emitted only next.
+    // The hosted OpenAI prompt is still the old phrasing shape, so it often
+    // invents approve_self from any «מאשר» and skips addresses/consent. Until a
+    // dedicated decode prompt is published, prefer rulePlan whenever it matches;
+    // AI still owns unclear (understood=false) and post-commit phrasing.
     const deterministic = rulePlan(ctx);
-    const onlyNext =
-      translated.understood &&
-      translated.plan.commands.length === 1 &&
-      translated.plan.commands[0]?.type === "next";
     const plan =
-      onlyNext && deterministic && deterministic.commands.some((c) => c.type !== "next")
-        ? deterministic
-        : translated.plan;
+      translated.understood === false
+        ? translated.plan
+        : deterministic ?? translated.plan;
     return {
       understood: translated.understood,
       plan,
@@ -327,9 +324,13 @@ export class OpenAIPlanner implements Planner {
         prompt_version: promptVersion,
         model: this.c.OPENAI_MODEL,
         action_source:
-          plan === deterministic ? "ai_decode_bridged_rules" : "ai_decode",
+          translated.understood === false
+            ? "ai_decode_unclear"
+            : deterministic
+              ? "ai_decode_bridged_rules"
+              : "ai_decode",
         understood: translated.understood,
-        bridged_rules: plan === deterministic,
+        bridged_rules: Boolean(deterministic) && translated.understood !== false,
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,
