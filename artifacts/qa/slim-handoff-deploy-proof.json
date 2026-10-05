@@ -1,11 +1,14 @@
 {
-  "deployed_at": "2026-10-05T13:51:10Z",
-  "method": "easypanel_api",
+  "deployed_at": "2026-10-05T14:05:00Z",
+  "method": "easypanel_api_login_and_deployService",
+  "auth": "EASYPANEL_EMAIL/EASYPANEL_PASSWORD secrets injected into Cloud Agent",
   "project": "whatsapp",
   "service": "haim-bot-core",
   "source_ref": "cursor/cloud-agent-1791198556831-78zb7",
-  "commit_sha": "736de83b93165e267c394cdaf5d29faae175d030",
-  "previous_image_note": "was clear-override-7335b3c before this deploy",
+  "commit_sha": "d7d7b9ddfc74daeae53ccc6d2790e21e89bf5e36",
+  "includes_fix": "736de83b93165e267c394cdaf5d29faae175d030",
+  "previous_image_note": "was clear-override-7335b3c before slim-handoff deploys",
+  "ssh_from_agent": false,
   "health": {
     "ok": true,
     "version": "0.5.0",
@@ -19,6 +22,7 @@
     "simulation_ready": true
   },
   "simulation_direct_handoff": {
+    "simulation_id": "3c7eea30-5f6d-429f-a263-32ccafa1df6f",
     "request_number": 23,
     "origin": "direct",
     "donor_phone": "584152101",
@@ -26,13 +30,12 @@
     "settlement": "בית שאן",
     "address": "רחוב העלייה 3",
     "floor": 1,
-    "reply_intent": "ask_verification"
+    "outbox_reply": "הפרטים נשמרו. נעדכן."
   },
-  "live_whatsapp": {
+  "live_whatsapp_earlier": {
     "donor_session": "default / 972584152101",
     "bot_session": "HAIM_YAHAD / 972543414386",
-    "inbound_snippet": "בדיקת פריסה חיה: יש לי מנורה שולחנית...",
     "bot_reply_observed": "האם הפריט תקין ושמיש ב־100%?",
-    "latency_seconds_approx": 2
+    "recorded_at": "2026-10-05T13:51:10Z"
   }
 }
