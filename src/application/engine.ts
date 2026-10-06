@@ -29,6 +29,8 @@ import {
   statusText,
   PHOTO_THANKS,
   PHOTO_FIRST,
+  SAME_DAY_WINDOW,
+  sameDayDemand,
   HUMAN_REPLY,
   OUTSIDE,
   isOperationsAlert,
@@ -1367,6 +1369,8 @@ export class Engine {
               reply = PHOTO_FIRST;
               intent = "ask_photo";
             }
+            if (reply === PHOTO_FIRST && sameDayDemand(text))
+              reply = `${SAME_DAY_WINDOW}\n${PHOTO_FIRST}`;
             if (
               request &&
               !reason &&

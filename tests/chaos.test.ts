@@ -877,6 +877,27 @@ test("live AI-off rules: pressure, customer language, cancel at any step", async
       problems.push(`russian facts ${JSON.stringify(russianRow ?? null)}`);
 
     await purge(phone);
+    const pickupFirst = await turn("תבואו היום לקחת ספה מבית שאן");
+    if (!pickupFirst.includes("תמונה") || !pickupFirst.includes("שלישי") || !pickupFirst.includes("16:00"))
+      problems.push(`pickup today first: ${pickupFirst}`);
+    if (/רשמתי את היישוב|מה תרצה למסור/.test(pickupFirst))
+      problems.push(`pickup today dropped the sofa: ${pickupFirst}`);
+    const pickupRow = await latest();
+    if (pickupRow?.kind !== "sofa" || pickupRow.settlement !== "בית שאן" || pickupRow.status !== "collecting")
+      problems.push(`pickup today facts ${JSON.stringify(pickupRow ?? null)}`);
+
+    await purge(phone);
+    await turn("די עם השטויות תקבע לי כבר הובלה דחוף!!!!");
+    const pickupSecond = await turn("תבואו היום לקחת ספה מבית שאן");
+    if (!pickupSecond.includes("תמונה") || !/16:00/.test(pickupSecond) || !/20:00/.test(pickupSecond))
+      problems.push(`pickup today after pressure: ${pickupSecond}`);
+    if (/רשמתי את היישוב|מה תרצה למסור/.test(pickupSecond))
+      problems.push(`pickup after pressure dropped the sofa: ${pickupSecond}`);
+    const pickupAfter = await latest();
+    if (pickupAfter?.kind !== "sofa" || pickupAfter.settlement !== "בית שאן" || pickupAfter.status !== "collecting")
+      problems.push(`pickup after pressure facts ${JSON.stringify(pickupAfter ?? null)}`);
+
+    await purge(phone);
     const oven = await turn("שלום אני רוצה למסור תנור בבית שאן");
     if (oven !== PHOTO_FIRST) problems.push(`beit shean oven: ${oven}`);
     await purge(phone);

@@ -2063,6 +2063,13 @@ test("rules understand microwave, English donate, last floor, and cancel", () =>
   assert.equal(english?.commands[0]?.type, "donate");
   if (english?.commands[0]?.type === "donate")
     assert.equal(english.commands[0].items[0]?.kind, "fridge");
+  const pickup = planFor("תבואו היום לקחת ספה מבית שאן");
+  assert.equal(pickup?.commands[0]?.type, "donate");
+  if (pickup?.commands[0]?.type === "donate")
+    assert.equal(pickup.commands[0].items[0]?.kind, "sofa");
+  const pickupTown = pickup?.commands.find((command) => command.type === "details");
+  assert.equal(pickupTown?.type, "details");
+  if (pickupTown?.type === "details") assert.equal(pickupTown.settlement, "בית שאן");
   const englishTown = english?.commands.find((command) => command.type === "details");
   assert.equal(englishTown?.type, "details");
   if (englishTown?.type === "details") assert.equal(englishTown.settlement, "בית שאן");
@@ -2428,6 +2435,7 @@ test("non-Hebrew donate and seek intents open on the rules path", () => {
   assert.equal(seekIntent("I'm looking for a bed"), true);
   assert.equal(seekIntent("Hi I want to donate a fridge in Beit Shean"), false);
   assert.equal(donationIntent("אני רוצה למסור כיסא במסילות"), true);
+  assert.equal(donationIntent("תבואו היום לקחת ספה מבית שאן"), true);
 });
 
 test("pressure is a clear limit, and fixed lines localize", () => {

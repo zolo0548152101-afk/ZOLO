@@ -11,6 +11,12 @@ export const OUTSIDE =
   `אנחנו פועלים רק ב${SERVICE_TOWNS}. לא נוכל לסייע בהובלה הזו.`;
 export const PHOTO_THANKS = "תודה, התמונה התקבלה.";
 export const PHOTO_FIRST = "בשמחה. כדי להמשיך, נא לשלוח תמונה של הפריט.";
+/** Same-day pickup is not a promise. Deliveries stay on the Tuesday window. */
+export const SAME_DAY_WINDOW =
+  "אי אפשר לאסוף היום. ההובלות רק ביום שלישי בין 16:00 ל־20:00.";
+export function sameDayDemand(text: string): boolean {
+  return /(?:^|[^א-ת])היום(?=$|[^א-ת])/u.test(norm(text));
+}
 export const CONDITION_QUESTION = "האם הפריט תקין ושמיש ב־100%?";
 export const DEFAULT_TRANSPORT_CAPACITY = 10;
 export const MAX_TRANSPORT_CAPACITY = 100;
@@ -93,6 +99,7 @@ export function donationIntent(t: string): boolean {
     /(?:למסירה|לתרומה|למסור|לתרום|מוסר|מוסרת|להעביר|מעביר|מעבירה|יש לי להעביר)/.test(
       t,
     ) ||
+    /(?:תבואו|תבוא|בואו|תגיעו|תגיע)(?:\s+\S+){0,3}\s+לקחת/u.test(t) ||
     /\b(?:donate|donation|donating|give away|giving away)\b/i.test(t) ||
     /\bi have\b.{0,48}\bto give\b/i.test(t) ||
     (/\b(?:give|giving)\b/i.test(t) &&
