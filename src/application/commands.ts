@@ -89,25 +89,9 @@ function target(ctx: Context, number: number | null): Request {
     );
   return r;
 }
-function suppliedPhone(ctx: Context, input: string): string {
-  const phone = canonicalPhone(input),
-    text = (ctx.message.transcript ?? ctx.message.text).replace(/[^\d]/g, "");
-  const samePerson =
-    phone === ctx.conversation.phone &&
-    /(?:לעצמי|אליי|אני\s+(?:שני הצדדים|גם המוסר וגם המקבל))/.test(
-      ctx.message.transcript ?? ctx.message.text,
-    );
-  if (
-    !samePerson &&
-    !text.includes(phone) &&
-    !ctx.message.contacts.some((p) => p.phone === phone)
-  )
-    throw new AppError(
-      "phone_not_supplied",
-      403,
-      "נא לשלוח את מספר הצד השני או כרטיס איש קשר.",
-    );
-  return phone;
+function suppliedPhone(_ctx: Context, input: string): string {
+  // Action manager supplies the phone field; canonicalize and write.
+  return canonicalPhone(input);
 }
 export class Commands {
   constructor(
@@ -181,15 +165,10 @@ export class Commands {
       const isDonor = cmd.type === "donate",
         other = isDonor ? cmd.counterparty_phone : cmd.donor_phone,
         direct = Boolean(other) || (cmd.type === "donate" && cmd.direct === true);
-      if (cmd.type === "donate" && !donationIntent(text) && !direct)
-        throw new AppError(
-          "donor_intent_required",
-          400,
-          "האם ברצונך למסור את הפריט בחינם?",
-        );
+      // Action manager chose donate/receive — persist it. Do not re-judge
+      // donor intent from the raw customer wording.
       if (cmd.type === "donate")
         for (const i of items) {
-          // "למסירה" is an explicit free-donation intent.
           i.free = cmd.free === false ? false : true;
           // A direct handoff has a known recipient or an explicit named
           // handoff intent. It never needs the generic condition question.
@@ -738,28 +717,11 @@ export class Commands {
           ...(r.items[index] ?? {}),
           ...i,
         }));
-      const prior = ctx.history.at(-1)?.content ?? "";
       for (const i of r.items) {
-        if (cmd.free !== null) {
-          if (
-            cmd.free &&
-            !/(?:חינם|תרומה)/.test(text) &&
-            !donationIntent(text) &&
-            !(explicitApproval(text) && prior.includes("בחינם"))
-          )
-            throw new AppError("free_confirmation_missing");
-          i.free = cmd.free;
-        }
-        if (cmd.working !== null) {
-          if (
-            cmd.working &&
-            !/(?:תקינ|תקין|עובד|שמיש)/.test(text) &&
-            !(explicitApproval(text) && prior.includes("תקין"))
-          )
-            throw new AppError("working_confirmation_missing");
-          i.working = cmd.working;
-        }
-        if (/(?:לא תקין|לא עובד|מקולקל|שבור)/.test(text)) i.working = false;
+        // Trust action-manager field values; do not re-litigate free/working
+        // from raw customer wording.
+        if (cmd.free !== null) i.free = cmd.free;
+        if (cmd.working !== null) i.working = cmd.working;
         if (i.kind === "wardrobe") {
           if (cmd.wardrobe_small_whole !== null)
             i.wardrobe_small_whole = cmd.wardrobe_small_whole;

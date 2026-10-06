@@ -320,24 +320,16 @@ export function actionableAiPlan(
   return commands.some((command) => OPENING_COMMANDS.has(command.type));
 }
 
-/** Prefer rulePlan when it opens a flow and AI only returned follow-up facts. */
+/**
+ * When the action manager understood the turn, its plan is authoritative.
+ * rulePlan is only a fallback for unclear/empty AI output or AI disabled.
+ */
 export function selectDecodePlan(
   translated: { understood: boolean; plan: Plan },
   deterministic: Plan | null,
-  ctx: Context,
+  _ctx: Context,
 ): { plan: Plan; useAi: boolean; understood: boolean } {
-  const useAi = actionableAiPlan(translated, ctx);
-  if (useAi) {
-    // A richer deterministic opening (self-transfer with both endpoints, or
-    // donate+location) must not lose facts to a bare AI donate/seek.
-    if (
-      deterministic &&
-      !hasOpenRequest(ctx) &&
-      deterministic.commands.some((command) => OPENING_COMMANDS.has(command.type)) &&
-      deterministic.commands.some((command) => command.type === "details") &&
-      !translated.plan.commands.some((command) => command.type === "details")
-    )
-      return { plan: deterministic, useAi: false, understood: true };
+  if (translated.understood) {
     return { plan: translated.plan, useAi: true, understood: true };
   }
   if (deterministic)
@@ -345,7 +337,7 @@ export function selectDecodePlan(
   return {
     plan: translated.plan,
     useAi: false,
-    understood: translated.understood,
+    understood: false,
   };
 }
 
@@ -436,9 +428,8 @@ export class OpenAIPlanner implements Planner {
       throw new AppError("invalid_managed_prompt_response");
     }
     const translated = translate(payload, ctx, text);
-    // AI decode is primary when it returns runnable commands. rulePlan remains
-    // the safety net for unclear/empty AI output and for opening turns where
-    // the model returned only details without donate/seek.
+    // Action manager owns the plan. rulePlan only fills in when the model
+    // marks the turn unclear / not understood.
     const deterministic = rulePlan(ctx);
     const selected = selectDecodePlan(translated, deterministic, ctx);
     const { plan, useAi, understood } = selected;

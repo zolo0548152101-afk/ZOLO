@@ -35,7 +35,6 @@ import {
   OUTSIDE,
   isOperationsAlert,
   customerCancelIntent,
-  grounded,
   mutable,
   nextQuestion,
   nextTuesday,
@@ -433,13 +432,11 @@ export class Engine {
     }
     if (!plan) {
       try {
-        // Free-form Hebrew is decoded by the AI. Hard limits stay in
-        // commands.apply / policies after the model returns commands.
+        // Free-form Hebrew is decoded by the AI. The action manager owns every
+        // field value from the prompt; commands.apply is the DB write tool.
         const response = await this.ai.plan(ctx);
         const parsed = planSchema.parse(response.plan);
         plan = parsed;
-        if (response.understood && !grounded(plan, text))
-          throw new AppError("ungrounded_tool");
         await this.s.pool.query(
           `UPDATE messages SET ai_plan=$2,plan_versions=$3,ai_metadata=$4 WHERE id=$1 AND ai_plan IS NULL AND processed_at IS NULL`,
           [
@@ -451,9 +448,9 @@ export class Engine {
         );
         if (!response.understood) throw new AppError("action_manager_unclear");
       } catch (e) {
-        // Transient API failures retry once. After the last attempt, never
-        // execute a forged AI plan. Deterministic rulePlan may still complete
-        // a clear opening; escalate only when rules cannot help either.
+        // Transient API failures retry once. After the last attempt, rulePlan
+        // is only a fallback when the action manager itself failed — never to
+        // override a successful AI plan.
         if (!lastAiAttempt && !(e instanceof AppError))
           throw new RetryableError("openai_retry");
         const deterministic = rulePlan(ctx);
