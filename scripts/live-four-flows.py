@@ -578,6 +578,23 @@ check(
     reply4b is not None and not contains_any(reply4b.get("text") or "", PHOTO_WORDS),
     (reply4b or {}).get("text"),
 )
+check(
+    "request: seek follow-up does not escalate to human/fault",
+    (snap4b.get("conversation") or {}).get("mode") == "bot"
+    and not contains_any(reply4b.get("text") or "", ("תקלה זמנית", "טיפול אנושי"))
+    and not (snap4b.get("ai") or {}).get("error"),
+    {"mode": (snap4b.get("conversation") or {}).get("mode"), "reply": (reply4b or {}).get("text")},
+)
+# Also inspect last processed error for this marker
+err4 = db(
+    "SELECT coalesce(error_code,'') FROM messages "
+    "WHERE text LIKE '%עדיף רחוב העלייה%' ORDER BY seq DESC LIMIT 1"
+)
+check(
+    "request: seek follow-up has no openai_failure_escalated",
+    "openai_failure" not in (err4 or ""),
+    err4,
+)
 report["flows"]["open_request"] = flow
 
 # ---------- Recording review ----------

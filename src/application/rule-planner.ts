@@ -730,6 +730,8 @@ export function rulePlan(ctx: Context): Plan | null {
   if (!current) {
     if (
       mentionedAllowedSettlement(text) ||
+      streetPhrase(text) ||
+      floor(text) !== null ||
       (/(?:ליד|קרוב|באזור|סמוך)/u.test(normalizedText) &&
         /בית\s*שאן|beit\s+she'?an/i.test(text))
     )

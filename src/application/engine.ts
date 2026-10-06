@@ -435,6 +435,21 @@ export class Engine {
           await this.finishUnclear(id);
           return;
         } else {
+          // Without an open request, prefer clarify over human escalation so a
+          // flaky model cannot strand a fresh seeker/donor opening.
+          const hasOpen = ctx.requests.some(
+            (request) =>
+              ![
+                "coordinated",
+                "closed",
+                "cancelled",
+                "rejected",
+              ].includes(request.status),
+          );
+          if (!hasOpen) {
+            await this.finishUnclear(id);
+            return;
+          }
           await this.finishFault(id, e);
           return;
         }
