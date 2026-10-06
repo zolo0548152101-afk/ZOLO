@@ -3,6 +3,7 @@ import {
   appliance,
   canonicalPhone,
   donationIntent,
+  seekIntent,
   customerCancelIntent,
   mentionedAllowedSettlement,
   directHandoffIntent,
@@ -536,9 +537,11 @@ export function rulePlan(ctx: Context): Plan | null {
   const selfMove = /(?:להעביר|מעביר|מעבירה)\s+(?:לעצמי|אליי)|אני\s+(?:גם\s+)?(?:המוסר\s+וגם\s+המקבל|שני\s+הצדדים)/.test(
     normalizedText,
   );
-  const requesterIntent = /^(?:(?:היי|שלום)\s*[,! ]*)?(?:אני\s+)?(?:מחפש|מחפשת|מבקש|מבקשת|צריך|צריכה)(?=$|[\s,])/.test(
-    normalizedText,
-  );
+  const requesterIntent =
+    /^(?:(?:היי|שלום)\s*[,! ]*)?(?:אני\s+)?(?:מחפש|מחפשת|מבקש|מבקשת|צריך|צריכה)(?=$|[\s,])/.test(
+      normalizedText,
+    ) ||
+    (seekIntent(text) && !donationIntent(text));
   const explicitDonationDeclaration = /(?:יש\s+לי(?=$|[\s,])|אני\s+(?:רוצה\s+)?(?:למסור|לתרום|מוסר|מוסרת|מעביר|מעבירה)|צריך(?:ה)?\s+(?:למסור|לתרום|להעביר))/.test(
     normalizedText,
   );

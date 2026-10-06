@@ -93,9 +93,22 @@ export function donationIntent(t: string): boolean {
     /(?:למסירה|לתרומה|למסור|לתרום|מוסר|מוסרת|להעביר|מעביר|מעבירה|יש לי להעביר)/.test(
       t,
     ) ||
-    /\b(?:donate|donation|give away)\b/i.test(t) ||
-    /تبرع|أتبرع|للتبرع/u.test(t) ||
-    /отдать|отдаю|пожертв/iu.test(t)
+    /\b(?:donate|donation|donating|give away|giving away)\b/i.test(t) ||
+    /\bi have\b.{0,48}\bto give\b/i.test(t) ||
+    (/\b(?:give|giving)\b/i.test(t) &&
+      !/\bgive\s+(?:me|you|us|him|her|them)\b/i.test(t)) ||
+    /تبرع|أتبرع|للتبرع|أعطي|اعطي|أهدي|اهدي/u.test(t) ||
+    /отдать|отдаю|отдам|пожертв/iu.test(t)
+  );
+}
+/** Looking for an item. Donation verbs stay on donationIntent. */
+export function seekIntent(t: string): boolean {
+  return (
+    /\b(?:i'm looking for|im looking for|i am looking for|looking for|i need|can i get)\b/i.test(
+      t,
+    ) ||
+    /أبحث|أحتاج|احتاج|أبغى|ابغى/u.test(t) ||
+    /ищу|мне нужн|можно получить|хочу получить/iu.test(t)
   );
 }
 export function customerCancelIntent(text: string): boolean {

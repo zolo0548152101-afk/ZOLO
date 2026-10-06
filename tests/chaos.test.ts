@@ -877,6 +877,14 @@ test("live AI-off rules: pressure, customer language, cancel at any step", async
       problems.push(`russian facts ${JSON.stringify(russianRow ?? null)}`);
 
     await purge(phone);
+    const oven = await turn("שלום אני רוצה למסור תנור בבית שאן");
+    if (oven !== PHOTO_FIRST) problems.push(`beit shean oven: ${oven}`);
+    await purge(phone);
+    const gibberish = await turn("asdfqwerty blorp");
+    if (gibberish.includes("לא הבנתי") || !/didn't understand/i.test(gibberish))
+      problems.push(`english unclear: ${gibberish}`);
+
+    await purge(phone);
     const chair = await turn("שלום אני רוצה למסור כיסא במסילות");
     if (chair !== PHOTO_FIRST) problems.push(`mesilot chair: ${chair}`);
     const cancelled = await turn("תבטלו");

@@ -21,6 +21,8 @@ import {
   namedOutsideSettlement,
   customerCancelIntent,
   mentionedAllowedSettlement,
+  donationIntent,
+  seekIntent,
   PHOTO_FIRST,
 } from "../src/domain/policies.js";
 import { rulePlan } from "../src/application/rule-planner.js";
@@ -2420,6 +2422,14 @@ test("seeker opening uses seek and not donate", () => {
   assert.equal(plan?.commands[0]?.type, "seek");
 });
 
+test("non-Hebrew donate and seek intents open on the rules path", () => {
+  assert.equal(donationIntent("Hi I want to donate a fridge in Beit Shean"), true);
+  assert.equal(donationIntent("I have a fridge to give in Beit Shean"), true);
+  assert.equal(seekIntent("I'm looking for a bed"), true);
+  assert.equal(seekIntent("Hi I want to donate a fridge in Beit Shean"), false);
+  assert.equal(donationIntent("אני רוצה למסור כיסא במסילות"), true);
+});
+
 test("pressure is a clear limit, and fixed lines localize", () => {
   const angry = pressureCanonical("דיי עם השטויות תקבע לי כבר הובלה דחוף!!!!");
   assert.ok(angry?.includes(EMPATHY));
@@ -2437,4 +2447,9 @@ test("pressure is a clear limit, and fixed lines localize", () => {
   assert.match(localizeCustomer(IMPOSSIBLE, "en"), /Tuesday/);
   assert.match(localizeCustomer(IMPOSSIBLE, "en"), /16:00/);
   assert.match(localizeCustomer(IMPOSSIBLE, "en"), /20:00/);
+  assert.match(localizeCustomer("לא הבנתי את הכוונה. אפשר לכתוב את זה שוב?", "en"), /didn't understand/i);
+  assert.equal(
+    localizeCustomer("לא הבנתי את הכוונה. אפשר לכתוב את זה שוב?", "he"),
+    "לא הבנתי את הכוונה. אפשר לכתוב את זה שוב?",
+  );
 });

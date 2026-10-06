@@ -4,6 +4,7 @@
 { "understood": true, "commands": [], "evidence": "ציטוט מההודעה הנוכחית" }
 
 understood=false רק כשאי אפשר להבין את הכוונה. אז commands ריק.
+אנגלית, ערבית ורוסית מובנות כמו עברית. donate / give / give away / I have … to give / تبرع / أعطي / отдать = donate. looking for / I need / can I get / أبحث / أحتاج / ищу / мне нужен = seek. אל תחזיר understood=false רק כי ההודעה אינה בעברית.
 אל תנחש. שדה שלא נאמר = null.
 אם יש רמז חלקי (למשל «אני רוצה למסור» בלי למי) עדיף understood=true עם הפקודות החלקיות שיש, והקוד ישאל את מה שחסר.
 

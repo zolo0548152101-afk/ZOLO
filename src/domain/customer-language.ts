@@ -17,7 +17,7 @@ export const IMPOSSIBLE =
 
 const LINES: Record<string, Record<Exclude<CustomerLang, "he">, string>> = {
   [PHOTO_FIRST]: {
-    en: "Gladly. To continue, please send a photo of the item.",
+    en: "Happy to help. To continue, please send a photo of the item.",
     ar: "بكل سرور. للمتابعة، أرسل صورة الغرض.",
     ru: "Хорошо. Чтобы продолжить, пришлите фото предмета.",
   },
@@ -93,6 +93,14 @@ export function conversationLanguage(ctx: Pick<Context, "message" | "history">):
 
 function itemLabel(name: string, lang: Exclude<CustomerLang, "he">): string {
   return ITEM_NAMES[name.trim()]?.[lang] ?? name;
+}
+
+export function isCustomerClarify(reply: string): boolean {
+  const trimmed = reply.trim();
+  if (trimmed === CLARIFY_REPLY) return true;
+  const translated = LINES[CLARIFY_REPLY];
+  if (!translated) return false;
+  return trimmed === translated.en || trimmed === translated.ar || trimmed === translated.ru;
 }
 
 export function localizeCustomer(text: string, lang: CustomerLang): string {

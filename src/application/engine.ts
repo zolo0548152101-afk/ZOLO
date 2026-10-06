@@ -48,6 +48,7 @@ import {
 } from "../domain/ai-guards.js";
 import {
   conversationLanguage,
+  isCustomerClarify,
   localizeCustomer,
   pressureCanonical,
 } from "../domain/customer-language.js";
@@ -419,6 +420,14 @@ export class Engine {
       return;
     }
     if (!plan) {
+      // A non-Hebrew donate/seek that the rules already understand must not
+      // wait for the model. A "not understood" decode used to fall through
+      // to the Hebrew clarify line.
+      const foreignOpening = this.foreignOpening(ctx);
+      if (foreignOpening) {
+        await this.finish(id, foreignOpening);
+        return;
+      }
       try {
         // Free-form Hebrew is decoded by the AI. Hard limits stay in
         // commands.apply / policies after the model returns commands.
@@ -557,7 +566,7 @@ export class Engine {
       conversationId,
       beforeSeq,
       (reply) =>
-        reply === CLARIFY_REPLY ||
+        isCustomerClarify(reply) ||
         /^(?:למי תרצה למסור|איזה פריט|מה תרצה לעשות|מה תרצה לקבל|מאיפה או ממי)/u.test(
           reply,
         ),
@@ -707,7 +716,10 @@ export class Engine {
         );
         return;
       }
-      const reply = this.voiced(ctx, probeReply(ctx.message.text));
+      const reply = this.voiced(
+        ctx,
+        probeReply(ctx.message.transcript ?? ctx.message.text),
+      );
       await this.s.outbound(
         c,
         ctx.message,
@@ -837,6 +849,20 @@ export class Engine {
         [id, outsideReply, "outside_area_rejected"],
       );
     });
+  }
+
+  /** Rules already opened a donate/seek in the customer's language. */
+  private foreignOpening(ctx: Context): Plan | null {
+    if (conversationLanguage(ctx) === "he") return null;
+    if (ctx.message.kind !== "text" && ctx.message.kind !== "voice") return null;
+    const planned = rulePlan(ctx);
+    if (
+      !planned?.commands.some(
+        (command) => command.type === "donate" || command.type === "seek",
+      )
+    )
+      return null;
+    return planned;
   }
 
   /** Polite limit or empathy, then the same next step. Not an unclear turn. */
@@ -1558,7 +1584,12 @@ export class Engine {
           stage: "customer_phrase",
         });
       }
-      text = localizeCustomer(text, conversationLanguage(ctx));
+      const lang = conversationLanguage(ctx);
+      const fromTemplate = localizeCustomer(committed.canonicalReply, lang);
+      // A fixed template in the customer's language wins over a Hebrew paraphrase.
+      text = fromTemplate !== committed.canonicalReply
+        ? fromTemplate
+        : localizeCustomer(text, lang);
       await this.s.transaction(async (c) => {
         await c.query(
           "UPDATE outbox SET text=$2,format_state='ready' WHERE id=$1 AND format_state='pending'",
