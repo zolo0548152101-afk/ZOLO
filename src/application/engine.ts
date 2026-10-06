@@ -1421,11 +1421,13 @@ export class Engine {
       const ctx = await this.s.context(id);
       let text = committed.canonicalReply;
       let rejected = false;
+      let replyMeta: Record<string, unknown> | null = null;
       try {
         const generated = await this.ai.reply(ctx, {
           fallback: committed.canonicalReply,
           operation: committed.operation,
         });
+        replyMeta = generated.metadata;
         const guarded = applyClaimGuard(
           committed.canonicalReply,
           generated.text,
@@ -1464,6 +1466,30 @@ export class Engine {
           "UPDATE messages SET reply=$2 WHERE id=$1",
           [id, text],
         );
+        // Persist reply-manager provenance next to decode metadata so OpenAI
+        // Responses can be retrieved by id and distinguished from action decode.
+        if (replyMeta) {
+          await c.query(
+            `UPDATE messages
+                SET ai_metadata = coalesce(ai_metadata, '{}'::jsonb) || jsonb_build_object('reply', $2::jsonb)
+              WHERE id=$1`,
+            [id, JSON.stringify(replyMeta)],
+          );
+          await this.s.event(
+            c,
+            ctx.message,
+            "system",
+            "reply_manager_completed",
+            {
+              provider: replyMeta.provider ?? null,
+              prompt_id: replyMeta.prompt_id ?? null,
+              prompt_version: replyMeta.prompt_version ?? null,
+              response_id: replyMeta.response_id ?? null,
+              rejected,
+            },
+            committed.requestId,
+          );
+        }
         if (rejected)
           await this.s.event(c, ctx.message, "system", "phrase_claim_rejected", {
             claim: text.slice(0, 500),
