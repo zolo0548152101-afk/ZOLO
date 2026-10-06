@@ -640,17 +640,14 @@ export class Commands {
       /(?:טעיתי|תיקון|בעצם|התכוונתי)/.test(text) &&
       r.parties.some((candidate) => candidate.phone === phone)
     ) {
-      const latest = await c.query<{ event_type: string }>(
-        `SELECT event_type FROM request_events
-         WHERE request_id=$1
-         ORDER BY id DESC LIMIT 1`,
+      const outsideRejection = await c.query(
+        `SELECT 1 FROM request_events
+         WHERE request_id=$1 AND event_type='outside_area_rejected'
+         LIMIT 1`,
         [r.id],
       );
       const correctedRegion = await this.s.region(c, cmd.settlement);
-      if (
-        latest.rows[0]?.event_type === "outside_area_rejected" &&
-        correctedRegion.decision === "allowed"
-      ) {
+      if (outsideRejection.rowCount && correctedRegion.decision === "allowed") {
         r.status = "collecting";
         r.human_reason = null;
       }

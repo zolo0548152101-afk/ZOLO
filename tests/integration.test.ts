@@ -256,6 +256,7 @@ async function setProposedDate(r: Request, date: string) {
 
 test("migrations are idempotent; legacy schema untouched; relational constraints reject invalid data", async () => {
   await pool.query("CREATE SCHEMA IF NOT EXISTS haim");
+  await pool.query("DROP TABLE IF EXISTS haim.v5_test_legacy_marker");
   await pool.query("CREATE TABLE haim.v5_test_legacy_marker(id integer)");
   await pool.query("INSERT INTO haim.v5_test_legacy_marker VALUES(42)");
   await migrate(cfg);
