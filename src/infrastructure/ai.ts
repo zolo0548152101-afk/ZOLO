@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import OpenAI from "openai";
-import { zodTextFormat } from "openai/helpers/zod";
 import { z } from "zod";
 import type { Config } from "../config.js";
 import {
@@ -58,9 +57,49 @@ export interface Planner {
 }
 
 const decodeResponseSchema = z.strictObject({
+  commands: z.array(z.unknown()).min(1).max(5),
+  evidence: z.string().max(2000),
+});
+const decodeSchemaSource = z.strictObject({
   commands: z.array(commandSchema).min(1).max(5),
   evidence: z.string().max(2000),
 });
+
+type JsonSchemaObject = Record<string, unknown>;
+
+/** Responses strict JSON Schema requires all object properties to be required. */
+function toResponsesStrictSchema(source: JsonSchemaObject): JsonSchemaObject {
+  const visit = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(visit);
+    if (!value || typeof value !== "object") return value;
+    const node = value as JsonSchemaObject;
+    const result: JsonSchemaObject = {};
+    for (const [key, child] of Object.entries(node)) {
+      if (key === "$schema") continue;
+      if (key === "oneOf") result.anyOf = visit(child);
+      else result[key] = visit(child);
+    }
+    if (result.type === "object" && result.properties && typeof result.properties === "object") {
+      const properties = result.properties as JsonSchemaObject;
+      const wasRequired = new Set(
+        Array.isArray(node.required)
+          ? node.required.filter((field): field is string => typeof field === "string")
+          : [],
+      );
+      for (const [key, property] of Object.entries(properties)) {
+        if (!wasRequired.has(key)) properties[key] = { anyOf: [property, { type: "null" }] };
+      }
+      result.required = Object.keys(properties);
+      result.additionalProperties = false;
+    }
+    return result;
+  };
+  return visit(source) as JsonSchemaObject;
+}
+
+const decodeOutputJsonSchema = toResponsesStrictSchema(
+  z.toJSONSchema(decodeSchemaSource) as JsonSchemaObject,
+);
 const replyResponseSchema = z.strictObject({ reply: z.string().trim().min(1).max(4000) });
 
 /** Legacy hosted-prompt shape still accepted while the decode prompt is rolled out. */
@@ -122,6 +161,16 @@ function asCommands(raw: unknown[]): Command[] {
   return out;
 }
 
+function normalizeWireCommand(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const command = { ...(raw as Record<string, unknown>) };
+  if (command.type === "donate") {
+    if (command.counterparty_name === null) delete command.counterparty_name;
+    if (command.direct === null) delete command.direct;
+  }
+  return command;
+}
+
 /**
  * Map a decode model payload into a validated Plan.
  * Prefer an explicit commands array. Fall back to legacy updates/actions only
@@ -130,7 +179,7 @@ function asCommands(raw: unknown[]): Command[] {
 export function translate(payload: unknown, _ctx: Context, text: string): { understood: boolean; plan: Plan } {
   const decoded = decodeResponseSchema.safeParse(payload);
   if (!decoded.success) throw new AppError("invalid_action_plan");
-  const commands = asCommands(decoded.data.commands);
+  const commands = asCommands(decoded.data.commands.map(normalizeWireCommand));
   if (commands.length !== decoded.data.commands.length) throw new AppError("invalid_action_plan");
   return { understood: true, plan: planSchema.parse({ commands, evidence: decoded.data.evidence || text.slice(0, 2000) }) };
 }
@@ -320,7 +369,14 @@ export class OpenAIPlanner implements Planner {
         ? { prompt: { id: source.id, version: source.version } }
         : {
             instructions: source.instructions,
-            text: { format: zodTextFormat(decodeResponseSchema, "haim_action_plan") },
+            text: {
+              format: {
+                type: "json_schema",
+                name: "haim_action_plan",
+                strict: true,
+                schema: decodeOutputJsonSchema,
+              },
+            },
           }),
       input: [
         {
