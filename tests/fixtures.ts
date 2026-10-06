@@ -89,6 +89,17 @@ export class FakePlanner implements Planner {
       metadata: { test_double: true },
     };
   }
+  async reply(
+    _ctx: Context,
+    input: { operation: Record<string, unknown>; fallback: string },
+  ): Promise<{ text: string; metadata: Record<string, unknown> }> {
+    this.calls++;
+    if (this.fail) throw new Error("simulated_openai_timeout");
+    return {
+      text: this.phraseReplyText || this.managedReply || input.fallback,
+      metadata: { test_double: true, operation: input.operation },
+    };
+  }
   async phraseNotice(
     _ctx: Context,
     notice: Notice,

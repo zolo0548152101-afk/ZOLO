@@ -2300,7 +2300,6 @@ test("translate maps explicit approve_self and refuses unclear", async () => {
   } as Context;
   const ok = translate(
     {
-      understood: true,
       commands: [{ type: "approve_self", request_number: request.number }],
       evidence: "כן אני טל ומאשרת לקבל את הספה",
     },
@@ -2311,7 +2310,6 @@ test("translate maps explicit approve_self and refuses unclear", async () => {
   assert.equal(ok.plan.commands[0]?.type, "approve_self");
   const schedule = translate(
     {
-      understood: true,
       commands: [
         {
           type: "approve_schedule",
@@ -2329,12 +2327,10 @@ test("translate maps explicit approve_self and refuses unclear", async () => {
     schedule.plan.commands.some((command) => command.type === "item_facts"),
     false,
   );
-  const unclear = translate(
-    { understood: false, commands: [], evidence: "" },
-    ctx,
-    "asdf",
+  assert.throws(
+    () => translate({ understood: false, commands: [], evidence: "" }, ctx, "asdf"),
+    /invalid_action_plan/,
   );
-  assert.equal(unclear.understood, false);
 });
 
 test("דירה without קומה does not set floor", () => {
