@@ -167,7 +167,7 @@ type PromptSource =
   | { mode: "hosted"; id: string; version: string }
   | { mode: "git"; instructions: string };
 
-function decodePromptSource(c: Config): PromptSource {
+function decodePromptSource(_c: Config): PromptSource {
   // The hosted action prompt currently contains an older "missing detail => next"
   // rule that suppresses explicit facts such as "I want to give a bed to Tal".
   // Keep the action contract versioned in the repository and send it as the
