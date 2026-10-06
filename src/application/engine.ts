@@ -423,6 +423,10 @@ export class Engine {
           ],
         );
         if (!selected.understood) {
+          if (this.holdingForPhoto(ctx, text)) {
+            await this.finishPhotoHold(id);
+            return;
+          }
           await this.finishUnclear(id);
           return;
         }
@@ -430,6 +434,10 @@ export class Engine {
         if (e instanceof AppError && e.code === "ai_disabled") {
           const deterministic = rulePlan(ctx);
           if (!deterministic) {
+            if (this.holdingForPhoto(ctx, text)) {
+              await this.finishPhotoHold(id);
+              return;
+            }
             await this.finishUnclear(id);
             return;
           }
@@ -692,6 +700,58 @@ export class Engine {
       await c.query(
         "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
         [id, reply],
+      );
+    });
+  }
+
+  /** Open donation still missing its required photo, and this text is not a new request. */
+  private holdingForPhoto(ctx: Context, text: string): boolean {
+    if (!text.trim() || customerCancelIntent(text)) return false;
+    const waiting = ctx.requests.some(
+      (request) =>
+        photoGate(request) &&
+        ![
+          "coordinated",
+          "closed",
+          "cancelled",
+          "rejected",
+          "human",
+          "cancel_pending",
+        ].includes(request.status),
+    );
+    if (!waiting) return false;
+    const planned = rulePlan(ctx);
+    if (
+      planned?.commands.some((command) =>
+        command.type === "donate" || command.type === "seek" || command.type === "cancel",
+      )
+    )
+      return false;
+    return true;
+  }
+
+  private async finishPhotoHold(id: string): Promise<void> {
+    await this.s.transaction(async (c) => {
+      const ctx = await this.s.context(id, c, true);
+      if (ctx.message.processed_at) return;
+      const request =
+        ctx.requests.find(
+          (candidate) =>
+            candidate.id === ctx.conversation.selected_request_id &&
+            photoGate(candidate),
+        ) ??
+        ctx.requests.find((candidate) => photoGate(candidate)) ??
+        null;
+      await this.s.outbound(
+        c,
+        ctx.message,
+        { phone: ctx.conversation.phone, text: PHOTO_FIRST },
+        `reply:${id}`,
+        request?.id ?? null,
+      );
+      await c.query(
+        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
+        [id, PHOTO_FIRST],
       );
     });
   }
@@ -1103,7 +1163,30 @@ export class Engine {
               (candidate) =>
                 candidate.type === "details" && candidate.role === "donor",
             );
+            const waitingForPhoto = ctx.requests.some(
+              (candidate) =>
+                photoGate(candidate) &&
+                ![
+                  "coordinated",
+                  "closed",
+                  "cancelled",
+                  "rejected",
+                  "human",
+                  "cancel_pending",
+                ].includes(candidate.status),
+            );
             for (const command of executableCommands) {
+              // Yes/no about condition or disassembly must not run before the
+              // required photo. A bare "כן" otherwise throws, and "לא" rejects
+              // the item. Details and a new donation still run.
+              if (
+                waitingForPhoto &&
+                !handoffTransitionPlanned &&
+                command.type === "item_facts"
+              ) {
+                reply = PHOTO_FIRST;
+                break;
+              }
               // Once an open donation is created, PHOTO-FIRST blocks every
               // later command in the same AI batch until an image arrives,
               // except donor details extracted from that same opening message.

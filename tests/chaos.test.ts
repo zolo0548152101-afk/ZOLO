@@ -14,8 +14,9 @@ import { Runtime } from "../src/application/runtime.js";
 import { makeHttp } from "../src/http.js";
 import { canonicalPhone } from "../src/domain/policies.js";
 import { AppError, type Command, type Context, type Party, type Plan } from "../src/domain/types.js";
-import { HUMAN_REPLY, PHOTO_FIRST } from "../src/domain/policies.js";
-import { FAULT_REPLY } from "../src/domain/ai-guards.js";
+import { HUMAN_REPLY, OUTSIDE, PHOTO_FIRST, PHOTO_THANKS } from "../src/domain/policies.js";
+import { CLARIFY_REPLY, FAULT_REPLY } from "../src/domain/ai-guards.js";
+import { OpenAIPlanner } from "../src/infrastructure/ai.js";
 import { asItem } from "../src/application/commands.js";
 import {
   config,
@@ -668,4 +669,116 @@ test("chaos conversation limits", async () => {
   await writeFile("artifacts/qa/chaos-report.json", body);
   const failed = report.filter((row) => !row.pass);
   assert.deepEqual(failed, []);
+});
+
+test("live AI-off rules: unclear handoff, outside towns, photo-first", async () => {
+  const phone = canonicalPhone("0530000777");
+  const planner = new OpenAIPlanner(cfg);
+  const off = new Engine(store, planner, channel, storage, log, () => monday);
+  const problems: string[] = [];
+  const turn = async (text: string, kind?: ScenarioMessage["kind"]): Promise<string> => {
+    const id = await ingest(phone, { text, kind });
+    await identify(id);
+    await off.processNext(id);
+    return replyOf(id);
+  };
+  const reset = async (): Promise<void> => {
+    const response = await app.inject({
+      method: "POST",
+      url: `/admin/conversations/${phone}/reset`,
+      headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+    });
+    if (response.statusCode !== 200)
+      problems.push(`reset HTTP ${response.statusCode} ${response.body}`);
+  };
+  try {
+    await purge(phone);
+    await turn("שלום");
+    await reset();
+    const firstUnclear = await turn("?");
+    const secondUnclear = await turn("🤔");
+    if (firstUnclear !== CLARIFY_REPLY)
+      problems.push(`first unclear: ${firstUnclear}`);
+    if (secondUnclear !== HUMAN_REPLY)
+      problems.push(`second unclear (? then 🤔): ${secondUnclear}`);
+    const handoff = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM outbox
+        WHERE phone=$1 AND text LIKE 'נדרש טיפול אנושי%'`,
+      [cfg.ADMIN_PHONE],
+    );
+    if (!handoff.rows[0]!.n)
+      problems.push("second unclear did not alert the admin");
+    const mode = await pool.query<{ mode: string }>(
+      `SELECT cv.mode FROM conversations cv JOIN contacts co ON co.id=cv.contact_id WHERE co.phone=$1`,
+      [phone],
+    );
+    if (mode.rows[0]?.mode !== "human")
+      problems.push(`unclear mode ${mode.rows[0]?.mode ?? "none"}`);
+
+    await purge(phone);
+    await turn("שלום");
+    await reset();
+    const fire = await turn("🔥");
+    const question = await turn("?");
+    if (fire !== CLARIFY_REPLY) problems.push(`fire unclear: ${fire}`);
+    if (question !== HUMAN_REPLY)
+      problems.push(`second unclear (🔥 then ?): ${question}`);
+
+    await purge(phone);
+    for (const text of [
+      "שלום, אני רוצה למסור כיסא בנצרת",
+      "אני רוצה למסור מקרר בטבריה",
+      "יש לי ספה למסירה בעפולה",
+      "רוצה למסור כיסא בחיפה",
+    ]) {
+      await purge(phone);
+      const reply = await turn(text);
+      if (!reply.includes("לא נוכל") || reply !== OUTSIDE)
+        problems.push(`outside ${text}: ${reply.slice(0, 180)}`);
+      if (reply.includes("למי תרצה למסור") || reply === PHOTO_FIRST)
+        problems.push(`outside asked a follow-up for ${text}`);
+    }
+
+    await purge(phone);
+    const chair = await turn("שלום, אני רוצה למסור כיסא בבית שאן");
+    if (chair !== PHOTO_FIRST)
+      problems.push(`chair opening: ${chair}`);
+    for (const follow of ["כן", "לא", "רחוב הרצל 1", "הפריט שבור", "כן תקין, רחוב הרצל 1"]) {
+      const reply = await turn(follow);
+      if (reply !== PHOTO_FIRST || /האם הפריט תקין|ניתן למסו|הבקשה לא הושלמה/.test(reply))
+        problems.push(`chair text without photo (${follow}): ${reply}`);
+    }
+    const held = await pool.query<{ working: boolean | null; address: string | null; status: string }>(
+      `SELECT i.working, p.address, r.status
+         FROM requests r
+         JOIN request_parties p ON p.request_id=r.id AND p.role='donor'
+         JOIN contacts co ON co.id=p.contact_id
+         JOIN request_items i ON i.request_id=r.id
+        WHERE co.phone=$1
+        ORDER BY r.number DESC LIMIT 1`,
+      [phone],
+    );
+    if (held.rows[0]?.working !== null || held.rows[0]?.status !== "collecting")
+      problems.push(`photo gate advanced: ${JSON.stringify(held.rows[0] ?? null)}`);
+    await purge(phone);
+    const library = await turn("שלום למסור ספרייה בבית שאן");
+    if (library !== PHOTO_FIRST)
+      problems.push(`library opening: ${library}`);
+    if (library.includes("למסור.") || library.includes("מה הפריט"))
+      problems.push(`library treated למסור as a name: ${library}`);
+    const withoutPhoto = await turn("כן תקין, רחוב הרצל 1");
+    if (withoutPhoto !== PHOTO_FIRST)
+      problems.push(`text after photo request: ${withoutPhoto}`);
+    if (/האם הפריט תקין|ניתן למסו/.test(withoutPhoto))
+      problems.push(`advanced without a photo: ${withoutPhoto}`);
+    const photo = await turn("", "image");
+    if (photo === PHOTO_FIRST || !photo.includes(PHOTO_THANKS))
+      problems.push(`photo did not advance: ${photo.slice(0, 180)}`);
+    if (/ניתן למסו/.test(photo))
+      problems.push(`photo rejected the item: ${photo}`);
+  } finally {
+    try { await purge(phone); } catch { /* report the assertion first */ }
+    await planner.close();
+  }
+  assert.deepEqual(problems, []);
 });

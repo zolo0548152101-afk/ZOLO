@@ -79,6 +79,7 @@ function kindAndDescription(text: string): { kind: ItemKind; description: string
     [/מנורת?\s*שולחן|מנורה/i, "other", "מנורה"],
     [/גוף\s*תאורה/i, "other", "גוף תאורה"],
     [/כוננית|מדף/i, "other", "מדף"],
+    [/ספרייה|ספריה/i, "other", "ספרייה"],
     [/שטיח/i, "other", "שטיח"],
     [/טלוויז|מסך/i, "other", "טלוויזיה"],
     [/מחשב|לפטופ/i, "other", "מחשב"],

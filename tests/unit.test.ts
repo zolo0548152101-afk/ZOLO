@@ -1207,6 +1207,26 @@ test("deterministic flow turns a donation sentence into a request without AI", (
   assert.equal((result?.commands[0] as Extract<typeof result.commands[number], { type: "donate" }>).items[0]?.kind, "bed");
   assert.equal(r.items[0]?.kind, "fridge");
 });
+test("a bookcase donation in an allowed town is an item, not a recipient named למסור", () => {
+  const context: Context = {
+    conversation: { id: "c-library", phone: "501111111", chat_id: "972501111111@c.us", mode: "bot", selected_request_id: null, version: 1, pending_counterparty_name: null, pending_counterparty_phone: null },
+    requests: [],
+    candidates: [],
+    message: { id: "m-library", seq: "1", external_id: "e-library", trace_id: "t-library", mode: "simulation", chat_id: "972501111111@c.us", phone: "501111111", kind: "text", text: "שלום למסור ספרייה בבית שאן", contacts: [], location: null, media_url: null, media_id: null, media_state: "none", transcript: null, processed_at: null, ai_plan: null },
+    history: [],
+  };
+  const commands = rulePlan(context)?.commands ?? [];
+  const donation = commands.find((command) => command.type === "donate");
+  const details = commands.find((command) => command.type === "details");
+  assert.equal(donation?.type, "donate");
+  if (donation?.type === "donate") {
+    assert.equal(donation.direct, false);
+    assert.equal(donation.counterparty_name, null);
+    assert.equal(donation.items[0]?.description, "ספרייה");
+  }
+  assert.equal(details?.type === "details" ? details.settlement : null, "בית שאן");
+  assert.equal(namedOutsideSettlement("שלום, אני רוצה למסור כיסא בנצרת"), "נצרת");
+});
 test("general donation preserves opening pickup facts and an explicit condition", () => {
   const context: Context = {
     conversation: { id: "c", phone: "584152101", chat_id: "972584152101@c.us", mode: "bot", selected_request_id: null, version: 1, pending_counterparty_name: null },
