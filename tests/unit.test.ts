@@ -2440,6 +2440,73 @@ test("AI details-only without open request does not override rulePlan opening", 
   assert.equal(selected.plan.commands[0]?.type, "donate");
 });
 
+test("richer rulePlan self-transfer beats bare AI donate without details", async () => {
+  const { selectDecodePlan } = await import("../src/infrastructure/ai.js");
+  const text =
+    "אני רוצה להעביר לעצמי שולחן מבית שאן רחוב העלייה קומה 1 לבית שאן רחוב העלייה קומה 2";
+  const ctx = {
+    conversation: {
+      id: "c-self",
+      phone: "584152101",
+      chat_id: "972584152101@c.us",
+      mode: "bot",
+      selected_request_id: null,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [],
+    candidates: [],
+    history: [],
+    message: {
+      id: "m-self-ai",
+      seq: "1",
+      external_id: "e",
+      trace_id: "t",
+      mode: "live",
+      chat_id: "972584152101@c.us",
+      phone: "584152101",
+      kind: "text",
+      text,
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+  } as Context;
+  const rules = rulePlan(ctx);
+  assert.ok(rules?.commands.some((command) => command.type === "details"));
+  const aiDonateOnly = {
+    understood: true,
+    plan: {
+      commands: [
+        {
+          type: "donate" as const,
+          items: [{ kind: "table" as const, description: "שולחן", quantity: 1 }],
+          counterparty_phone: "584152101",
+          counterparty_name: null,
+          direct: true,
+          free: true,
+          working: true,
+        },
+      ],
+      evidence: text,
+    },
+  };
+  const selected = selectDecodePlan(aiDonateOnly, rules, ctx);
+  assert.equal(selected.useAi, false);
+  assert.ok(selected.plan.commands.some((command) => command.type === "details"));
+  const floors = selected.plan.commands.filter((command) => command.type === "details");
+  assert.deepEqual(
+    floors.map((command) => (command.type === "details" ? command.floor : null)),
+    [1, 2],
+  );
+});
+
 test("self-transfer rulePlan does not invent receiver name עצמי", () => {
   const text =
     "אני רוצה להעביר לעצמי שולחן מבית שאן רחוב העלייה קומה 1 לבית שאן רחוב העלייה קומה 2";

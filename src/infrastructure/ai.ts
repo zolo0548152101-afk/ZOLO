@@ -302,7 +302,19 @@ export function selectDecodePlan(
   ctx: Context,
 ): { plan: Plan; useAi: boolean; understood: boolean } {
   const useAi = actionableAiPlan(translated, ctx);
-  if (useAi) return { plan: translated.plan, useAi: true, understood: true };
+  if (useAi) {
+    // A richer deterministic opening (self-transfer with both endpoints, or
+    // donate+location) must not lose facts to a bare AI donate/seek.
+    if (
+      deterministic &&
+      !hasOpenRequest(ctx) &&
+      deterministic.commands.some((command) => OPENING_COMMANDS.has(command.type)) &&
+      deterministic.commands.some((command) => command.type === "details") &&
+      !translated.plan.commands.some((command) => command.type === "details")
+    )
+      return { plan: deterministic, useAi: false, understood: true };
+    return { plan: translated.plan, useAi: true, understood: true };
+  }
   if (deterministic)
     return { plan: deterministic, useAi: false, understood: true };
   return {
