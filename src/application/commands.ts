@@ -744,6 +744,7 @@ export class Commands {
           if (
             cmd.free &&
             !/(?:חינם|תרומה)/.test(text) &&
+            !donationIntent(text) &&
             !(explicitApproval(text) && prior.includes("בחינם"))
           )
             throw new AppError("free_confirmation_missing");
