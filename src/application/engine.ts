@@ -420,20 +420,21 @@ export class Engine {
         );
         if (!response.understood) throw new AppError("action_manager_unclear");
       } catch (e) {
-        if (e instanceof AppError && e.code === "ai_disabled") {
-          const deterministic = rulePlan(ctx);
-          if (!deterministic) {
-            if (this.holdingForPhoto(ctx, text)) {
-              await this.finishPhotoHold(id);
-              return;
-            }
-            await this.finishUnclear(id);
-            return;
-          }
+        // Transient API failures retry once. After the last attempt (or for
+        // non-retryable AppErrors), prefer rulePlan so deterministic openings
+        // still complete when the model is flaky.
+        if (!lastAiAttempt && !(e instanceof AppError))
+          throw new RetryableError("openai_retry");
+        const deterministic = rulePlan(ctx);
+        if (deterministic) {
           plan = deterministic;
+        } else if (this.holdingForPhoto(ctx, text)) {
+          await this.finishPhotoHold(id);
+          return;
+        } else if (e instanceof AppError && e.code === "ai_disabled") {
+          await this.finishUnclear(id);
+          return;
         } else {
-          if (!lastAiAttempt && !(e instanceof AppError))
-            throw new RetryableError("openai_retry");
           await this.finishFault(id, e);
           return;
         }

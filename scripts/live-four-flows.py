@@ -147,6 +147,11 @@ def signed_webhook(phone_chat: str, text: str, session: str = SESSION):
         return r.status, json.load(r)
 
 
+def pg_bool(value: str | None) -> bool:
+    """Postgres bool::text is 'true'/'false'; some casts still yield 't'/'f'."""
+    return (value or "").strip().lower() in ("t", "true", "1", "yes")
+
+
 def latest_request():
     row = db(
         "SELECT number,status,origin,verification_contacted::text,"
@@ -160,8 +165,8 @@ def latest_request():
         "number": int(num),
         "status": status,
         "origin": origin,
-        "verification_contacted": vc == "t",
-        "represents_both_parties": both == "t",
+        "verification_contacted": pg_bool(vc),
+        "represents_both_parties": pg_bool(both),
         "proposed": proposed or None,
         "run_date": run_date or None,
     }
@@ -188,8 +193,8 @@ def parties(n: int):
                 "settlement": sett or None,
                 "address": addr or None,
                 "floor": int(floor) if floor.isdigit() else (None if floor == "" else floor),
-                "approved": appr == "t",
-                "schedule_approved": sched == "t",
+                "approved": pg_bool(appr),
+                "schedule_approved": pg_bool(sched),
             }
         )
     return out
@@ -332,7 +337,7 @@ def wait_processed(marker_substr: str, timeout=50):
         )
         if row and "|" in row:
             mid, reply, err, processed = row.split("|", 3)
-            if processed == "true":
+            if pg_bool(processed):
                 return {"id": mid, "reply": reply or None, "error": err or None}
         time.sleep(1.2)
     return None

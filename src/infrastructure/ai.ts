@@ -399,18 +399,30 @@ export class OpenAIPlanner implements Planner {
       throw new AppError("invalid_managed_prompt_response");
     }
     const translated = translate(payload, ctx, text);
+    // AI decode is primary when it returns runnable commands. rulePlan remains
+    // the safety net for unclear/empty AI output and for opening turns where
+    // the model returned only details without donate/seek.
+    const deterministic = rulePlan(ctx);
+    const selected = selectDecodePlan(translated, deterministic, ctx);
+    const { plan, useAi, understood } = selected;
     return {
-      understood: translated.understood,
-      plan: translated.plan,
+      understood,
+      plan,
       metadata: {
         provider: "openai_responses_decode",
         prompt_mode: source.mode,
         prompt_id: source.mode === "hosted" ? source.id : "git:prompts/haim-action.he.md",
         prompt_version: source.mode === "hosted" ? source.version : "git",
         model: this.c.OPENAI_MODEL,
-        action_source: "ai_action_manager",
-        understood: translated.understood,
-        bridged_rules: false,
+        action_source: useAi
+          ? "ai_action_manager"
+          : deterministic
+            ? "ai_decode_bridged_rules"
+            : translated.understood === false
+              ? "ai_decode_unclear"
+              : "ai_action_manager",
+        understood,
+        bridged_rules: !useAi && Boolean(deterministic),
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,

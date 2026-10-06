@@ -383,7 +383,10 @@ export class Store {
       proposed_run_date: null,
       earliest_run_date: null,
       preferred_time: null,
-      represents_both_parties: false,
+      represents_both_parties:
+        parties.length === 2 &&
+        Boolean(parties[0]?.phone) &&
+        parties[0]!.phone === parties[1]!.phone,
       closed_at: null,
       human_reason: null,
       created_at: new Date().toISOString(),
@@ -396,6 +399,12 @@ export class Store {
     return r;
   }
   async save(c: pg.PoolClient, r: Request): Promise<void> {
+    if (
+      r.parties.length === 2 &&
+      r.parties[0]!.phone &&
+      r.parties[0]!.phone === r.parties[1]!.phone
+    )
+      r.represents_both_parties = true;
     const result = await c.query(
       `UPDATE requests SET version=version+1,status=$2,origin=$3,run_date=$4,proposed_run_date=$12,human_reason=$5,preferred_time=$7,earliest_run_date=$8,verification_contacted=$9,represents_both_parties=$10,closed_at=$11,updated_at=clock_timestamp() WHERE id=$1 AND version=$6`,
       [
