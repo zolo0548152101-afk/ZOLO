@@ -1,26 +1,35 @@
 # HAIM action-schema deployment handoff — 2026-10-06
 
-## What changed in the new two-prompt flow
+## New two-prompt flow
 
-- The action manager reads `prompts/haim-action.he.md` from the repository and sends it as the Responses API `instructions` field. It returns structured `commands` plus short `evidence`; application code validates each command against the existing domain schema before execution.
-- The reply manager remains a separate hosted prompt. It receives the operation result and refreshed request state and returns the customer-facing reply. Its prompt ID/version remain in service configuration; this change does not replace or delete them.
-- The webhook is received by Docker Swarm service `whatsapp_haim-bot-core` (container port 3000, session `HAIM_YAHAD`). The host `haim-bot.service` on port 3010 is a separate deployment target and is not the observed WAHA webhook receiver.
+- Action manager: `prompts/haim-action.he.md` is loaded from the repository and sent as Responses API `instructions`. It returns structured `commands` and short `evidence`; each command is validated by the existing domain schema before execution.
+- Reply manager: remains a separate hosted prompt. It receives operation results and refreshed state and produces customer-facing text. Its configured prompt ID/version were not replaced or deleted.
+- The observed WAHA webhook target is Docker Swarm service `whatsapp_haim-bot-core` (container port 3000, session `HAIM_YAHAD`). `haim-bot.service` on port 3010 is a separate host deployment target.
 
-## Fix being deployed
+## Fix made
 
-The first live decode calls failed before the model could produce a plan. The Responses strict-schema endpoint rejected the action schema because the `donate` command had optional `counterparty_name` and `direct` properties. The wire schema now makes every property required and represents those two optional values as nullable; the application removes only those null optional values and then validates the normalized command against the unchanged domain schema. No database schema or business command semantics are changed.
+Live decode calls failed before the model could produce a plan: Responses strict structured output rejected the `donate` schema's optional `counterparty_name` and `direct` fields. The API-facing schema now makes every property required and represents those two optional fields as nullable. The application removes only null values for those optional fields, then validates the command against the unchanged domain schema. No database schema or business command semantics changed.
 
-## Deployment/checkpoint
+## Deployment
 
-- Source branch: `codex/haim-two-prompts`.
-- Previous deployed source: `6303b968` (the current correction is to be committed and deployed after this handoff file is created).
-- Deployment targets: host source/build/service and the Docker Swarm webhook service. Keep them on the same source SHA; update the Docker image used by the webhook service, not only systemd.
-- Do not remove the server's untracked `dist.backup-*` directories; they are preserved deployment backups.
-- The user's requested live validation is limited to a message from WAHA `default` / 0584152101 to the bot test number 0543414386. Verify the persisted message, AI command, and resulting request/item/party rows before claiming success.
+- Branch: `codex/haim-two-prompts`.
+- Source commit: `59c65d6547884e50a05ad1e4272af69098eedd65` (`fix: make action output schema Responses-compatible`), pushed to `origin`.
+- Deployment used the existing SSH path to the Ubuntu host, not the EasyPanel UI. The checkout at `/etc/easypanel/projects/whatsapp/haim-bot-core/code` fast-forwarded to the commit and `npm run build` succeeded. `haim-bot.service` was restarted and is active.
+- The Swarm image was built as `haim-bot-core:59c65d6` from the previous deployed image, overlaying the newly built `/app/dist` and `/app/prompts`. `whatsapp_haim-bot-core` converged and reports the full source SHA in `GIT_SHA`.
+- Both deployment targets are on the same source SHA. Docker `/health` and `/ready`, and host `/health` and `/ready`, all returned HTTP 200.
+- Leave untracked server directories `dist.backup-*` untouched; they are deployment backups.
 
-## Verification status and remaining work at handoff
+## Live verification
 
-- TypeScript `tsc -p tsconfig.json --noEmit` passed locally after the schema change.
-- The user explicitly requested not to run local test suites.
-- GitHub Actions `verification` is red on both 8198dcb and 6303b96. The latest run lists multiple integration failures around fixture/count expectations and existing PHOTO-FIRST/rule-planner expectations; this is separate from the reproduced live OpenAI error. Do not report CI as green.
-- Complete: commit/push, server build, update both deploy targets to the exact commit, check health/readiness, perform one scoped WAHA message, inspect its database effects, and append exact SHA/outcomes here.
+- Used only the authorized test path: WAHA session `default` (0584152101) to bot test number 0543414386. Reset that contact's conversation memory first; no request or other data was deleted.
+- WAHA accepted `אני רוצה למסור מיטה לטל` with provider ID `3EB068A9A1B837FE5D6E8E`.
+- PostgreSQL then showed the inbound message processed with no error, an AI `donate` command for one bed (`direct=true`, counterparty `טל`), and request #1 (`collecting`, `direct`) with its bed item persisted.
+- The reply asked for Tal's phone/contact to continue verification. This proves action decode, command execution, and request/item persistence on the live webhook path; it does not independently validate the reply-manager prompt or real delivery to another person.
+- No other contacts were messaged. No API key or admin token was changed.
+
+## Verification and remaining work
+
+- Local `tsc -p tsconfig.json --noEmit` passed; remote `npm run build` passed.
+- Per user instruction, local test suites were not run.
+- GitHub Actions verification remains red on commit `59c65d6` (run `37456935263`): nine integration assertions fail, covering flow/PHOTO-FIRST expectations, conversation ordering, fixture/count expectations, and persisted-plan behavior. Do not report CI as green; these failures need separate investigation.
+- Next: address the CI integration failures in a separate scoped correction and, if requested, separately exercise the hosted reply-manager prompt. The live action decode/DB persistence fix is deployed and verified.
