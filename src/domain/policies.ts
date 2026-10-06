@@ -337,10 +337,36 @@ export function directHandoffIntent(t: string): boolean {
     )
   );
 }
+/**
+ * Evidence must come from the customer message. The action manager owns field
+ * values (spelling, kind labels, normalized addresses), so a light typo fix in
+ * the quote — e.g. מטה→מיטה — is allowed. Inventing a different sentence is not.
+ */
+function foldEvidence(value: string): string {
+  return value
+    .normalize("NFKC")
+    .replace(/[\s,.!?;:״׳"'`\-–—]+/gu, "")
+    .replace(/[יו]/gu, "")
+    .toLowerCase();
+}
+
+function evidenceSupportedByText(evidence: string, text: string): boolean {
+  const quote = evidence.trim();
+  const message = text.trim();
+  if (!quote || !message) return false;
+  if (message.includes(quote)) return true;
+  const foldedQuote = foldEvidence(quote);
+  const foldedMessage = foldEvidence(message);
+  if (!foldedQuote || !foldedMessage) return false;
+  return (
+    foldedMessage.includes(foldedQuote) || foldedQuote.includes(foldedMessage)
+  );
+}
+
 export function grounded(plan: Plan, text: string): boolean {
   return (
     plan.commands.every((c) => c.type === "status" || c.type === "next") ||
-    (plan.evidence.length > 0 && text.includes(plan.evidence))
+    (plan.evidence.length > 0 && evidenceSupportedByText(plan.evidence, text))
   );
 }
 export function photoGate(r: Request): boolean {

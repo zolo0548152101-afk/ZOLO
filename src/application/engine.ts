@@ -452,9 +452,8 @@ export class Engine {
         if (!response.understood) throw new AppError("action_manager_unclear");
       } catch (e) {
         // Transient API failures retry once. After the last attempt, never
-        // execute a forged/ungrounded AI plan — but a deterministic rulePlan
-        // may still complete a clear opening (e.g. typo מטה→מיטה). Escalate
-        // to a human only when rules cannot help either.
+        // execute a forged AI plan. Deterministic rulePlan may still complete
+        // a clear opening; escalate only when rules cannot help either.
         if (!lastAiAttempt && !(e instanceof AppError))
           throw new RetryableError("openai_retry");
         const deterministic = rulePlan(ctx);
