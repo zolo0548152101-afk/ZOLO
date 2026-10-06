@@ -1150,10 +1150,9 @@ export class Engine {
               candidate.type === "confirm_counterparty" ||
               candidate.type === "counterparty"
             );
-            // AI may return receiver details before the command that creates
-            // that receiver. Preserve the plan otherwise, but satisfy this
-            // explicit dependency for an already-open request so the whole
-            // transaction is not rolled back as forbidden_party.
+            // Run the action-manager plan in dependency order. Do not drop or
+            // skip commands for photo/status gates — those only shape the reply
+            // after every write has been attempted.
             const orderedCommands = [...plan.commands];
             for (let detailsIndex = 0; detailsIndex < orderedCommands.length; detailsIndex++) {
               const detailsCommand = orderedCommands[detailsIndex]!;
@@ -1169,54 +1168,8 @@ export class Engine {
               orderedCommands.splice(detailsIndex, 0, counterpartyCommand!);
               detailsIndex++;
             }
-            const executableCommands = orderedCommands.filter((command) => {
-              if (command.type !== "details" || !command.role) return true;
-              const createsCounterparty = orderedCommands.some(
-                (candidate) =>
-                  candidate.type === "counterparty" &&
-                  candidate.request_number === command.request_number,
-              );
-              if (!createsCounterparty) return true;
-              const targetRequest = ctx.requests.find(
-                (candidate) => candidate.number === command.request_number,
-              );
-              const actorRole = targetRequest?.parties.find(
-                (candidate) => candidate.phone === phone,
-              )?.role;
-              // A donor may identify/link a receiver, but cannot assert that
-              // receiver's profile fields. Keep the valid counterparty
-              // transition and let the receiver provide their own details.
-              return !actorRole || actorRole === command.role;
-            });
             let index = 0;
-            const waitingForPhoto = ctx.requests.some(
-              (candidate) =>
-                photoGate(candidate) &&
-                ![
-                  "coordinated",
-                  "closed",
-                  "cancelled",
-                  "rejected",
-                  "human",
-                  "cancel_pending",
-                ].includes(candidate.status),
-            );
-            for (const command of executableCommands) {
-              // PHOTO-FIRST must not discard an item correction (kind/description).
-              // Only bare free/working/disassembly confirmations wait for the photo —
-              // those are yes/no answers that must not mutate the item first.
-              if (
-                waitingForPhoto &&
-                !handoffTransitionPlanned &&
-                command.type === "item_facts" &&
-                !command.items?.length
-              ) {
-                reply = PHOTO_FIRST;
-                break;
-              }
-              // Once an open donation is created, PHOTO-FIRST blocks every
-              // later command in the same AI batch until an image arrives,
-              // except donor details extracted from that same opening message.
+            for (const command of orderedCommands) {
               ctx = await this.s.context(id, c);
               const result: Outcome = await this.commands.apply(
                 c,
@@ -1301,9 +1254,8 @@ export class Engine {
                 else if (!reply) reply = PHOTO_THANKS;
               }
             }
-            // The action manager may save facts and the reply manager decides
-            // how to ask for the next missing fact. A photo requirement is a
-            // business constraint, not permission to discard other facts.
+            // After every command has been written, photo-first may still shape
+            // the customer reply. It must never skip or discard AI DB writes.
             const explicitClarification = /כבר קיימת פנייה/.test(reply ?? "");
             if (
               request &&
