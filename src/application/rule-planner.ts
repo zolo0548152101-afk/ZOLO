@@ -539,7 +539,7 @@ export function rulePlan(ctx: Context): Plan | null {
     normalizedText,
   );
   const requesterIntent =
-    /^(?:(?:היי|שלום)\s*[,! ]*)?(?:אני\s+)?(?:מחפש|מחפשת|מבקש|מבקשת|צריך|צריכה)(?=$|[\s,])/.test(
+    /^(?:(?:היי|שלום)\s*[,! ]*)?(?:אני\s+)?(?:(?:רוצה\s+)?לקבל|מחפש|מחפשת|מבקש|מבקשת|צריך|צריכה)(?=$|[\s,])/u.test(
       normalizedText,
     ) ||
     (seekIntent(text) && !donationIntent(text));

@@ -763,6 +763,52 @@ test("unknown town after ב goes to review, not clarify or photo-first", async (
   }
 });
 
+test("receive a table in Beit Shean is a seek, not a town-only question", async () => {
+  const phone = canonicalPhone("0530000555");
+  const planner = new OpenAIPlanner(cfg);
+  const off = new Engine(store, planner, channel, storage, log, () => monday);
+  const NO_MATCH = "כרגע לא נמצא פריט מתאים. נעדכן כשיהיה פריט מתאים.";
+  const turn = async (text: string): Promise<string> => {
+    const id = await ingest(phone, { text });
+    await identify(id);
+    await off.processNext(id);
+    return replyOf(id);
+  };
+  const searchKind = async (): Promise<string | undefined> => {
+    const row = await pool.query<{ kind: string }>(
+      `SELECT s.kind FROM searches s
+         JOIN contacts co ON co.id=s.contact_id
+        WHERE co.phone=$1`,
+      [phone],
+    );
+    return row.rows[0]?.kind;
+  };
+  try {
+    await purge(phone);
+    const exact = await turn("שלום, אני רוצה לקבל שולחן בבית שאן");
+    assert.equal(exact, NO_MATCH);
+    assert.doesNotMatch(exact, /רשמתי את היישוב|תמונה|תקין/);
+    assert.equal(await searchKind(), "table");
+    const address = await turn("רחוב העלייה דירה 4");
+    assert.doesNotMatch(address, /תקין|תמונה|רשמתי את היישוב/);
+    await purge(phone);
+    const short = await turn("שלום, לקבל שולחן בבית שאן");
+    assert.equal(short, NO_MATCH);
+    assert.equal(await searchKind(), "table");
+    const requests = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM requests r
+         JOIN request_parties p ON p.request_id=r.id
+         JOIN contacts co ON co.id=p.contact_id
+        WHERE co.phone=$1`,
+      [phone],
+    );
+    assert.equal(requests.rows[0]?.n ?? 0, 0);
+  } finally {
+    try { await purge(phone); } catch { /* report the assertion first */ }
+    await planner.close();
+  }
+});
+
 test("live AI-off rules: unclear handoff, outside towns, photo-first", async () => {
   const phone = canonicalPhone("0530000777");
   const planner = new OpenAIPlanner(cfg);

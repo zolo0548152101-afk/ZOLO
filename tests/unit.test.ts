@@ -2490,6 +2490,75 @@ test("self-transfer rulePlan does not invent receiver name עצמי", () => {
   }
 });
 
+test("לקבל שולחן in an allowed town is a seek, and a bare next does not replace it", async () => {
+  const { selectDecodePlan } = await import("../src/infrastructure/ai.js");
+  const phone = "584152101";
+  const planFor = (text: string) =>
+    rulePlan({
+      conversation: {
+        id: "c",
+        phone,
+        chat_id: `${phone}@c.us`,
+        mode: "bot",
+        selected_request_id: null,
+        version: 1,
+        pending_counterparty_name: null,
+        pending_counterparty_phone: null,
+      },
+      requests: [],
+      candidates: [],
+      history: [],
+      message: {
+        id: "m",
+        seq: "1",
+        external_id: "e",
+        trace_id: "t",
+        mode: "shadow",
+        chat_id: `${phone}@c.us`,
+        phone,
+        kind: "text",
+        text,
+        contacts: [],
+        location: null,
+        media_url: null,
+        media_id: null,
+        media_state: "none",
+        transcript: null,
+        processed_at: null,
+        ai_plan: null,
+      },
+    } as unknown as Context);
+  for (const text of [
+    "שלום, אני רוצה לקבל שולחן בבית שאן",
+    "שלום, לקבל שולחן בבית שאן",
+    "אני מחפש שולחן בבית שאן",
+  ]) {
+    const planned = planFor(text);
+    assert.equal(planned?.commands[0]?.type, "seek", text);
+    if (planned?.commands[0]?.type === "seek")
+      assert.equal(planned.commands[0].kind, "table");
+    assert.equal(planned?.commands.some((command) => command.type === "next"), false);
+  }
+  const seek = planFor("שלום, אני רוצה לקבל שולחן בבית שאן");
+  const bridged = selectDecodePlan(
+    {
+      understood: true,
+      plan: {
+        commands: [{ type: "next" }],
+        evidence: "שלום, אני רוצה לקבל שולחן בבית שאן",
+      },
+    },
+    seek,
+    { requests: [], candidates: [] } as unknown as Context,
+  );
+  assert.equal(bridged.useAi, false);
+  assert.equal(bridged.plan.commands[0]?.type, "seek");
+  const donate = planFor("אני רוצה למסור שולחן בבית שאן");
+  assert.equal(donate?.commands[0]?.type, "donate");
+  const approval = planFor("כן אני טל ומאשרת לקבל את הספה");
+  assert.notEqual(approval?.commands[0]?.type, "seek");
+});
+
 test("seeker opening uses seek and not donate", () => {
   const text = "אני מחפש לקבל מיטה זוגית בבית שאן";
   const plan = rulePlan({
