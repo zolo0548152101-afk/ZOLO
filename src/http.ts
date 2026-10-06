@@ -763,6 +763,11 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             deleted[name] = (await client.query(sql, values)).rowCount ?? 0;
           };
           if (requestIds.length) {
+            // Drop conversation pointers before deleting requests.
+            await client.query(
+              "UPDATE conversations SET selected_request_id=NULL WHERE selected_request_id=ANY($1::uuid[])",
+              [requestIds],
+            );
             await remove("integration_outbox", "DELETE FROM integration_outbox WHERE event_id IN (SELECT id FROM request_events WHERE request_id=ANY($1::uuid[]))", [requestIds]);
             await remove("request_events", "DELETE FROM request_events WHERE request_id=ANY($1::uuid[])", [requestIds]);
             await remove("request_verifications", "DELETE FROM request_verifications WHERE request_id=ANY($1::uuid[])", [requestIds]);
@@ -770,14 +775,23 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             await remove("request_media", "DELETE FROM request_media WHERE request_id=ANY($1::uuid[])", [requestIds]);
             await remove("request_locations", "DELETE FROM request_locations WHERE request_id=ANY($1::uuid[])", [requestIds]);
             await remove("matches", "DELETE FROM matches WHERE request_id=ANY($1::uuid[])", [requestIds]);
+            await remove("outbox", "DELETE FROM outbox WHERE request_id=ANY($1::uuid[])", [requestIds]);
             await remove("request_parties", "DELETE FROM request_parties WHERE request_id=ANY($1::uuid[])", [requestIds]);
             await remove("request_items", "DELETE FROM request_items WHERE request_id=ANY($1::uuid[])", [requestIds]);
             await remove("requests", "DELETE FROM requests WHERE id=ANY($1::uuid[])", [requestIds]);
           }
           if (messageIds.length) {
+            await remove("integration_outbox", "DELETE FROM integration_outbox WHERE event_id IN (SELECT id FROM request_events WHERE message_id=ANY($1::uuid[]))", [messageIds]);
+            await remove("request_events", "DELETE FROM request_events WHERE message_id=ANY($1::uuid[])", [messageIds]);
             await remove("command_results", "DELETE FROM command_results WHERE message_id=ANY($1::uuid[])", [messageIds]);
             await remove("outbox", "DELETE FROM outbox WHERE message_id=ANY($1::uuid[]) OR phone=$2", [messageIds, phone]);
             await remove("media", "DELETE FROM media WHERE message_id=ANY($1::uuid[])", [messageIds]);
+            // Detach turn links before deleting messages.
+            await client.query(
+              "UPDATE messages SET turn_id=NULL, media_id=NULL WHERE id=ANY($1::uuid[])",
+              [messageIds],
+            );
+            await remove("turn_messages", "DELETE FROM turn_messages WHERE message_id=ANY($1::uuid[])", [messageIds]);
             await remove("messages", "DELETE FROM messages WHERE id=ANY($1::uuid[])", [messageIds]);
           } else {
             await remove("outbox", "DELETE FROM outbox WHERE phone=$1", [phone]);
@@ -791,6 +805,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           await remove("contact_identities", "DELETE FROM contact_identities WHERE contact_id=ANY($1::uuid[])", [ids]);
           await remove("searches", "DELETE FROM searches WHERE contact_id=ANY($1::uuid[])", [ids]);
           await remove("contacts", "DELETE FROM contacts WHERE id=ANY($1::uuid[])", [ids]);
+          // Audit after wipe — do not attach to deleted contact/message rows.
           await s.event(client, { trace_id: req.id }, "admin", "admin_test_phone_data_cleared", adminAuditRecord(req, "clear_test_phone_data", `phone:${phone}`, "success", { deleted }));
         });
         runtime.log.warn({ trace_id: req.id, phone, deleted }, "admin_phone_data_cleared");

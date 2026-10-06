@@ -67,14 +67,37 @@ def db(sql: str) -> str:
 
 
 def admin_clear():
+    """Reset disposable test DB between flows (authorized clear-all)."""
     body = json.dumps({"confirm": "מחק הכל"}).encode()
     req = urllib.request.Request(
         f"{BOT}/admin/database/clear-all",
         data=body,
         headers={"Content-Type": "application/json", "x-admin-token": ADMIN},
     )
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=120) as r:
         return json.load(r)
+
+
+def clear_phone(phone: str):
+    """Best-effort single-phone wipe; falls back to cancel-phone if clear-phone fails."""
+    try:
+        body = json.dumps({"phone": phone, "confirm": "מחק מספר"}).encode()
+        req = urllib.request.Request(
+            f"{BOT}/admin/database/clear-phone",
+            data=body,
+            headers={"Content-Type": "application/json", "x-admin-token": ADMIN},
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)
+    except Exception:
+        body = json.dumps({"phone": phone, "confirm": "בטל פניות"}).encode()
+        req = urllib.request.Request(
+            f"{BOT}/admin/requests/cancel-phone",
+            data=body,
+            headers={"Content-Type": "application/json", "x-admin-token": ADMIN},
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)
 
 
 def waha_send(text: str):
