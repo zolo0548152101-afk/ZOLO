@@ -214,12 +214,13 @@ def searches():
 
 def outbox_for(phone_suffix: str, limit=3):
     rows = db(
-        f"SELECT left(text,280),state,COALESCE(request_id::text,''),created_at::text "
+        f"SELECT replace(replace(left(text,280), E'\\n', ' '), '|', '/'),"
+        f"state,COALESCE(request_id::text,''),created_at::text "
         f"FROM outbox WHERE phone LIKE '%{phone_suffix}' ORDER BY created_at DESC LIMIT {limit}"
     )
     out = []
     for line in rows.splitlines():
-        if not line:
+        if not line or "|" not in line:
             continue
         text, status, rid, created = line.split("|", 3)
         out.append({"text": text, "status": status, "request_id": rid or None, "created_at": created})
@@ -228,12 +229,13 @@ def outbox_for(phone_suffix: str, limit=3):
 
 def last_ai():
     row = db(
-        "SELECT left(COALESCE(m.text,''),80), left(COALESCE(m.ai_plan::text,''),400) "
+        "SELECT replace(replace(left(COALESCE(m.text,''),80), E'\\n', ' '), '|', '/'),"
+        "replace(replace(left(COALESCE(m.ai_plan::text,''),400), E'\\n', ' '), '|', '/') "
         "FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id "
         "WHERE c.phone LIKE '%584152101' OR m.chat_id LIKE '%584152101%' "
         "ORDER BY m.seq DESC LIMIT 1"
     )
-    if not row:
+    if not row or "|" not in row:
         return None
     text, plan = row.split("|", 1)
     return {"text": text, "ai_plan": plan}
@@ -306,12 +308,12 @@ def snapshot(label: str):
     return snap
 
 
-def send_and_wait(text: str, wait=16):
+def send_and_wait(text: str, wait=22):
     before = now_db()
     print(f"\n>>> SEND: {text}", flush=True)
     res = waha_send(text)
     time.sleep(wait)
-    reply = wait_reply(ISRAEL, before, timeout=35)
+    reply = wait_reply(ISRAEL, before, timeout=45)
     print(f"<<< REPLY: {(reply or {}).get('text')}", flush=True)
     return res, reply
 
@@ -597,8 +599,10 @@ failed = [c for c in report["checks"] if not c["ok"]]
 report["summary"] = {"passed": passed, "failed": len(failed), "total": len(report["checks"]), "ok": len(failed) == 0}
 report["failures"] = failed
 
-out_path = "/tmp/live-four-flows-report.json"
+out_path = f"/tmp/live-four-flows-report-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
 json.dump(report, open(out_path, "w"), ensure_ascii=False, indent=2)
+# also refresh the stable alias used by operators
+json.dump(report, open("/tmp/live-four-flows-report.json", "w"), ensure_ascii=False, indent=2)
 print("\nSUMMARY", json.dumps(report["summary"], ensure_ascii=False), flush=True)
 for f in failed:
     print("FAIL", f["check"], f.get("detail"), flush=True)
