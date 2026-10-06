@@ -168,7 +168,11 @@ type PromptSource =
   | { mode: "git"; instructions: string };
 
 function decodePromptSource(c: Config): PromptSource {
-  return { mode: "hosted", id: c.OPENAI_ACTION_PROMPT_ID, version: c.OPENAI_ACTION_PROMPT_VERSION };
+  // The hosted action prompt currently contains an older "missing detail => next"
+  // rule that suppresses explicit facts such as "I want to give a bed to Tal".
+  // Keep the action contract versioned in the repository and send it as the
+  // actual Responses instruction so the model cannot treat it as user data.
+  return { mode: "git", instructions: ACTION_PROMPT_TEXT };
 }
 
 function phrasePromptSource(c: Config, _canonical: string): PromptSource {
