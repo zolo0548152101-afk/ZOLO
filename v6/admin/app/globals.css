@@ -1,0 +1,113 @@
+:root {
+  color-scheme: dark;
+  --bg: #09121b;
+  --panel: #101f2c;
+  --line: #254056;
+  --ink: #edf5fa;
+  --muted: #9bb1c2;
+  --accent: #43d5a1;
+  --bad: #ff7474;
+  --green: #2cae83;
+  --green-dark: #12372d;
+  --danger: #b93636;
+  --warn: #e6c07b;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  margin: 0;
+  background: linear-gradient(135deg, #08131d, #102b36);
+  color: var(--ink);
+  font: 15px Arial, "Arial Hebrew", sans-serif;
+  line-height: 1.45;
+}
+a { color: var(--accent); }
+header.top {
+  padding: 26px max(20px, calc((100% - 1160px) / 2));
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  justify-content: space-between;
+  background: transparent;
+  color: var(--ink);
+}
+header.top a { color: inherit; text-decoration: none; }
+header.top nav { display: flex; gap: 14px; flex-wrap: wrap; }
+header.top nav a { border-bottom: 1px solid transparent; }
+header.top nav a:hover { border-bottom-color: currentColor; }
+h1 { margin: 0; font-size: 24px; }
+h2 { font-size: 17px; margin: 0 0 12px; }
+.sub, .hint { color: var(--muted); font-size: 13px; }
+.badge {
+  padding: 7px 11px;
+  border-radius: 99px;
+  background: #12372d;
+  color: var(--accent);
+  font-weight: bold;
+}
+main { max-width: 1160px; margin: 24px auto; padding: 0 20px 48px; }
+.card, .login {
+  background: rgba(16, 31, 44, 0.94);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 18px;
+  box-shadow: 0 8px 28px #0003;
+}
+.login { display: flex; gap: 10px; align-items: flex-end; margin-bottom: 20px; }
+.grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.metric b { display: block; font-size: 28px; margin-top: 8px; }
+.metric span { color: var(--muted); }
+.two { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 14px; margin-top: 14px; }
+.table, .db-table-wrap { max-height: 330px; overflow: auto; }
+.db-table-wrap { max-height: 560px; }
+.db-table-wrap thead th { position: sticky; top: 0; background: #101f2c; z-index: 2; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 9px; text-align: right; border-bottom: 1px solid #203a4e; vertical-align: top; }
+th { color: var(--muted); font-size: 12px; }
+.form, .stack { display: grid; gap: 10px; }
+.notice { margin: 14px 0; padding: 11px; border-radius: 8px; background: #112a3a; color: #cbe5f5; }
+.error { color: var(--bad); }
+.ok { color: var(--accent); }
+.chat { min-height: 220px; max-height: 390px; overflow: auto; background: #09151f; border: 1px solid #38546a; border-radius: 10px; padding: 10px; }
+.bubble { max-width: 86%; padding: 10px; margin: 7px 0; border-radius: 12px; white-space: pre-wrap; line-height: 1.45; }
+.me { margin-right: auto; background: #1d5b70; }
+.bot { margin-left: auto; background: #1d493a; }
+.radios { display: flex; gap: 12px; margin: 10px 0; flex-wrap: wrap; }
+.actions, form.filters { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 10px; align-items: flex-end; }
+label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); }
+input, textarea, select, button {
+  font: inherit;
+  margin-top: 6px;
+  padding: 10px;
+  border: 1px solid #38546a;
+  border-radius: 8px;
+  background: #09151f;
+  color: var(--ink);
+}
+input, textarea, select { width: 100%; }
+button, .button { width: auto; }
+button, .button {
+  background: #2cae83;
+  color: #041510;
+  font-weight: bold;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+  border: 0;
+}
+button.secondary, a.secondary, .button.secondary { background: #28465b; color: var(--ink); }
+button.danger { background: #b93636; color: white; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.login-wrap { max-width: 460px; margin: 12vh auto; }
+.tag { display: inline-block; padding: 1px 8px; border-radius: 999px; background: #12372d; font-size: 0.82rem; }
+.tag.warn { background: #3d3420; color: var(--warn); }
+.tag.error { background: #3d2020; color: var(--bad); }
+pre { white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; font-size: 0.82rem; direction: ltr; text-align: left; }
+.modal-back { position: fixed; inset: 0; background: #000b; display: grid; place-items: center; padding: 20px; z-index: 30; }
+.modal { width: min(760px, 100%); max-height: 86vh; overflow: auto; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
+@media (max-width: 800px) {
+  .grid, .two { grid-template-columns: 1fr; }
+  .login { display: grid; }
+}
