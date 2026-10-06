@@ -1512,6 +1512,42 @@ test("an existing open donation can be redirected to a named recipient", async (
   assert.equal(conversation.rows[0]!.pending_counterparty_name, "טל");
   assert.equal((await s.active(p)).length, 1);
 });
+test("AI donate.direct on an open donation skips photo and converts origin", async () => {
+  const p = phone();
+  const receiver = phone();
+  await message(p, "יש לי שולחן למסירה", [donate("שולחן", "table")]);
+  assert.equal((await s.active(p))[0]!.origin, "donation");
+  const named = await message(p, "אני רוצה למסור למישו ספציפי לטל", [
+    {
+      type: "donate",
+      items: [{ kind: "table", description: "שולחן", quantity: 1 }],
+      counterparty_phone: null,
+      counterparty_name: "טל",
+      direct: true,
+      free: true,
+      working: true,
+    },
+  ]);
+  assert.doesNotMatch(named.row.reply ?? "", /תמונה/);
+  assert.match(named.row.reply ?? "", /מספר הטלפון|כרטיס איש קשר/);
+  assert.equal((await s.active(p))[0]!.origin, "direct");
+  const linked = await message(p, "כרטיס איש קשר", [
+    {
+      type: "donate",
+      items: [{ kind: "table", description: "שולחן", quantity: 1 }],
+      counterparty_phone: receiver,
+      counterparty_name: "טל זולו",
+      direct: true,
+      free: true,
+      working: true,
+    },
+  ]);
+  assert.doesNotMatch(linked.row.reply ?? "", /תמונה/);
+  const saved = (await s.active(p))[0]!;
+  assert.equal(saved.origin, "direct");
+  assert.equal(saved.parties.find((party) => party.role === "receiver")?.phone, receiver);
+  assert.equal(saved.parties.find((party) => party.role === "receiver")?.name, "טל זולו");
+});
 test("receiver details wait for the counterparty created by the same AI plan", async () => {
   const donor = phone(), receiver = phone();
   const initial = await message(donor, "אני רוצה למסור מיטה");

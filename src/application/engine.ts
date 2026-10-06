@@ -35,6 +35,7 @@ import {
   OUTSIDE,
   isOperationsAlert,
   customerCancelIntent,
+  directHandoffIntent,
   mutable,
   nextQuestion,
   nextTuesday,
@@ -763,6 +764,14 @@ export class Engine {
   /** Open donation still missing its required photo, and this text is not a new request. */
   private holdingForPhoto(ctx: Context, text: string): boolean {
     if (!text.trim() || customerCancelIntent(text)) return false;
+    // A named/direct handoff must leave the photo hold so the recipient can
+    // be recorded — photo is not required for that path.
+    if (
+      directHandoffIntent(text) ||
+      ctx.conversation.pending_counterparty_name ||
+      ctx.conversation.pending_counterparty_phone
+    )
+      return false;
     const waiting = ctx.requests.some(
       (request) =>
         photoGate(request) &&
@@ -779,7 +788,12 @@ export class Engine {
     const planned = rulePlan(ctx);
     if (
       planned?.commands.some((command) =>
-        command.type === "donate" || command.type === "seek" || command.type === "cancel",
+        command.type === "donate" ||
+        command.type === "seek" ||
+        command.type === "cancel" ||
+        command.type === "counterparty" ||
+        command.type === "counterparty_candidate" ||
+        command.type === "confirm_counterparty",
       )
     )
       return false;
@@ -1152,7 +1166,11 @@ export class Engine {
             const handoffTransitionPlanned = plan.commands.some((candidate) =>
               candidate.type === "counterparty_candidate" ||
               candidate.type === "confirm_counterparty" ||
-              candidate.type === "counterparty"
+              candidate.type === "counterparty" ||
+              (candidate.type === "donate" &&
+                (candidate.direct === true ||
+                  Boolean(candidate.counterparty_name) ||
+                  Boolean(candidate.counterparty_phone)))
             );
             // Run the action-manager plan in dependency order. Do not drop or
             // skip commands for photo/status gates — those only shape the reply
@@ -1260,6 +1278,8 @@ export class Engine {
             }
             // After every command has been written, photo-first may still shape
             // the customer reply. It must never skip or discard AI DB writes.
+            // Named/direct handoffs (pending counterparty or donate.direct) never
+            // require a photo — only open donations without a recipient do.
             const explicitClarification = /כבר קיימת פנייה/.test(reply ?? "");
             if (
               request &&
@@ -1268,6 +1288,8 @@ export class Engine {
               request.origin === "donation" &&
               photoGate(request) &&
               !handoffTransitionPlanned &&
+              !ctx.conversation.pending_counterparty_name &&
+              !ctx.conversation.pending_counterparty_phone &&
               !["cancelled", "rejected", "human", "closed", "coordinated"].includes(
                 request.status,
               )

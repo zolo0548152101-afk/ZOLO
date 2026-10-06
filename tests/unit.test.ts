@@ -389,6 +389,7 @@ test("role approval records participation only and cannot approve a proposed dat
 test("an open donation that may help someone is not a direct handoff", () => {
   assert.equal(directHandoffIntent("יש לי כיסא למסירה, אולי יעזור למישהו."), false);
   assert.equal(directHandoffIntent("יש לי כיסא למסור למישהו ספציפי."), true);
+  assert.equal(directHandoffIntent("אני רוצה למסור למישו ספציפי"), true);
   assert.equal(directHandoffIntent("שלום, יש לי ספה תקינה למסירה לטל 0536662043"), true);
   assert.equal(directHandoffIntent("יש לי מיטה למסירה"), false);
 });

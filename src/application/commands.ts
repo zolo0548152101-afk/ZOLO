@@ -229,6 +229,8 @@ export class Commands {
       if (sameOpenRequest) {
         // Action manager asked to donate again for the same open item —
         // refresh that request's items instead of refusing the write.
+        // When the plan is a named/direct handoff, also convert the open
+        // donation so photo-first no longer applies.
         const existing = await this.s.request(sameOpenRequest.id, c, true);
         mutable(existing);
         existing.items = items.map((item, index) => ({
@@ -240,11 +242,47 @@ export class Commands {
               ? (item.working ?? existing.items[index]?.working ?? true)
               : (item.working ?? existing.items[index]?.working ?? null),
         }));
+        if (direct && isDonor) {
+          existing.origin = "direct";
+          for (const item of existing.items)
+            if (item.working === null) item.working = true;
+          if (other && !existing.parties.some((entry) => entry.role === "receiver")) {
+            const receiverPhone = suppliedPhone(ctx, other);
+            const receiver = party("receiver", receiverPhone, receiverPhone === phone);
+            if (cmd.type === "donate" && cmd.counterparty_name)
+              receiver.name = cmd.counterparty_name;
+            existing.parties.push(receiver);
+            if (existing.parties.length === 2 && existing.parties[0]!.phone === existing.parties[1]!.phone)
+              existing.represents_both_parties = true;
+          }
+        }
         await this.s.save(c, existing);
         await c.query(
           "UPDATE conversations SET selected_request_id=$2 WHERE id=$1",
           [ctx.conversation.id, existing.id],
         );
+        if (
+          direct &&
+          isDonor &&
+          cmd.type === "donate" &&
+          !other &&
+          cmd.counterparty_name &&
+          !existing.parties.some((entry) => entry.role === "receiver")
+        ) {
+          await c.query(
+            "UPDATE conversations SET pending_counterparty_name=$2,version=version+1 WHERE id=$1",
+            [ctx.conversation.id, cmd.counterparty_name],
+          );
+          ctx.conversation.pending_counterparty_name = cmd.counterparty_name;
+        }
+        if (other || (cmd.type === "donate" && cmd.counterparty_phone)) {
+          await c.query(
+            "UPDATE conversations SET pending_counterparty_name=NULL,pending_counterparty_phone=NULL,version=version+1 WHERE id=$1",
+            [ctx.conversation.id],
+          );
+          ctx.conversation.pending_counterparty_name = null;
+          ctx.conversation.pending_counterparty_phone = null;
+        }
         return output(nextQuestion(existing, phone).text, existing);
       }
       const r = await this.s.create(
