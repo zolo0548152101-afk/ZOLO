@@ -671,6 +671,34 @@ test("chaos conversation limits", async () => {
   assert.deepEqual(failed, []);
 });
 
+test("rewording cannot drop a required photo request", async () => {
+  const phone = canonicalPhone("0530000999");
+  const previous = ai.phraseReplyText;
+  ai.phraseReplyText =
+    "אי אפשר לאסוף היום. ההובלות מתקיימות רק ביום שלישי בין 16:00 ל-20:00.";
+  const turn = async (text: string): Promise<string> => {
+    const id = await ingest(phone, { text });
+    await identify(id);
+    await engine.process(id);
+    return replyOf(id);
+  };
+  try {
+    await purge(phone);
+    const alone = await turn("תבואו היום לקחת ספה מבית שאן");
+    assert.match(alone, /נא לשלוח תמונה/);
+    assert.match(alone, /שלישי/);
+    await purge(phone);
+    await turn("די עם השטויות תקבע לי כבר הובלה דחוף!!!!");
+    const afterPressure = await turn("תבואו היום לקחת ספה מבית שאן");
+    assert.match(afterPressure, /נא לשלוח תמונה/);
+    assert.match(afterPressure, /16:00/);
+    assert.doesNotMatch(afterPressure, /מתקיימות רק/);
+  } finally {
+    ai.phraseReplyText = previous;
+    try { await purge(phone); } catch { /* report the assertion first */ }
+  }
+});
+
 test("live AI-off rules: unclear handoff, outside towns, photo-first", async () => {
   const phone = canonicalPhone("0530000777");
   const planner = new OpenAIPlanner(cfg);

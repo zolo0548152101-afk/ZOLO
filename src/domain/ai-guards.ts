@@ -68,7 +68,29 @@ export function claimsOperationalOutcome(text: string): boolean {
 }
 
 /**
- * Prefer the phrased reply only when it does not invent a save/send/approval.
+ * A required line in the rule reply must still be recognizable after rewording.
+ * Photo and the condition question count in Hebrew and in the fixed translations.
+ */
+const REQUIRED_PHRASES: { canonical: RegExp; phrased: RegExp }[] = [
+  {
+    canonical: /תמונה|\bphoto\b|صورة|фото/iu,
+    phrased: /תמונה|\bphoto\b|صورة|фото/iu,
+  },
+  {
+    canonical: /האם הפריט תקין|תקין ושמיש|fully working|سليم وقابل|исправен/iu,
+    phrased: /תקין|fully working|usable|سليم|исправен/iu,
+  },
+];
+
+function dropsRequiredPhrase(canonical: string, phrased: string): boolean {
+  return REQUIRED_PHRASES.some(
+    (phrase) => phrase.canonical.test(canonical) && !phrase.phrased.test(phrased),
+  );
+}
+
+/**
+ * Prefer the phrased reply only when it does not invent a save/send/approval
+ * and does not drop a required line from the rule reply.
  * If the claim is already present in the canonical DB-backed sentence, allow it.
  */
 export function applyClaimGuard(
@@ -84,6 +106,7 @@ export function applyClaimGuard(
   );
   // Each claim token must already be in the committed sentence.
   // A proven operational result does not license extra claims.
-  if (extra.length) return { text: canonical, rejected: true };
+  if (extra.length || dropsRequiredPhrase(canonical, candidate))
+    return { text: canonical, rejected: true };
   return { text: candidate, rejected: false };
 }

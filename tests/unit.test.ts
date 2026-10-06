@@ -2000,6 +2000,40 @@ test("claim-guard drops invented save/approval claims", async () => {
   );
   assert.match(CLARIFY_REPLY, /כתוב את זה שוב/);
   assert.match(FAULT_REPLY, /תקלה/);
+  const withPhoto =
+    "אי אפשר לאסוף היום. ההובלות רק ביום שלישי בין 16:00 ל־20:00.\nבשמחה. כדי להמשיך, נא לשלוח תמונה של הפריט.";
+  const droppedPhoto =
+    "אי אפשר לאסוף היום. ההובלות מתקיימות רק ביום שלישי בין 16:00 ל-20:00.";
+  assert.equal(applyClaimGuard(withPhoto, droppedPhoto, false).text, withPhoto);
+  assert.equal(applyClaimGuard(withPhoto, droppedPhoto, false).rejected, true);
+  assert.match(
+    applyClaimGuard(withPhoto, "אי אפשר היום. נא לשלוח תמונה של הספה.", false).text,
+    /תמונה/,
+  );
+  assert.equal(
+    applyClaimGuard(
+      "Happy to help. To continue, please send a photo of the item.",
+      "Happy to help.",
+      false,
+    ).text,
+    "Happy to help. To continue, please send a photo of the item.",
+  );
+  assert.equal(
+    applyClaimGuard("بكل سرور. للمتابعة، أرسل صورة الغرض.", "بكل سرور.", false).text,
+    "بكل سرور. للمتابعة، أرسل صورة الغرض.",
+  );
+  assert.equal(
+    applyClaimGuard("Хорошо. Чтобы продолжить, пришлите фото предмета.", "Хорошо.", false).text,
+    "Хорошо. Чтобы продолжить, пришлите фото предмета.",
+  );
+  assert.equal(
+    applyClaimGuard("האם הפריט תקין ושמיש ב־100%?", "תודה.", false).text,
+    "האם הפריט תקין ושמיש ב־100%?",
+  );
+  assert.equal(
+    applyClaimGuard("Is the item fully working and usable?", "Thanks.", false).rejected,
+    true,
+  );
 });
 
 test("named outside towns reject in code, including English, and negation does not", () => {
