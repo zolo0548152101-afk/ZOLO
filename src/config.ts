@@ -22,6 +22,10 @@ const envSchema = z.object({
     .string()
     .default("pmpt_6a9d0c66737881938a0f60f5df9088cb0806a26699929a86"),
   OPENAI_PROMPT_VERSION: z.string().default("23"),
+  OPENAI_ACTION_PROMPT_ID: z.string().default("pmpt_6ac4b3be8364819792eb71678ff43d860158e8fba9d3028c"),
+  OPENAI_ACTION_PROMPT_VERSION: z.string().default("2"),
+  OPENAI_REPLY_PROMPT_ID: z.string().default("pmpt_6ac4b3eac0188197a14b3bb9bfe241300aa7ff5fad9655f3"),
+  OPENAI_REPLY_PROMPT_VERSION: z.string().default("2"),
   // Optional hosted prompt overrides. When empty, decode/phrase use the git
   // files prompts/decode.txt and prompts/phrase.txt via Responses instructions
   // (preferred — reusable OpenAI prompt objects are being deprecated).
@@ -111,6 +115,12 @@ const envSchema = z.object({
 export type Config = z.infer<typeof envSchema>;
 export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const c = envSchema.parse(env);
+  Object.assign(c, {
+    OPENAI_ACTION_PROMPT_ID: c.OPENAI_ACTION_PROMPT_ID || c.OPENAI_PROMPT_ID,
+    OPENAI_ACTION_PROMPT_VERSION: c.OPENAI_ACTION_PROMPT_VERSION || c.OPENAI_PROMPT_VERSION,
+    OPENAI_REPLY_PROMPT_ID: c.OPENAI_REPLY_PROMPT_ID || c.OPENAI_PROMPT_ID,
+    OPENAI_REPLY_PROMPT_VERSION: c.OPENAI_REPLY_PROMPT_VERSION || c.OPENAI_PROMPT_VERSION,
+  });
   const adminCapabilityTokens = [
     c.HAIM_ADMIN_TOKEN,
     c.HAIM_ADMIN_READONLY_TOKEN,

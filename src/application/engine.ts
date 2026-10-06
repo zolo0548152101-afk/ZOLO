@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { Store, type Outbound } from "../infrastructure/store.js";
 import { Commands, type Outcome } from "./commands.js";
-import { selectDecodePlan, type Planner } from "../infrastructure/ai.js";
+import { type Planner } from "../infrastructure/ai.js";
 import { rulePlan } from "./rule-planner.js";
 import {
   DeliveryError,
@@ -34,8 +34,6 @@ import {
   HUMAN_REPLY,
   OUTSIDE,
   isOperationsAlert,
-  namedOutsideSettlement,
-  mentionedReviewSettlement,
   customerCancelIntent,
   grounded,
   mutable,
@@ -53,7 +51,6 @@ import {
   conversationLanguage,
   isCustomerClarify,
   localizeCustomer,
-  pressureCanonical,
 } from "../domain/customer-language.js";
 
 export class Engine {
@@ -367,26 +364,6 @@ export class Engine {
       }
     }
     const text = ctx.message.transcript ?? ctx.message.text;
-    const outsideTown = this.outsideTown(ctx, text);
-    if (outsideTown) {
-      await this.finishOutside(id, outsideTown);
-      return;
-    }
-    // Cancel and impossible-window pressure are rules, not model choices.
-    // They run before any planner so an AI plan cannot turn them into the
-    // next collection question or into "לא הבנתי".
-    if (customerCancelIntent(text)) {
-      const planned = rulePlan(ctx);
-      if (planned?.commands.some((command) => command.type === "cancel")) {
-        await this.finish(id, planned);
-        return;
-      }
-    }
-    const pressure = pressureCanonical(text);
-    if (pressure) {
-      await this.finishPressure(id, pressure);
-      return;
-    }
     if (
       ctx.message.kind === "image" ||
       ctx.message.kind === "location" ||
@@ -394,34 +371,6 @@ export class Engine {
       ctx.conversation.mode === "human"
     ) {
       await this.finish(id, null);
-      return;
-    }
-    // An unknown town after ב is a review, even when decode is not understood.
-    // Hard-reject towns are already finished above; allowed towns stay on the rules.
-    const reviewTown = await this.unknownReviewTown(text);
-    if (reviewTown) {
-      const planned = rulePlan(ctx);
-      const attached =
-        planned?.commands.some(
-          (command) =>
-            command.type === "escalate" ||
-            (command.type === "details" && command.settlement === reviewTown),
-        ) ?? false;
-      await this.finish(
-        id,
-        attached && planned
-          ? planned
-          : {
-              commands: [
-                {
-                  type: "escalate",
-                  request_number: null,
-                  reason: "borderline_area",
-                },
-              ],
-              evidence: text.slice(0, 2000),
-            },
-      );
       return;
     }
     let plan = ctx.message.ai_plan;
@@ -451,27 +400,14 @@ export class Engine {
       return;
     }
     if (!plan) {
-      // A non-Hebrew donate/seek that the rules already understand must not
-      // wait for the model. A "not understood" decode used to fall through
-      // to the Hebrew clarify line.
-      const foreignOpening = this.foreignOpening(ctx);
-      if (foreignOpening) {
-        await this.finish(id, foreignOpening);
-        return;
-      }
       try {
         // Free-form Hebrew is decoded by the AI. Hard limits stay in
         // commands.apply / policies after the model returns commands.
         const response = await this.ai.plan(ctx);
         supersessionCheck = true;
         const parsed = planSchema.parse(response.plan);
-        const selected = selectDecodePlan(
-          { understood: response.understood, plan: parsed },
-          rulePlan(ctx),
-          ctx,
-        );
-        plan = selected.plan;
-        if (selected.understood && selected.useAi && !grounded(plan, text))
+        plan = parsed;
+        if (response.understood && !grounded(plan, text))
           throw new AppError("ungrounded_tool");
         await this.s.pool.query(
           `UPDATE messages SET ai_plan=$2,plan_versions=$3,ai_metadata=$4 WHERE id=$1 AND ai_plan IS NULL AND processed_at IS NULL`,
@@ -482,14 +418,7 @@ export class Engine {
             JSON.stringify(response.metadata),
           ],
         );
-        if (!selected.understood) {
-          if (this.holdingForPhoto(ctx, text)) {
-            await this.finishPhotoHold(id);
-            return;
-          }
-          await this.finishUnclear(id);
-          return;
-        }
+        if (!response.understood) throw new AppError("action_manager_unclear");
       } catch (e) {
         if (e instanceof AppError && e.code === "ai_disabled") {
           const deterministic = rulePlan(ctx);
@@ -818,123 +747,6 @@ export class Engine {
       await c.query(
         "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
         [id, photoReply],
-      );
-    });
-  }
-
-  /** Place after ב that service_locations does not list as allowed or outside. */
-  private async unknownReviewTown(text: string): Promise<string | null> {
-    const town = mentionedReviewSettlement(text);
-    if (!town) return null;
-    const region = await this.s.region(this.s.pool, town);
-    return region.decision === "review" ? town : null;
-  }
-
-  /** Named out-of-area town in the customer's own words, before any plan runs. */
-  private outsideTown(ctx: Context, text: string): string | null {
-    if (!text.trim() || customerCancelIntent(text)) return null;
-    const town = namedOutsideSettlement(text);
-    if (!town) return null;
-    if (/(?:תיקון|טעיתי)/u.test(text)) {
-      const own = ctx.requests
-        .flatMap((request) => request.parties)
-        .find((party) => party.phone === ctx.conversation.phone && party.settlement);
-      if (own?.settlement && !namedOutsideSettlement(own.settlement)) return null;
-    }
-    return town;
-  }
-
-  private async finishOutside(id: string, settlement: string): Promise<void> {
-    await this.s.transaction(async (c) => {
-      const ctx = await this.s.context(id, c, true);
-      if (ctx.message.processed_at) return;
-      const phone = ctx.conversation.phone;
-      const terminal = ["coordinated", "closed", "cancelled", "rejected", "cancel_pending"];
-      const open =
-        ctx.requests.find(
-          (request) =>
-            request.id === ctx.conversation.selected_request_id &&
-            !terminal.includes(request.status),
-        ) ??
-        ctx.requests.find((request) => !terminal.includes(request.status)) ??
-        null;
-      let request: Request | null = null;
-      if (open) {
-        request = await this.s.request(open.id, c, true);
-        if (!terminal.includes(request.status)) {
-          request.status = "rejected";
-          request.human_reason = null;
-          await this.s.save(c, request);
-        }
-      }
-      await this.s.event(
-        c,
-        ctx.message,
-        phone,
-        "outside_area_rejected",
-        { settlement },
-        request?.id ?? null,
-      );
-      const outsideReply = this.voiced(ctx, OUTSIDE);
-      await this.s.outbound(
-        c,
-        ctx.message,
-        { phone, text: outsideReply },
-        `reply:${id}`,
-        request?.id ?? null,
-      );
-      await c.query(
-        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
-        [id, outsideReply, "outside_area_rejected"],
-      );
-    });
-  }
-
-  /** Rules already opened a donate/seek in the customer's language. */
-  private foreignOpening(ctx: Context): Plan | null {
-    if (conversationLanguage(ctx) === "he") return null;
-    if (ctx.message.kind !== "text" && ctx.message.kind !== "voice") return null;
-    const planned = rulePlan(ctx);
-    if (
-      !planned?.commands.some(
-        (command) => command.type === "donate" || command.type === "seek",
-      )
-    )
-      return null;
-    return planned;
-  }
-
-  /** Polite limit or empathy, then the same next step. Not an unclear turn. */
-  private async finishPressure(id: string, canonical: string): Promise<void> {
-    await this.s.transaction(async (c) => {
-      const ctx = await this.s.context(id, c, true);
-      if (ctx.message.processed_at) return;
-      const terminal = ["coordinated", "closed", "cancelled", "rejected", "cancel_pending", "human"];
-      const open =
-        ctx.requests.find(
-          (request) =>
-            request.id === ctx.conversation.selected_request_id &&
-            !terminal.includes(request.status),
-        ) ??
-        ctx.requests.find((request) => !terminal.includes(request.status)) ??
-        null;
-      let body = canonical;
-      if (open && photoGate(open)) body = `${canonical}\n${PHOTO_FIRST}`;
-      else if (open) {
-        const question = nextQuestion(open, ctx.conversation.phone).text;
-        if (question) body = `${canonical}\n${question}`;
-      }
-      const text = this.voiced(ctx, body);
-      await this.s.outbound(
-        c,
-        ctx.message,
-        { phone: ctx.conversation.phone, text },
-        `reply:${id}`,
-        open?.id ?? null,
-      );
-      await c.query(
-        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
-        [id, text],
       );
     });
   }
@@ -1287,10 +1099,6 @@ export class Engine {
               return !actorRole || actorRole === command.role;
             });
             let index = 0;
-            const hasSameMessageDonorDetails = executableCommands.some(
-              (candidate) =>
-                candidate.type === "details" && candidate.role === "donor",
-            );
             const waitingForPhoto = ctx.requests.some(
               (candidate) =>
                 photoGate(candidate) &&
@@ -1318,16 +1126,6 @@ export class Engine {
               // Once an open donation is created, PHOTO-FIRST blocks every
               // later command in the same AI batch until an image arrives,
               // except donor details extracted from that same opening message.
-              if (
-                request &&
-                photoGate(request) &&
-                !handoffTransitionPlanned &&
-                command.type !== "details" &&
-                command.type !== "clarify_duplicate"
-              ) {
-                reply = PHOTO_FIRST;
-                break;
-              }
               ctx = await this.s.context(id, c);
               const result: Outcome = await this.commands.apply(
                 c,
@@ -1355,18 +1153,6 @@ export class Engine {
                 { command },
                 result.request?.id ?? null,
               );
-              // Open donations are PHOTO-FIRST. Do not let a multi-command
-              // prompt collect names/addresses before the required photo.
-              if (
-                command.type === "donate" &&
-                result.request &&
-                photoGate(result.request) &&
-                !handoffTransitionPlanned &&
-                !hasSameMessageDonorDetails
-              ) {
-                reply = PHOTO_FIRST;
-                break;
-              }
               for (const [n, notice] of result.notices.entries()) {
                 const dedupeKey = `notice:${id}:${index}:${n}`;
                 const outboxId = await this.s.outbound(
@@ -1387,10 +1173,9 @@ export class Engine {
               index++;
               if (reason || request?.status === "rejected") break;
             }
-            // Donor facts extracted from the opening message are retained, but
-            // the first operational gate remains the photo request. A later
-            // details command must not replace PHOTO-FIRST with a condition
-            // or another detail question.
+            // The action manager may save facts and the reply manager decides
+            // how to ask for the next missing fact. A photo requirement is a
+            // business constraint, not permission to discard other facts.
             const explicitClarification = /כבר קיימת פנייה/.test(reply ?? "");
             if (
               request &&
@@ -1592,9 +1377,14 @@ export class Engine {
         customerOutboxId,
         canonicalReply: reply,
         requestId: request?.id ?? null,
-        provenOperational:
-          request?.status === "coordinated" ||
-          deferredNotices.length > 0,
+        provenOperational: request?.status === "coordinated" || deferredNotices.length > 0,
+        operation: {
+          action_results: { intent, reason: reason ?? null },
+          request_status: request?.status ?? null,
+          request_number: request?.number ?? null,
+          persisted: !reason,
+          outbound_notices_queued: deferredNotices.length,
+        },
       };
     });
     if (committed) this.log.info(committed);
@@ -1610,10 +1400,13 @@ export class Engine {
       let text = committed.canonicalReply;
       let rejected = false;
       try {
-        const phrased = await this.ai.phraseReply(committed.canonicalReply, ctx);
+        const generated = await this.ai.reply(ctx, {
+          fallback: committed.canonicalReply,
+          operation: committed.operation,
+        });
         const guarded = applyClaimGuard(
           committed.canonicalReply,
-          phrased.text,
+          generated.text,
           Boolean(committed.provenOperational),
         );
         text = guarded.text;

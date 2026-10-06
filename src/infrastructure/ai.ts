@@ -14,7 +14,6 @@ import {
   type Plan,
   type Request,
 } from "../domain/types.js";
-import { nextQuestion } from "../domain/policies.js";
 import { conversationLanguage } from "../domain/customer-language.js";
 import { rulePlan } from "../application/rule-planner.js";
 
@@ -30,8 +29,8 @@ function loadPrompt(name: string): string {
   }
   throw new Error(`missing_prompt_file:${name}`);
 }
-const DECODE_PROMPT_TEXT = loadPrompt("decode.txt");
-const PHRASE_PROMPT_TEXT = loadPrompt("phrase.txt");
+const ACTION_PROMPT_TEXT = loadPrompt("haim-action.he.md");
+const REPLY_PROMPT_TEXT = loadPrompt("haim-reply.he.md");
 
 export interface DecodeResult {
   understood: boolean;
@@ -41,6 +40,10 @@ export interface DecodeResult {
 
 export interface Planner {
   plan(context: Context): Promise<DecodeResult>;
+  reply(
+    context: Context,
+    input: { operation: Record<string, unknown>; fallback: string },
+  ): Promise<{ text: string; metadata: Record<string, unknown> }>;
   phraseReply(
     canonical: string,
     context: Context,
@@ -53,14 +56,11 @@ export interface Planner {
   close(): Promise<void>;
 }
 
-const decodeResponseSchema = z
-  .object({
-    understood: z.boolean().default(true),
-    commands: z.array(z.unknown()).default([]),
-    evidence: z.string().default(""),
-    reply: z.string().optional(),
-  })
-  .passthrough();
+const decodeResponseSchema = z.strictObject({
+  commands: z.array(z.unknown()).min(1).max(5),
+  evidence: z.string().max(2000),
+});
+const replyResponseSchema = z.strictObject({ reply: z.string().trim().min(1).max(4000) });
 
 /** Legacy hosted-prompt shape still accepted while the decode prompt is rolled out. */
 const managedResponseSchema = z
@@ -126,101 +126,12 @@ function asCommands(raw: unknown[]): Command[] {
  * Prefer an explicit commands array. Fall back to legacy updates/actions only
  * for a few safe mappings while the hosted decode prompt is being published.
  */
-export function translate(
-  payload: unknown,
-  ctx: Context,
-  text: string,
-): { understood: boolean; plan: Plan } {
-  const decode = decodeResponseSchema.safeParse(payload);
-  if (decode.success && Array.isArray(decode.data.commands) && decode.data.commands.length) {
-    const commands = asCommands(decode.data.commands);
-    if (commands.length) {
-      return {
-        understood: decode.data.understood !== false,
-        plan: planSchema.parse({
-          commands,
-          evidence: (decode.data.evidence || text).slice(0, 2000),
-        }),
-      };
-    }
-  }
-
-  if (decode.success && decode.data.understood === false) {
-    return {
-      understood: false,
-      plan: { commands: [{ type: "next" }], evidence: text.slice(0, 2000) },
-    };
-  }
-
-  const managed = managedResponseSchema.safeParse(payload);
-  if (!managed.success) {
-    return {
-      understood: false,
-      plan: { commands: [{ type: "next" }], evidence: text.slice(0, 2000) },
-    };
-  }
-
-  if (managed.data.understood === false || managed.data.intent === "unclear") {
-    return {
-      understood: false,
-      plan: { commands: [{ type: "next" }], evidence: text.slice(0, 2000) },
-    };
-  }
-
-  if (managed.data.commands?.length) {
-    const commands = asCommands(managed.data.commands);
-    if (commands.length) {
-      return {
-        understood: true,
-        plan: planSchema.parse({
-          commands,
-          evidence: (managed.data.evidence || text).slice(0, 2000),
-        }),
-      };
-    }
-  }
-
-  const commands: Command[] = [];
-  const updates = managed.data.updates;
-  const actions = managed.data.actions;
-  const open = ctx.requests.find(
-    (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
-  );
-  const requestNumber = open?.number ?? null;
-
-  if (managedNeedsHuman(actions, updates)) {
-    commands.push({
-      type: "escalate",
-      request_number: requestNumber,
-      reason: "unclear",
-    });
-  } else if (action(actions, "approve_schedule") || updates["מועד"] || updates["proposed_run_date"]) {
-    const date =
-      (typeof updates["proposed_run_date"] === "string" &&
-        /^\d{4}-\d{2}-\d{2}$/.test(updates["proposed_run_date"])
-        ? updates["proposed_run_date"]
-        : null) ??
-      open?.proposed_run_date?.slice(0, 10) ??
-      null;
-    if (date && requestNumber)
-      commands.push({ type: "approve_schedule", request_number: requestNumber, date });
-  } else if (
-    action(actions, "approve_self") ||
-    boolValue(updates, "אישור") === true ||
-    /(?:מאשר|מאשרת)/u.test(text)
-  ) {
-    if (requestNumber)
-      commands.push({ type: "approve_self", request_number: requestNumber });
-  }
-
-  if (!commands.length) commands.push({ type: "next" });
-  return {
-    understood: true,
-    plan: planSchema.parse({
-      commands,
-      evidence: (managed.data.evidence || text).slice(0, 2000),
-    }),
-  };
+export function translate(payload: unknown, _ctx: Context, text: string): { understood: boolean; plan: Plan } {
+  const decoded = decodeResponseSchema.safeParse(payload);
+  if (!decoded.success) throw new AppError("invalid_action_plan");
+  const commands = asCommands(decoded.data.commands);
+  if (commands.length !== decoded.data.commands.length) throw new AppError("invalid_action_plan");
+  return { understood: true, plan: planSchema.parse({ commands, evidence: decoded.data.evidence || text.slice(0, 2000) }) };
 }
 
 function snapshotForDecode(ctx: Context) {
@@ -247,9 +158,7 @@ function snapshotForDecode(ctx: Context) {
       status: r.status,
       origin: r.origin,
     })),
-    missing: selected
-      ? nextQuestion(selected, ctx.conversation.phone).text
-      : null,
+    missing: null,
     history: ctx.history,
   };
 }
@@ -259,29 +168,11 @@ type PromptSource =
   | { mode: "git"; instructions: string };
 
 function decodePromptSource(c: Config): PromptSource {
-  if (c.OPENAI_DECODE_PROMPT_ID)
-    return {
-      mode: "hosted",
-      id: c.OPENAI_DECODE_PROMPT_ID,
-      version: c.OPENAI_DECODE_PROMPT_VERSION || "1",
-    };
-  // Do not fall back to the legacy phrasing hosted prompt — it fights decode.
-  // OpenAI is also deprecating reusable prompt objects; git instructions are
-  // the supported production path.
-  return { mode: "git", instructions: DECODE_PROMPT_TEXT };
+  return { mode: "hosted", id: c.OPENAI_ACTION_PROMPT_ID, version: c.OPENAI_ACTION_PROMPT_VERSION };
 }
 
-function phrasePromptSource(c: Config, canonical: string): PromptSource {
-  if (c.OPENAI_PHRASE_PROMPT_ID)
-    return {
-      mode: "hosted",
-      id: c.OPENAI_PHRASE_PROMPT_ID,
-      version: c.OPENAI_PHRASE_PROMPT_VERSION || "1",
-    };
-  return {
-    mode: "git",
-    instructions: PHRASE_PROMPT_TEXT.replace("{{canonical}}", canonical),
-  };
+function phrasePromptSource(c: Config, _canonical: string): PromptSource {
+  return { mode: "hosted", id: c.OPENAI_REPLY_PROMPT_ID, version: c.OPENAI_REPLY_PROMPT_VERSION };
 }
 
 function extractPhraseText(raw: string, fallback: string): string {
@@ -309,7 +200,7 @@ function phraseUserContent(mode: PromptSource["mode"], canonical: string, ctx: C
   if (mode === "git")
     return `נסח מחדש בלבד את המשפט המחייב. החזר טקסט בלבד, בלי JSON.${languageLine}`;
   return JSON.stringify({
-    phrase_instructions: PHRASE_PROMPT_TEXT.replace("{{canonical}}", canonical),
+    phrase_instructions: REPLY_PROMPT_TEXT.replace("{{canonical}}", canonical),
     customer_message: {
       current_message: `נסח מחדש בלבד: ${canonical}${languageLine}`,
       recent_history: ctx.history,
@@ -433,7 +324,7 @@ export class OpenAIPlanner implements Planner {
             source.mode === "git"
               ? `Return JSON only for this decode request:\n${JSON.stringify(userPayload)}`
               : JSON.stringify({
-                  decode_instructions: DECODE_PROMPT_TEXT,
+                  decode_instructions: ACTION_PROMPT_TEXT,
                   ...userPayload,
                 }),
         },
@@ -447,30 +338,60 @@ export class OpenAIPlanner implements Planner {
       throw new AppError("invalid_managed_prompt_response");
     }
     const translated = translate(payload, ctx, text);
-    // AI decode is primary when it returns runnable commands. rulePlan remains
-    // the safety net for unclear/empty AI output and for opening turns where
-    // the model returned only details without donate/seek.
-    const deterministic = rulePlan(ctx);
-    const selected = selectDecodePlan(translated, deterministic, ctx);
-    const { plan, useAi, understood } = selected;
     return {
-      understood,
-      plan,
+      understood: translated.understood,
+      plan: translated.plan,
       metadata: {
         provider: "openai_responses_decode",
         prompt_mode: source.mode,
-        prompt_id: source.mode === "hosted" ? source.id : "git:prompts/decode.txt",
+        prompt_id: source.mode === "hosted" ? source.id : "git:prompts/haim-action.he.md",
         prompt_version: source.mode === "hosted" ? source.version : "git",
         model: this.c.OPENAI_MODEL,
-        action_source: useAi
-          ? "ai_decode"
-          : deterministic
-            ? "ai_decode_bridged_rules"
-            : translated.understood === false
-              ? "ai_decode_unclear"
-              : "ai_decode",
-        understood,
-        bridged_rules: !useAi && Boolean(deterministic),
+        action_source: "ai_action_manager",
+        understood: translated.understood,
+        bridged_rules: false,
+        response_id: response.id,
+        elapsed_ms: Date.now() - started,
+        usage: response.usage,
+      },
+    };
+  }
+
+  async reply(
+    ctx: Context,
+    input: { operation: Record<string, unknown>; fallback: string },
+  ): Promise<{ text: string; metadata: Record<string, unknown> }> {
+    if (!this.c.AI_ENABLED)
+      return { text: input.fallback, metadata: { provider: "fallback", ai_enabled: false } };
+    const started = Date.now();
+    const response = await this.client.responses.create({
+      model: this.c.OPENAI_MODEL,
+      prompt: { id: this.c.OPENAI_REPLY_PROMPT_ID, version: this.c.OPENAI_REPLY_PROMPT_VERSION },
+      input: [{
+        role: "user",
+        content: JSON.stringify({
+          sender_phone: ctx.conversation.phone,
+          current_message: ctx.message.transcript ?? ctx.message.text,
+          history: ctx.history,
+          requests: ctx.requests,
+          candidates: ctx.candidates,
+          operation_result: input.operation,
+          fallback_reply: input.fallback,
+        }),
+      }],
+      reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },
+    });
+    let payload: unknown;
+    try { payload = JSON.parse(response.output_text); } catch { throw new AppError("invalid_reply_manager_response"); }
+    const parsed = replyResponseSchema.safeParse(payload);
+    if (!parsed.success) throw new AppError("invalid_reply_manager_response");
+    return {
+      text: parsed.data.reply,
+      metadata: {
+        provider: "openai_responses_reply_manager",
+        prompt_id: this.c.OPENAI_REPLY_PROMPT_ID,
+        prompt_version: this.c.OPENAI_REPLY_PROMPT_VERSION,
+        model: this.c.OPENAI_MODEL,
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,
@@ -543,7 +464,7 @@ export class OpenAIPlanner implements Planner {
             source.mode === "git"
               ? `נסח הודעת WhatsApp קצרה ואנושית לצד השני מהמשפט המחייב. החזר טקסט בלבד, בלי JSON.\nנמען: ${notice.phone}`
               : JSON.stringify({
-                  phrase_instructions: PHRASE_PROMPT_TEXT.replace(
+                  phrase_instructions: REPLY_PROMPT_TEXT.replace(
                     "{{canonical}}",
                     notice.text,
                   ),
