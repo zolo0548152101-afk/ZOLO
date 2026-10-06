@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import OpenAI from "openai";
+import { zodTextFormat } from "openai/helpers/zod";
 import { z } from "zod";
 import type { Config } from "../config.js";
 import {
@@ -57,7 +58,7 @@ export interface Planner {
 }
 
 const decodeResponseSchema = z.strictObject({
-  commands: z.array(z.unknown()).min(1).max(5),
+  commands: z.array(commandSchema).min(1).max(5),
   evidence: z.string().max(2000),
 });
 const replyResponseSchema = z.strictObject({ reply: z.string().trim().min(1).max(4000) });
@@ -319,7 +320,7 @@ export class OpenAIPlanner implements Planner {
         ? { prompt: { id: source.id, version: source.version } }
         : {
             instructions: source.instructions,
-            text: { format: { type: "json_object" as const } },
+            text: { format: zodTextFormat(decodeResponseSchema, "haim_action_plan") },
           }),
       input: [
         {
