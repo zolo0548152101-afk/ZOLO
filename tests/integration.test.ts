@@ -1547,6 +1547,41 @@ test("AI donate.direct on an open donation skips photo and converts origin", asy
   assert.equal(saved.origin, "direct");
   assert.equal(saved.parties.find((party) => party.role === "receiver")?.phone, receiver);
   assert.equal(saved.parties.find((party) => party.role === "receiver")?.name, "טל זולו");
+  const again = await message(p, "לטל זולו שוב", [
+    {
+      type: "donate",
+      items: [{ kind: "table", description: "שולחן", quantity: 1 }],
+      counterparty_phone: receiver,
+      counterparty_name: "טל זולו",
+      direct: true,
+      free: true,
+      working: true,
+    },
+  ]);
+  assert.doesNotMatch(again.row.reply ?? "", /תמונה/);
+  assert.match(again.row.reply ?? "", /כבר רשומים|נפנה/);
+});
+test("AI donate with only counterparty_name converts open donation without direct flag", async () => {
+  const p = phone();
+  await message(p, "יש לי כיסא למסירה", [donate("כיסא", "chairs")]);
+  const named = await message(p, "למסור לדינה", [
+    {
+      type: "donate",
+      items: [{ kind: "chairs", description: "כיסא", quantity: 1 }],
+      counterparty_phone: null,
+      counterparty_name: "דינה",
+      direct: false,
+      free: true,
+      working: null,
+    },
+  ]);
+  assert.doesNotMatch(named.row.reply ?? "", /תמונה/);
+  assert.equal((await s.active(p))[0]!.origin, "direct");
+  const conversation = await pool.query<{ pending_counterparty_name: string | null }>(
+    "SELECT pending_counterparty_name FROM conversations cv JOIN contacts c ON c.id=cv.contact_id WHERE c.phone=$1",
+    [p],
+  );
+  assert.equal(conversation.rows[0]!.pending_counterparty_name, "דינה");
 });
 test("receiver details wait for the counterparty created by the same AI plan", async () => {
   const donor = phone(), receiver = phone();

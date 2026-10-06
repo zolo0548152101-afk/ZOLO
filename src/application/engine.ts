@@ -1277,10 +1277,12 @@ export class Engine {
               }
             }
             // After every command has been written, photo-first may still shape
-            // the customer reply. It must never skip or discard AI DB writes.
-            // Named/direct handoffs (pending counterparty or donate.direct) never
-            // require a photo — only open donations without a recipient do.
-            const explicitClarification = /כבר קיימת פנייה/.test(reply ?? "");
+            // the customer reply for a true open donation. It must never skip
+            // AI DB writes, and it must never override a continuing direct/
+            // named-handoff reply (pending counterparty or origin=direct).
+            const explicitClarification = /כבר קיימת פנייה|הפרטים האלה כבר רשומים/.test(
+              reply ?? "",
+            );
             if (
               request &&
               !reason &&

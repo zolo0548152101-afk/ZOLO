@@ -163,7 +163,13 @@ export class Commands {
       const items = cmd.items.map(asItem);
       const isDonor = cmd.type === "donate",
         other = isDonor ? cmd.counterparty_phone : cmd.donor_phone,
-        direct = Boolean(other) || (cmd.type === "donate" && cmd.direct === true);
+        // A named recipient from the action manager is a direct handoff even
+        // when the model omitted direct:true — persist that, do not keep the
+        // open-donation photo loop.
+        direct =
+          Boolean(other) ||
+          (cmd.type === "donate" &&
+            (cmd.direct === true || Boolean(cmd.counterparty_name)));
       // Action manager chose donate/receive — persist it. Do not re-judge
       // donor intent from the raw customer wording.
       if (cmd.type === "donate")
@@ -227,12 +233,14 @@ export class Commands {
         if (duplicate.rows[0]) sameOpenRequest = await this.s.request(duplicate.rows[0].id, c);
       }
       if (sameOpenRequest) {
-        // Action manager asked to donate again for the same open item —
-        // refresh that request's items instead of refusing the write.
-        // When the plan is a named/direct handoff, also convert the open
-        // donation so photo-first no longer applies.
+        // Persist every field the action manager sent. Refreshing the same
+        // open item must never drop direct/name/phone — that freezes the chat
+        // on photo while the AI already named a recipient.
         const existing = await this.s.request(sameOpenRequest.id, c, true);
         mutable(existing);
+        const beforeOrigin = existing.origin;
+        const beforeReceiver = existing.parties.find((entry) => entry.role === "receiver");
+        const beforePendingName = ctx.conversation.pending_counterparty_name;
         existing.items = items.map((item, index) => ({
           ...(existing.items[index] ?? asItem(item)),
           ...item,
@@ -246,12 +254,24 @@ export class Commands {
           existing.origin = "direct";
           for (const item of existing.items)
             if (item.working === null) item.working = true;
-          if (other && !existing.parties.some((entry) => entry.role === "receiver")) {
+          if (other) {
             const receiverPhone = suppliedPhone(ctx, other);
-            const receiver = party("receiver", receiverPhone, receiverPhone === phone);
-            if (cmd.type === "donate" && cmd.counterparty_name)
-              receiver.name = cmd.counterparty_name;
-            existing.parties.push(receiver);
+            const linked = existing.parties.find((entry) => entry.role === "receiver");
+            if (!linked) {
+              const receiver = party("receiver", receiverPhone, receiverPhone === phone);
+              if (cmd.type === "donate" && cmd.counterparty_name)
+                receiver.name = cmd.counterparty_name;
+              existing.parties.push(receiver);
+            } else if (linked.phone === receiverPhone) {
+              if (cmd.type === "donate" && cmd.counterparty_name)
+                linked.name = cmd.counterparty_name;
+            } else {
+              throw new AppError(
+                "party_already_linked",
+                409,
+                "הצד השני כבר מקושר לפנייה. שינוי זה דורש טיפול אנושי.",
+              );
+            }
             if (existing.parties.length === 2 && existing.parties[0]!.phone === existing.parties[1]!.phone)
               existing.represents_both_parties = true;
           }
@@ -283,7 +303,22 @@ export class Commands {
           ctx.conversation.pending_counterparty_name = null;
           ctx.conversation.pending_counterparty_phone = null;
         }
-        return output(nextQuestion(existing, phone).text, existing);
+        const q = nextQuestion(existing, phone);
+        const unchangedDirect =
+          beforeOrigin === existing.origin &&
+          beforeReceiver?.phone ===
+            existing.parties.find((entry) => entry.role === "receiver")?.phone &&
+          beforeReceiver?.name ===
+            existing.parties.find((entry) => entry.role === "receiver")?.name &&
+          beforePendingName === ctx.conversation.pending_counterparty_name;
+        // Same facts again: keep the conversation moving with the next missing
+        // detail instead of looping on the opening photo ask.
+        if (unchangedDirect && existing.origin === "direct")
+          return output(
+            `הפרטים האלה כבר רשומים אצלנו. ${q.text}`.trim(),
+            existing,
+          );
+        return output(q.text, existing);
       }
       const r = await this.s.create(
         c,
