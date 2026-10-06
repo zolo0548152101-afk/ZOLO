@@ -625,6 +625,18 @@ export class Engine {
         open?.id ?? null,
       );
       await c.query(
+        "INSERT INTO command_results(message_id,command,result) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
+        [
+          id,
+          JSON.stringify({ fault: true, code: errorCode(error) }),
+          JSON.stringify({
+            reply: faultReply,
+            intent: "fault",
+            code: errorCode(error),
+          }),
+        ],
+      );
+      await c.query(
         "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
         [id, faultReply, "openai_failure_escalated"],
       );
@@ -788,27 +800,37 @@ export class Engine {
           )
         : { rows: [] as { id: string }[] };
       if (newer.rows[0]) {
-        const successor = newer.rows[0].id;
-        await c.query(
-          "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id=$1 AND processed_at IS NULL",
-          [id, `superseded_by:${successor}`],
+        const successorId = newer.rows[0].id;
+        const successor = await c.query<{ kind: string }>(
+          "SELECT kind FROM messages WHERE id=$1",
+          [successorId],
         );
-        await c.query(
-          `UPDATE conversation_turns SET status='superseded',completed_at=clock_timestamp()
-             WHERE id=(SELECT turn_id FROM messages WHERE id=$1)`,
-          [id],
-        );
-        await this.s.event(c, ctx.message, "system", "turn_superseded", {
-          successor_message_id: successor,
-        });
-        return {
-          trace_id: ctx.message.trace_id,
-          message_id: id,
-          mode: ctx.message.mode,
-          stage: "superseded",
-          request_number: null,
-          code: "turn_superseded",
-        };
+        const successorKind = successor.rows[0]?.kind ?? "text";
+        // A pending image/voice/location follow-up must not cancel the older
+        // text turn that opens the request. FIFO processes media after this
+        // commit. Only a newer free-text turn may supersede a stale AI plan.
+        if (successorKind === "text") {
+          await c.query(
+            "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id=$1 AND processed_at IS NULL",
+            [id, `superseded_by:${successorId}`],
+          );
+          await c.query(
+            `UPDATE conversation_turns SET status='superseded',completed_at=clock_timestamp()
+               WHERE id=(SELECT turn_id FROM messages WHERE id=$1)`,
+            [id],
+          );
+          await this.s.event(c, ctx.message, "system", "turn_superseded", {
+            successor_message_id: successorId,
+          });
+          return {
+            trace_id: ctx.message.trace_id,
+            message_id: id,
+            mode: ctx.message.mode,
+            stage: "superseded",
+            request_number: null,
+            code: "turn_superseded",
+          };
+        }
       }
       let reply: string | null = null,
         request: Request | null = null,
@@ -1411,6 +1433,15 @@ export class Engine {
         );
         text = guarded.text;
         rejected = guarded.rejected;
+        // Reply manager must not reintroduce a photo gate the business commit
+        // already cleared (e.g. after a same-turn counterparty handoff).
+        if (
+          /תמונה/u.test(text) &&
+          !/תמונה/u.test(committed.canonicalReply)
+        ) {
+          text = committed.canonicalReply;
+          rejected = true;
+        }
       } catch (e) {
         this.log.error({
           code: errorCode(e),

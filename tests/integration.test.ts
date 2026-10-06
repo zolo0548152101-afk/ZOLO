@@ -288,7 +288,7 @@ test("שלום: no request, no AI, exactly one shadow reply and zero channel sen
   assert.equal(channel.sent.length, 0);
   assert.equal((await outputs(m.id))[0]!.state, "shadow");
 });
-test("donor bed without receiver PHOTO FIRST; prohibited early details never stored", async () => {
+test("donor bed without receiver PHOTO FIRST; opening facts retained before photo", async () => {
   const p = phone(),
     m = await message(p, "יש לי מיטה למסירה, שמי בדיקה במחולה בכניסה", [
       donate(),
@@ -296,8 +296,11 @@ test("donor bed without receiver PHOTO FIRST; prohibited early details never sto
     ]);
   const r = (await s.active(p))[0]!;
   assert.equal(m.row.reply, PHOTO_FIRST);
-  assert.equal(r.parties[0]!.name, null);
-  assert.equal(r.parties[0]!.settlement, null);
+  // PHOTO-FIRST is the next customer ask; facts from the opening message are
+  // still persisted so they are not re-asked after the image arrives.
+  assert.equal(r.parties[0]!.name, "בדיקה");
+  assert.equal(r.parties[0]!.settlement, "מחולה");
+  assert.equal(r.parties[0]!.address, "בכניסה");
   assert.equal(r.parties[0]!.approved_by, p);
   assert.equal(r.items[0]!.working, null);
 });
@@ -884,11 +887,12 @@ test("direct handoff keeps supplied pickup and extracts a later labeled donor na
   cmd.direct = true;
   const started = await message(
     donor,
-    "יש לי שידה למסירה לטל, נראה לי המספר שלו מצורף. היא בבית שאן ברחוב העלייה 7 קומה 2",
+    `יש לי שידה למסירה לטל ${receiver}. היא בבית שאן ברחוב העלייה 7 קומה 2`,
     [cmd],
   );
   assert.ok(started.row.reply);
   let request = (await s.active(donor))[0]!;
+  assert.ok(request, "direct handoff must open a request");
   await message(
     donor,
     "בית שאן, רחוב העלייה 7, קומה 2",
@@ -2121,12 +2125,12 @@ test("duplicate OpenAI/tool execution uses one persisted plan and one command re
   );
   assert.equal(rows.rows[0]!.n, 1);
   assert.equal((await s.active(p)).length, 1);
+  // Ungrounded forged evidence must escalate to admin rather than execute.
   const forged: Plan = {
     commands: [donate(), donate()],
     evidence: "יש לי מיטה למסירה",
   };
-  const secondText = "אני רוצה למסור פריט מיוחד";
-  const second = await enqueue(phone(), secondText);
+  const second = await enqueue(phone(), "אני רוצה למסור פריט מיוחד");
   ai.plans.set(second.id, forged);
   await engine.process(second.id, true);
   assert.equal(
