@@ -221,6 +221,17 @@ export class Engine {
       [trigger.phone],
     );
     if (!pending.rows[0]) return;
+    // Simple rule: if more inbound text arrived before the previous reply was
+    // delivered, drop the unsent reply and answer once for the merged burst.
+    // A task must never stay frozen behind an old unsent outbox.
+    await this.s.pool.query(
+      `UPDATE outbox
+          SET state='cancelled', format_state='ready', error_code='awaiting_merged_reply'
+        WHERE phone=$1
+          AND state IN ('pending','sending','uncertain')
+          AND text NOT LIKE $2`,
+      [trigger.phone, "נדרשת בדיקת מערכת%"],
+    );
     // Admit the whole quiet-window candidate set durably before any text is
     // merged. This preserves the exact message sequence across worker restarts
     // and also records media/location messages that are intentionally processed
@@ -625,6 +636,71 @@ export class Engine {
           [messageId],
         )
         .catch(() => undefined);
+    }
+  }
+
+  /**
+   * Never freeze WhatsApp delivery for a phone. Cancel the failed/uncertain
+   * outbox row, release the send singleton, and queue the next pending reply.
+   */
+  async releaseFailedSend(outboxId: string, error: unknown): Promise<void> {
+    const code = errorCode(error);
+    try {
+      await this.s.transaction(async (c) => {
+        const row = await c.query<{ phone: string; state: string }>(
+          "SELECT phone, state FROM outbox WHERE id=$1 FOR UPDATE",
+          [outboxId],
+        );
+        const out = row.rows[0];
+        if (!out) return;
+        if (["sent", "shadow", "simulation", "cancelled"].includes(out.state)) {
+          await this.s.queue.releaseSingleton("send", out.phone, [
+            "failed",
+            "retry",
+          ]);
+          return;
+        }
+        await c.query(
+          `UPDATE outbox
+              SET state='cancelled', format_state='ready', error_code=$2
+            WHERE id=$1 AND state IN ('pending','sending','uncertain','failed')`,
+          [outboxId, code || "send_released"],
+        );
+        await this.s.queue.releaseSingleton("send", out.phone, [
+          "failed",
+          "retry",
+        ]);
+        const next = await c.query<{ id: string }>(
+          `SELECT id FROM outbox
+            WHERE phone=$1 AND state='pending' AND format_state='ready'
+            ORDER BY seq LIMIT 1`,
+          [out.phone],
+        );
+        if (next.rows[0]) {
+          const job = await this.s.queue.send(
+            c,
+            "send",
+            { id: next.rows[0].id },
+            out.phone,
+          );
+          await c.query("UPDATE outbox SET job_id=$2 WHERE id=$1", [
+            next.rows[0].id,
+            job,
+          ]);
+        }
+        this.log.error({
+          code: "send_released_without_freeze",
+          outbox_id: outboxId,
+          phone: out.phone,
+          cause: code,
+        });
+      });
+    } catch (e) {
+      this.log.error({
+        code: errorCode(e),
+        stage: "release_failed_send",
+        outbox_id: outboxId,
+      });
     }
   }
 
@@ -1698,17 +1774,46 @@ export class Engine {
       // only meaningful for live rows still waiting on notice phrasing.
       if (out.format_state === "pending")
         throw new RetryableError("notice_format_pending");
+      // Never freeze behind uncertain/failed older rows — abandon them and
+      // continue with the current reply.
+      await c.query(
+        `UPDATE outbox
+            SET state='cancelled', format_state='ready', error_code='stale_send_released'
+          WHERE phone=$1 AND seq<$2 AND state IN ('uncertain','failed')`,
+        [out.phone, out.seq],
+      );
       const older = await c.query(
-        "SELECT 1 FROM outbox WHERE phone=$1 AND seq<$2 AND state IN ($3,$4,$5,$6) LIMIT 1",
-        [out.phone, out.seq, "pending", "sending", "uncertain", "failed"],
+        "SELECT 1 FROM outbox WHERE phone=$1 AND seq<$2 AND state IN ($3,$4) LIMIT 1",
+        [out.phone, out.seq, "pending", "sending"],
       );
       if (older.rowCount) throw new RetryableError("earlier_send_pending");
       if (out.state === "sending" || out.state === "uncertain") {
+        // Do not park the phone on delivery_uncertain — cancel and move on.
         await c.query(
-          "UPDATE outbox SET state='uncertain',error_code='reconcile_required' WHERE id=$1",
+          `UPDATE outbox
+              SET state='cancelled', format_state='ready', error_code='delivery_uncertain_released'
+            WHERE id=$1`,
           [id],
         );
-        return { ...out, state: "uncertain" };
+        const next = await c.query<{ id: string }>(
+          `SELECT id FROM outbox
+            WHERE phone=$1 AND state='pending' AND format_state='ready'
+            ORDER BY seq LIMIT 1`,
+          [out.phone],
+        );
+        if (next.rows[0]) {
+          const job = await this.s.queue.send(
+            c,
+            "send",
+            { id: next.rows[0].id },
+            out.phone,
+          );
+          await c.query("UPDATE outbox SET job_id=$2 WHERE id=$1", [
+            next.rows[0].id,
+            job,
+          ]);
+        }
+        return null;
       }
       if (out.mode !== "live") {
         await c.query(
@@ -1736,8 +1841,6 @@ export class Engine {
       return out;
     });
     if (!claimed) return;
-    if (claimed.state === "uncertain")
-      throw new RetryableError("delivery_uncertain");
     let providerId: string;
     try {
       let media: { bytes: Buffer; mime: string; filename: string } | undefined;

@@ -143,7 +143,15 @@ export class Runtime {
           "send",
           settings,
           async (jobs) => {
-            for (const j of jobs) await engine.send(j.data.id);
+            for (const j of jobs) {
+              try {
+                await engine.send(j.data.id);
+              } catch (error) {
+                // Never leave a failed send job freezing this phone's FIFO.
+                if (j.retryCount < j.retryLimit) throw error;
+                await engine.releaseFailedSend(j.data.id, error);
+              }
+            }
           },
         );
         if (this.config.INTEGRATION_DISPATCH) {
