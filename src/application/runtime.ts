@@ -395,6 +395,7 @@ export class Runtime {
       [this.workerId],
     );
     await this.unblockFailedConversations();
+    await this.unblockFailedSends();
     if (this.config.INTEGRATION_DISPATCH) await this.recoverIntegrationQueue();
   }
   /**
@@ -408,6 +409,67 @@ export class Runtime {
       if (job.messageId)
         await this.engine.releaseFailedTurn(job.messageId, new Error("fifo_failed_job"));
       await this.queue.releaseSingleton("conversation", job.singletonKey, ["failed"]);
+    }
+  }
+  /**
+   * key_strict_fifo on send means a failed delivery job blocks every later
+   * WhatsApp reply for that phone. Release the singleton, cancel ops-alert
+   * rows that should never reach customers, and re-queue the head pending
+   * customer outbox so chat replies resume.
+   */
+  private async unblockFailedSends(): Promise<void> {
+    if (!this.queue || !this.store) return;
+    const failed = await this.queue.failedJobs("send");
+    const phones = new Set<string>();
+    for (const job of failed) {
+      phones.add(job.singletonKey);
+      if (job.messageId) {
+        await this.pool.query(
+          `UPDATE outbox
+              SET state=CASE
+                    WHEN state IN ('sending','uncertain') THEN 'pending'
+                    ELSE state
+                  END,
+                  error_code=COALESCE(NULLIF(error_code,''), 'send_fifo_released'),
+                  format_state=CASE
+                    WHEN format_state='pending' THEN 'ready'
+                    ELSE format_state
+                  END
+            WHERE id=$1 AND state IN ('pending','sending','uncertain','failed')`,
+          [job.messageId],
+        );
+      }
+      await this.queue.releaseSingleton("send", job.singletonKey, ["failed"]);
+    }
+    // Ops alerts must never occupy a customer send FIFO head.
+    await this.pool.query(
+      `UPDATE outbox
+          SET state='cancelled', error_code='ops_alert_customer_blocked'
+        WHERE state IN ('pending','sending','uncertain','failed')
+          AND text LIKE $1
+          AND phone <> $2`,
+      [`${"נדרשת בדיקת מערכת"}%`, this.config.ADMIN_PHONE],
+    );
+    for (const phone of phones) {
+      const head = await this.pool.query<{ id: string }>(
+        `SELECT id FROM outbox
+          WHERE phone=$1 AND state='pending' AND format_state='ready'
+          ORDER BY seq LIMIT 1`,
+        [phone],
+      );
+      if (!head.rows[0]) continue;
+      await this.store.transaction(async (c) => {
+        const jobId = await this.queue!.send(
+          c,
+          "send",
+          { id: head.rows[0]!.id },
+          phone,
+        );
+        await c.query("UPDATE outbox SET job_id=$2 WHERE id=$1", [
+          head.rows[0]!.id,
+          jobId,
+        ]);
+      });
     }
   }
   async check(): Promise<void> {

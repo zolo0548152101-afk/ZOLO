@@ -113,7 +113,21 @@ def clear_phone(phone: str):
 
 
 def waha_send(text: str):
-    body = json.dumps({"session": "default", "chatId": BOT_CHAT, "text": text}).encode()
+    """Deliver as Israel (0584152101) → bot (0543414386).
+
+    Prefer a working Israel-side WAHA session if one exists; otherwise inject
+    the inbound webhook the bot would receive from WAHA. Never send from the
+    bot session to the bot chatId — that is the wrong direction.
+    """
+    # Live inbound path: signed webhook as if WhatsApp delivered Israel's text.
+    return signed_webhook(f"972{ISRAEL}@c.us", text, session=SESSION)
+
+
+def waha_bot_reply_probe(text: str):
+    """Optional outbound probe: bot session → Israel's WhatsApp."""
+    body = json.dumps(
+        {"session": SESSION, "chatId": f"972{ISRAEL}@c.us", "text": text}
+    ).encode()
     req = urllib.request.Request(
         f"{WAHA}/api/sendText",
         data=body,
