@@ -1420,16 +1420,20 @@ export class Engine {
       // replaced by free model text; claim-guard handles phrasing instead.
       void protectedReply;
       if (reason) await this.alert(c, ctx, reason, reply, request);
+      // Every processed customer turn must produce an outbound reply.
+      if (!reply?.trim())
+        reply = request
+          ? nextQuestion(request, phone).text || CLARIFY_REPLY
+          : CLARIFY_REPLY;
       let customerOutboxId: string | null = null;
-      if (reply)
-        customerOutboxId = await this.s.outbound(
-          c,
-          ctx.message,
-          { phone, text: reply },
-          `reply:${id}`,
-          request?.id ?? null,
-          "pending",
-        );
+      customerOutboxId = await this.s.outbound(
+        c,
+        ctx.message,
+        { phone, text: reply },
+        `reply:${id}`,
+        request?.id ?? null,
+        "pending",
+      );
       await c.query(
         "INSERT INTO command_results(message_id,command,result) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
         [
@@ -1505,7 +1509,7 @@ export class Engine {
         const successorId = newerText.rows[0].id;
         await this.s.transaction(async (c) => {
           await c.query(
-            "UPDATE outbox SET state='cancelled',error_code='reply_merged_into_next_turn' WHERE id=$1 AND format_state='pending'",
+            "UPDATE outbox SET state='cancelled',format_state='ready',error_code='reply_merged_into_next_turn' WHERE id=$1",
             [committed.customerOutboxId],
           );
           await c.query(
@@ -1560,7 +1564,7 @@ export class Engine {
         );
         if (stillNewer.rows[0]) {
           await c.query(
-            "UPDATE outbox SET state='cancelled',error_code='reply_merged_into_next_turn' WHERE id=$1 AND format_state='pending'",
+            "UPDATE outbox SET state='cancelled',format_state='ready',error_code='reply_merged_into_next_turn' WHERE id=$1",
             [committed.customerOutboxId],
           );
           await c.query(
@@ -1664,10 +1668,12 @@ export class Engine {
         out.chat_id = `972${out.phone}@c.us`;
         await c.query("UPDATE outbox SET chat_id=$2 WHERE id=$1", [id, out.chat_id]);
       }
-      if (out.format_state === "pending")
-        throw new RetryableError("notice_format_pending");
       if (["sent", "shadow", "simulation", "cancelled"].includes(out.state))
         return null;
+      // Cancelled/sent rows must never block the send FIFO. Format pending is
+      // only meaningful for live rows still waiting on notice phrasing.
+      if (out.format_state === "pending")
+        throw new RetryableError("notice_format_pending");
       const older = await c.query(
         "SELECT 1 FROM outbox WHERE phone=$1 AND seq<$2 AND state IN ($3,$4,$5,$6) LIMIT 1",
         [out.phone, out.seq, "pending", "sending", "uncertain", "failed"],

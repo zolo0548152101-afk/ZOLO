@@ -455,7 +455,7 @@ export class Runtime {
       "SELECT count(*)::int n FROM outbox WHERE state='uncertain'",
     );
     const formatting = await this.pool.query<{ n: number }>(
-      "SELECT count(*)::int n FROM outbox WHERE format_state='pending' AND created_at<clock_timestamp()-interval '30 seconds'",
+      "SELECT count(*)::int n FROM outbox WHERE format_state='pending' AND state <> 'cancelled' AND created_at<clock_timestamp()-interval '30 seconds'",
     );
     const failedMedia = await this.pool.query<{ n: number }>(
       "SELECT count(*)::int n FROM messages WHERE media_state='pending' AND received_at<clock_timestamp()-interval '60 seconds'",
