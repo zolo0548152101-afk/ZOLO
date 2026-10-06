@@ -452,12 +452,13 @@ export class Engine {
         if (!response.understood) throw new AppError("action_manager_unclear");
       } catch (e) {
         // Transient API failures retry once. After the last attempt, a
-        // well-formed opening may still complete via rulePlan. AppErrors
-        // (ungrounded/forged evidence, malformed output) escalate to a human.
+        // well-formed opening or seeker follow-up may still complete via
+        // rulePlan. Forged/ungrounded evidence always escalates to a human.
         if (!lastAiAttempt && !(e instanceof AppError))
           throw new RetryableError("openai_retry");
-        const allowRulesFallback =
-          !(e instanceof AppError) || e.code === "ai_disabled";
+        const allowRulesFallback = !(
+          e instanceof AppError && e.code === "ungrounded_tool"
+        );
         const deterministic = allowRulesFallback ? rulePlan(ctx) : null;
         if (deterministic) {
           plan = deterministic;
