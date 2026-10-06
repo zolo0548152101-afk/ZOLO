@@ -16,7 +16,6 @@ import {
   canonicalPhone,
   donationIntent,
   ambiguousStreetCity,
-  explicitApproval,
   itemError,
   ownParty,
   mutable,
@@ -227,11 +226,27 @@ export class Commands {
         );
         if (duplicate.rows[0]) sameOpenRequest = await this.s.request(duplicate.rows[0].id, c);
       }
-      if (sameOpenRequest && !/(?:פנייה\s+חדשה|פריט\s+נוסף|עוד\s+פריט)/.test(text))
-        return output(
-          `כבר קיימת פנייה ${sameOpenRequest.number} עבור פריט דומה. אם זו פנייה חדשה או פריט נוסף, כתוב זאת במפורש.`,
-          sameOpenRequest,
+      if (sameOpenRequest) {
+        // Action manager asked to donate again for the same open item —
+        // refresh that request's items instead of refusing the write.
+        const existing = await this.s.request(sameOpenRequest.id, c, true);
+        mutable(existing);
+        existing.items = items.map((item, index) => ({
+          ...(existing.items[index] ?? asItem(item)),
+          ...item,
+          free: item.free === false ? false : true,
+          working:
+            direct
+              ? (item.working ?? existing.items[index]?.working ?? true)
+              : (item.working ?? existing.items[index]?.working ?? null),
+        }));
+        await this.s.save(c, existing);
+        await c.query(
+          "UPDATE conversations SET selected_request_id=$2 WHERE id=$1",
+          [ctx.conversation.id, existing.id],
         );
+        return output(nextQuestion(existing, phone).text, existing);
+      }
       const r = await this.s.create(
         c,
         items,
@@ -512,12 +527,7 @@ export class Commands {
     }
     if (cmd.type === "cancel") {
       if (cmd.choice === "ask") {
-        if (!/(?:לבטל|ביטול|מבטל|מבטלת)/.test(text))
-          throw new AppError(
-            "cancellation_not_explicit",
-            400,
-            "נא לציין במפורש אם ברצונך לבטל את ההובלה.",
-          );
+        // Trust action-manager cancel choice; do not re-parse customer text.
         const base = r.run_date ?? nextTuesday(this.now()).date,
           after = new Date(base + "T12:00:00Z");
         after.setUTCDate(after.getUTCDate() + 7);
@@ -542,12 +552,6 @@ export class Commands {
         );
       }
       if (cmd.choice === "final") {
-        if (
-          !/(?:סופית|סופי|לגמרי|לא רלוונטי|לבטל|ביטול|תבטלו|תבטל|מבטל|מבטלת)/.test(
-            text,
-          )
-        )
-          throw new AppError("final_cancellation_not_explicit");
         const wasCoordinated = r.status === "coordinated";
         const items = r.items.map((item) => item.description).join(", ") || "פריט";
         r.status = "cancelled";
@@ -570,8 +574,6 @@ export class Commands {
       }
       if (r.status !== "cancel_pending")
         throw new AppError("cancellation_not_pending", 409);
-      if (!/(?:שבוע הבא|רלוונטי|כן)/.test(text))
-        throw new AppError("reschedule_not_explicit");
       r.status = "awaiting_approval";
       r.proposed_run_date = null;
       for (const p of r.parties) {
@@ -795,16 +797,7 @@ export class Commands {
       // contact that person. The initiating party must explicitly choose the
       // verification-message option first.
     } else if (cmd.type === "approve_self") {
-      if (
-        !explicitApproval(text) ||
-        (/^כן(?:[.! ]|\s+(?:תודה|בטח|ברור))*$/u.test(text.trim()) &&
-          !/(?:נא לאשר|לאשר מחדש)/.test(ctx.history.at(-1)?.content ?? ""))
-      )
-        throw new AppError(
-          "explicit_approval_required",
-          400,
-          "נא לאשר במפורש את חלקך בפנייה.",
-        );
+      // Trust action-manager approval command; do not re-litigate wording.
       for (const p of r.parties)
         if (p.phone === phone) {
           p.approved_at ??= this.now().toISOString();
@@ -812,19 +805,7 @@ export class Commands {
         }
     } else if (cmd.type === "approve_schedule") {
       const proposedDate = r.proposed_run_date?.slice(0, 10) ?? null;
-      const [year, month, day] = proposedDate?.split("-") ?? [];
-      const label = proposedDate ? `${day}/${month}/${year}` : null;
-      if (
-        !proposedDate ||
-        cmd.date !== proposedDate ||
-        !explicitApproval(text) ||
-        !label ||
-        !(
-          (ctx.history.at(-1)?.content.includes(label) &&
-            /(?:נא לאשר את המועד|נא לאשר במפורש|נדרש עדיין אישור(?: שלך)?|ממתינים לאישור המועד)/.test(ctx.history.at(-1)?.content ?? "")) ||
-          text.includes(label)
-        )
-      )
+      if (!proposedDate || cmd.date !== proposedDate)
         throw new AppError(
           "schedule_approval_mismatch",
           400,

@@ -41,7 +41,6 @@ import {
   readyToProposeSchedule,
 } from "../domain/policies.js";
 import {
-  applyClaimGuard,
   CLARIFY_REPLY,
   FAULT_REPLY,
   probeReply,
@@ -446,7 +445,12 @@ export class Engine {
             JSON.stringify(response.metadata),
           ],
         );
-        if (!response.understood) throw new AppError("action_manager_unclear");
+        // If the model returned actionable commands, execute them even when
+        // understood=false. Only fall through to rules when there is nothing
+        // to write.
+        const actionable = plan.commands.some((command) => command.type !== "next");
+        if (!response.understood && !actionable)
+          throw new AppError("action_manager_unclear");
       } catch (e) {
         // Transient API failures retry once. After the last attempt, rulePlan
         // is only a fallback when the action manager itself failed — never to
@@ -1527,14 +1531,11 @@ export class Engine {
           operation: committed.operation,
         });
         replyMeta = generated.metadata;
-        const guarded = applyClaimGuard(
-          committed.canonicalReply,
-          generated.text,
-          Boolean(committed.provenOperational),
-          "changedFields" in committed ? committed.changedFields : [],
-        );
-        text = guarded.text;
-        rejected = guarded.rejected;
+        // Reply manager owns customer wording. Do not replace it with the
+        // canonical template when the model produced text.
+        const phrased = (generated.text ?? "").trim();
+        text = phrased || committed.canonicalReply;
+        rejected = false;
       } catch (e) {
         this.log.error({
           code: errorCode(e),
@@ -1620,8 +1621,7 @@ export class Engine {
             ? await this.s.request(item.requestId)
             : null;
           text = (await this.ai.phraseNotice(ctx, item.notice, request)).text;
-          const guarded = applyClaimGuard(item.notice.text, text, true);
-          text = guarded.text;
+          text = text.trim() || item.notice.text;
         } catch (e) {
           state = "failed";
           this.log.error({ code: errorCode(e), outbox_id: item.outboxId, stage: "notice_format" });
