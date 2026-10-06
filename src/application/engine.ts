@@ -35,6 +35,7 @@ import {
   OUTSIDE,
   isOperationsAlert,
   namedOutsideSettlement,
+  mentionedReviewSettlement,
   customerCancelIntent,
   grounded,
   mutable,
@@ -393,6 +394,34 @@ export class Engine {
       ctx.conversation.mode === "human"
     ) {
       await this.finish(id, null);
+      return;
+    }
+    // An unknown town after ב is a review, even when decode is not understood.
+    // Hard-reject towns are already finished above; allowed towns stay on the rules.
+    const reviewTown = await this.unknownReviewTown(text);
+    if (reviewTown) {
+      const planned = rulePlan(ctx);
+      const attached =
+        planned?.commands.some(
+          (command) =>
+            command.type === "escalate" ||
+            (command.type === "details" && command.settlement === reviewTown),
+        ) ?? false;
+      await this.finish(
+        id,
+        attached && planned
+          ? planned
+          : {
+              commands: [
+                {
+                  type: "escalate",
+                  request_number: null,
+                  reason: "borderline_area",
+                },
+              ],
+              evidence: text.slice(0, 2000),
+            },
+      );
       return;
     }
     let plan = ctx.message.ai_plan;
@@ -791,6 +820,14 @@ export class Engine {
         [id, photoReply],
       );
     });
+  }
+
+  /** Place after ב that service_locations does not list as allowed or outside. */
+  private async unknownReviewTown(text: string): Promise<string | null> {
+    const town = mentionedReviewSettlement(text);
+    if (!town) return null;
+    const region = await this.s.region(this.s.pool, town);
+    return region.decision === "review" ? town : null;
   }
 
   /** Named out-of-area town in the customer's own words, before any plan runs. */

@@ -21,6 +21,7 @@ import {
   namedOutsideSettlement,
   customerCancelIntent,
   mentionedAllowedSettlement,
+  mentionedReviewSettlement,
   donationIntent,
   seekIntent,
   PHOTO_FIRST,
@@ -2045,8 +2046,73 @@ test("named outside towns reject in code, including English, and negation does n
   assert.equal(mentionedAllowedSettlement("ליד בית שאן"), null);
   assert.equal(mentionedAllowedSettlement("אני בבית שאן"), "בית שאן");
   assert.equal(mentionedAllowedSettlement("in Beit Shean"), "בית שאן");
+  assert.equal(mentionedReviewSettlement("שלום רוצה הובלה בגלבוע"), "גלבוע");
+  assert.equal(mentionedReviewSettlement("רוצה למסור ספה בגלבוע"), "גלבוע");
+  assert.equal(mentionedReviewSettlement("רוצה למסור ספה בנצרת"), null);
+  assert.equal(mentionedReviewSettlement("רוצה למסור ספה בבית שאן"), null);
+  assert.equal(mentionedReviewSettlement("רחוב הגלבוע 9"), null);
+  assert.equal(mentionedReviewSettlement("גר בגלבוע 9 קומה 3"), null);
+  assert.equal(mentionedReviewSettlement("יש לי מיטה למסירה בשכונת הפועלים בלבד"), null);
+  assert.equal(mentionedReviewSettlement("נא להמשיך בבקשה"), null);
+  assert.equal(mentionedReviewSettlement("בעצם קומה 5"), null);
+  assert.equal(mentionedReviewSettlement("תתקשרו בשבילי"), null);
+  assert.equal(mentionedReviewSettlement("לא בגלבוע"), null);
+  assert.equal(mentionedReviewSettlement("מלל אקראי בלי בקשה ברורה כרגע"), null);
+  assert.equal(mentionedReviewSettlement("ביטול"), null);
   assert.equal(customerCancelIntent("תבטלו בבקשה"), true);
   assert.equal(customerCancelIntent("לא רלוונטי יותר"), true);
+});
+
+test("an unknown town after ב is review, including transport without an item", () => {
+  const phone = "584152101";
+  const planFor = (text: string) =>
+    rulePlan({
+      conversation: {
+        id: "c",
+        phone,
+        chat_id: `${phone}@c.us`,
+        mode: "bot",
+        selected_request_id: null,
+        version: 1,
+        pending_counterparty_name: null,
+        pending_counterparty_phone: null,
+      },
+      requests: [],
+      candidates: [],
+      history: [],
+      message: {
+        id: "m",
+        seq: "1",
+        external_id: "e",
+        trace_id: "t",
+        mode: "shadow",
+        chat_id: `${phone}@c.us`,
+        phone,
+        kind: "text",
+        text,
+        contacts: [],
+        location: null,
+        media_url: null,
+        media_id: null,
+        media_state: "none",
+        transcript: null,
+        processed_at: null,
+        ai_plan: null,
+      },
+    } as unknown as Context);
+  const transport = planFor("שלום רוצה הובלה בגלבוע");
+  assert.equal(transport?.commands[0]?.type, "escalate");
+  if (transport?.commands[0]?.type === "escalate")
+    assert.equal(transport.commands[0].reason, "borderline_area");
+  const sofa = planFor("רוצה למסור ספה בגלבוע");
+  assert.equal(sofa?.commands[0]?.type, "donate");
+  const sofaTown = sofa?.commands.find((command) => command.type === "details");
+  assert.equal(sofaTown?.type, "details");
+  if (sofaTown?.type === "details") assert.equal(sofaTown.settlement, "גלבוע");
+  const allowed = planFor("יש לי מיטה למסירה בבית שאן");
+  const allowedTown = allowed?.commands.find((command) => command.type === "details");
+  if (allowedTown?.type === "details") assert.equal(allowedTown.settlement, "בית שאן");
+  assert.equal(planFor("שלום, אני רוצה למסור כיסא בנצרת")?.commands.some((command) => command.type === "escalate"), false);
 });
 
 test("rules understand microwave, English donate, last floor, and cancel", () => {

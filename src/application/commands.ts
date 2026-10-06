@@ -302,8 +302,18 @@ export class Commands {
       );
       return output(nextQuestion(r, phone).text, r);
     }
-    if (cmd.type === "escalate" && !ctx.requests.length)
-      return { ...output(HUMAN_REPLY), humanReason: cmd.reason };
+    if (cmd.type === "escalate" && !ctx.requests.length) {
+      if (cmd.reason !== "borderline_area")
+        return { ...output(HUMAN_REPLY), humanReason: cmd.reason };
+      const r = await this.s.create(c, [], [party("donor", phone)], "donation");
+      r.status = "human";
+      r.human_reason = "borderline_area";
+      await c.query(
+        "UPDATE conversations SET selected_request_id=$2 WHERE id=$1",
+        [ctx.conversation.id, r.id],
+      );
+      return { ...output(HUMAN_REPLY, r), humanReason: "borderline_area" };
+    }
     if (cmd.type === "next" && !ctx.requests.length) {
       const town = mentionedAllowedSettlement(text);
       if (town && !donationIntent(text))

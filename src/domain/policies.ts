@@ -222,6 +222,92 @@ export function mentionedAllowedSettlement(text: string): string | null {
   }
   return null;
 }
+
+/** Words after ב that are not a place: "בחינם", "בבקשה", "בעצם", "בשבילי". */
+const NOT_A_PLACE = new Set([
+  "חינם",
+  "בקשה",
+  "גלל",
+  "בוקר",
+  "ערב",
+  "לילה",
+  "צהריים",
+  "קומה",
+  "דירה",
+  "בית",
+  "שכונה",
+  "שכונת",
+  "רחוב",
+  "שיכון",
+  "שלישי",
+  "רביעי",
+  "חמישי",
+  "שישי",
+  "ראשון",
+  "שני",
+  "שבת",
+  "שמחה",
+  "תמונה",
+  "אזור",
+  "סביבה",
+  "עמק",
+  "דרך",
+  "מקום",
+  "זמן",
+  "יום",
+  "שבוע",
+  "חודש",
+  "כלל",
+  "סדר",
+  "דיוק",
+  "כיף",
+  "תודה",
+  "עבר",
+  "עתיד",
+  "כסף",
+  "מחיר",
+  "וידאו",
+  "וואטסאפ",
+  "טלפון",
+  "מספר",
+  "פריט",
+  "רהיט",
+  "כניסה",
+  "לבד",
+  "עצם",
+  "שבילי",
+  "חוץ",
+  "פנים",
+  "פועלים",
+]);
+
+/**
+ * A place written after ב that is neither an allowed town nor a hard-reject
+ * outside town. "רחוב הגלבוע" and "בגלבוע 9" stay streets. The caller checks
+ * service_locations; a name that is not there goes to review.
+ */
+export function mentionedReviewSettlement(text: string): string | null {
+  if (!text.trim()) return null;
+  if (namedOutsideSettlement(text) || mentionedAllowedSettlement(text)) return null;
+  // Only a transport/donation sentence. Bare ב-words such as ביטול or ברורה are not towns.
+  if (!donationIntent(text) && !/(?:הובלה|הובלות)/u.test(norm(text))) return null;
+  const normalized = norm(text);
+  const street = streetPhrase(normalized);
+  const scanned = street ? normalized.replace(street, " ") : normalized;
+  const pattern = /(?:^|[^א-ת])ב([א-ת]{3,})(?=$|[^א-ת])/gu;
+  let found: string | null = null;
+  for (const match of scanned.matchAll(pattern)) {
+    const name = match[1];
+    if (!name || NOT_A_PLACE.has(name)) continue;
+    const prefixAt = match[0].startsWith("ב") ? 0 : match[0].indexOf("ב");
+    const betAt = (match.index ?? 0) + prefixAt;
+    if (mentionIsNegated(scanned, betAt)) continue;
+    const after = scanned.slice(betAt + name.length + 1);
+    if (/^\s*\d/u.test(after)) continue;
+    found = name;
+  }
+  return found;
+}
 export function directHandoffIntent(t: string): boolean {
   const text = norm(t);
   // A common direct-handoff sentence names the recipient and explains their

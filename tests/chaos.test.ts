@@ -699,6 +699,70 @@ test("rewording cannot drop a required photo request", async () => {
   }
 });
 
+test("unknown town after ב goes to review, not clarify or photo-first", async () => {
+  const phone = canonicalPhone("0530000666");
+  const planner = new OpenAIPlanner(cfg);
+  const off = new Engine(store, planner, channel, storage, log, () => monday);
+  const turn = async (text: string): Promise<string> => {
+    const id = await ingest(phone, { text });
+    await identify(id);
+    await off.processNext(id);
+    return replyOf(id);
+  };
+  const latest = async (): Promise<{ status: string; reason: string | null; kind: string | null } | undefined> => {
+    const row = await pool.query<{ status: string; reason: string | null; kind: string | null }>(
+      `SELECT r.status, r.human_reason AS reason, i.kind
+         FROM requests r
+         JOIN request_parties p ON p.request_id=r.id AND p.role='donor'
+         JOIN contacts co ON co.id=p.contact_id
+         LEFT JOIN request_items i ON i.request_id=r.id AND i.position=0
+        WHERE co.phone=$1
+        ORDER BY r.number DESC LIMIT 1`,
+      [phone],
+    );
+    return row.rows[0];
+  };
+  const alertsFor = async (): Promise<number> => {
+    const alerts = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM outbox
+        WHERE phone=$1 AND text LIKE 'נדרש טיפול אנושי%'
+          AND text LIKE '%borderline_area%' AND text LIKE $2`,
+      [cfg.ADMIN_PHONE, `%${phone}%`],
+    );
+    return alerts.rows[0]?.n ?? 0;
+  };
+  try {
+    await purge(phone);
+    const transport = await turn("שלום רוצה הובלה בגלבוע");
+    assert.equal(transport, HUMAN_REPLY);
+    assert.notEqual(transport, CLARIFY_REPLY);
+    assert.notEqual(transport, PHOTO_FIRST);
+    assert.notEqual(transport, OUTSIDE);
+    const transportRow = await latest();
+    assert.equal(transportRow?.status, "human");
+    assert.equal(transportRow?.reason, "borderline_area");
+    assert.equal(await alertsFor(), 1);
+    await purge(phone);
+    const sofa = await turn("רוצה למסור ספה בגלבוע");
+    assert.equal(sofa, HUMAN_REPLY);
+    assert.doesNotMatch(sofa, /תמונה|לא הבנתי|לא נוכל/);
+    const sofaRow = await latest();
+    assert.equal(sofaRow?.status, "human");
+    assert.equal(sofaRow?.reason, "borderline_area");
+    assert.equal(sofaRow?.kind, "sofa");
+    assert.equal(await alertsFor(), 1);
+    await purge(phone);
+    const nazareth = await turn("שלום, אני רוצה למסור כיסא בנצרת");
+    assert.equal(nazareth, OUTSIDE);
+    await purge(phone);
+    const allowed = await turn("יש לי מיטה למסירה בבית שאן");
+    assert.equal(allowed, PHOTO_FIRST);
+  } finally {
+    try { await purge(phone); } catch { /* report the assertion first */ }
+    await planner.close();
+  }
+});
+
 test("live AI-off rules: unclear handoff, outside towns, photo-first", async () => {
   const phone = canonicalPhone("0530000777");
   const planner = new OpenAIPlanner(cfg);

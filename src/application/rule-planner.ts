@@ -6,6 +6,7 @@ import {
   seekIntent,
   customerCancelIntent,
   mentionedAllowedSettlement,
+  mentionedReviewSettlement,
   directHandoffIntent,
   explicitApproval,
   ambiguousStreetCity,
@@ -628,13 +629,15 @@ export function rulePlan(ctx: Context): Plan | null {
         .join("\n");
       const settlement =
         mentionedAllowedSettlement(text) ?? mentionedAllowedSettlement(recent);
-      if (settlement)
+      const reviewSettlement = settlement ? null : mentionedReviewSettlement(text);
+      const place = settlement ?? reviewSettlement;
+      if (place)
         commands.push({
           type: "details",
           request_number: null,
           role: "donor",
           name: null,
-          settlement,
+          settlement: place,
           address: null,
           floor: floor(text),
         });
@@ -731,6 +734,11 @@ export function rulePlan(ctx: Context): Plan | null {
         /בית\s*שאן|beit\s+she'?an/i.test(text))
     )
       return plan(text, [{ type: "next" }]);
+    const reviewTown = mentionedReviewSettlement(text);
+    if (reviewTown)
+      return plan(text, [
+        { type: "escalate", request_number: null, reason: "borderline_area" },
+      ]);
     return null;
   }
 
