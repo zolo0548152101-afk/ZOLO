@@ -79,7 +79,8 @@ function kindAndDescription(text: string): { kind: ItemKind; description: string
     [/диван/iu, "sofa", "ספה"],
     [/\bbeds?\b/i, "bed", "מיטה"],
     [/\bsofas?\b|\bcouches?\b/i, "sofa", "ספה"],
-    [/מיטה/i, "bed", "מיטה"],
+    // מטה is the common missing-י typo for מיטה in live WhatsApp traffic.
+    [/מיטה|(?:^|[^\u05D0-\u05EA])מטה(?=[^\u05D0-\u05EA]|$)/iu, "bed", "מיטה"],
     [/שידה/i, "other", "שידה"],
     [/מנורת?\s*שולחן|מנורה/i, "other", "מנורה"],
     [/גוף\s*תאורה/i, "other", "גוף תאורה"],

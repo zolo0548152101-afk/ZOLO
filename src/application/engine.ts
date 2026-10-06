@@ -451,15 +451,13 @@ export class Engine {
         );
         if (!response.understood) throw new AppError("action_manager_unclear");
       } catch (e) {
-        // Transient API failures retry once. After the last attempt, a
-        // well-formed opening or seeker follow-up may still complete via
-        // rulePlan. Forged/ungrounded evidence always escalates to a human.
+        // Transient API failures retry once. After the last attempt, never
+        // execute a forged/ungrounded AI plan — but a deterministic rulePlan
+        // may still complete a clear opening (e.g. typo מטה→מיטה). Escalate
+        // to a human only when rules cannot help either.
         if (!lastAiAttempt && !(e instanceof AppError))
           throw new RetryableError("openai_retry");
-        const allowRulesFallback = !(
-          e instanceof AppError && e.code === "ungrounded_tool"
-        );
-        const deterministic = allowRulesFallback ? rulePlan(ctx) : null;
+        const deterministic = rulePlan(ctx);
         if (deterministic) {
           plan = deterministic;
           await this.s.pool.query(
@@ -471,13 +469,17 @@ export class Engine {
               JSON.stringify({
                 provider: "rules",
                 action_source: "rules_fallback",
+                ai_error: errorCode(e),
               }),
             ],
           );
         } else if (this.holdingForPhoto(ctx, text)) {
           await this.finishPhotoHold(id);
           return;
-        } else if (e instanceof AppError && e.code === "ai_disabled") {
+        } else if (
+          e instanceof AppError &&
+          (e.code === "ai_disabled" || e.code === "action_manager_unclear")
+        ) {
           await this.finishUnclear(id);
           return;
         } else {

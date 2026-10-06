@@ -22,7 +22,9 @@ export function probeReply(text: string): string {
   const wantsDonate = /(?:רוצה\s+)?(?:למסור|לתת|להעביר)|מסירה/u.test(t);
   const wantsReceive = /(?:רוצה\s+)?(?:לקבל|מבקש|צריך)|קבלה/u.test(t);
   const hasItem =
-    /מיטה|ספה|שידה|מנורה|שולחן|כיסא|מקרר|מכונת|תנור|ארון|פריט|רהיט/u.test(t);
+    /מיטה|(?:^|[^\u05D0-\u05EA])מטה(?=[^\u05D0-\u05EA]|$)|ספה|שידה|מנורה|שולחן|כיסא|מקרר|מכונת|תנור|ארון|פריט|רהיט/u.test(
+      t,
+    );
   if (wantsDonate && !hasPerson)
     return "למי תרצה למסור? אפשר לכתוב שם או מספר טלפון.";
   if (wantsDonate && hasPerson && !hasItem)
