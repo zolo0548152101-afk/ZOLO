@@ -1202,13 +1202,14 @@ export class Engine {
                 ].includes(candidate.status),
             );
             for (const command of executableCommands) {
-              // Yes/no about condition or disassembly must not run before the
-              // required photo. A bare "כן" otherwise throws, and "לא" rejects
-              // the item. Details and a new donation still run.
+              // PHOTO-FIRST must not discard an item correction (kind/description).
+              // Only bare free/working/disassembly confirmations wait for the photo —
+              // those are yes/no answers that must not mutate the item first.
               if (
                 waitingForPhoto &&
                 !handoffTransitionPlanned &&
-                command.type === "item_facts"
+                command.type === "item_facts" &&
+                !command.items?.length
               ) {
                 reply = PHOTO_FIRST;
                 break;

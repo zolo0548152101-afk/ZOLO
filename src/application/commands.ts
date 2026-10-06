@@ -712,11 +712,19 @@ export class Commands {
       ownParty(r, phone, "donor");
       const oldItems = structuredClone(r.items);
       if (cmd.items)
-        r.items = cmd.items.map((i, index) => ({
-          ...asItem(i),
-          ...(r.items[index] ?? {}),
-          ...i,
-        }));
+        // Action manager owns the replacement item list. New kind/description
+        // overwrite the previous row; keep prior free/working only when the
+        // command leaves those fields unset on the item object.
+        r.items = cmd.items.map((i, index) => {
+          const previous = r.items[index];
+          const next = { ...asItem(i), ...i };
+          if (previous) {
+            if (next.free === null && previous.free !== null) next.free = previous.free;
+            if (next.working === null && previous.working !== null)
+              next.working = previous.working;
+          }
+          return next;
+        });
       for (const i of r.items) {
         // Trust action-manager field values; do not re-litigate free/working
         // from raw customer wording.
