@@ -25,6 +25,15 @@ if (!source.includes('mode: "git"'))
   throw new Error("prompt_wiring_expected_git_action_and_reply");
 if (source.includes("id: this.c.OPENAI_REPLY_PROMPT_ID"))
   throw new Error("prompt_wiring_reply_still_hosted");
+if (!source.includes("משפט מחייב:\\n${canonical}") && !source.includes("משפט מחייב:\\n${notice.text}"))
+  throw new Error("prompt_wiring_git_phrase_missing_canonical");
+if (!source.includes("notice.text"))
+  throw new Error("prompt_wiring_notice_missing_canonical");
+if (!source.includes("withCanonical("))
+  throw new Error("prompt_wiring_missing_canonical_slot_injection");
+const replyPrompt = await readFile("prompts/haim-reply.he.md", "utf8");
+if (!replyPrompt.includes("{{canonical}}"))
+  throw new Error("prompt_wiring_reply_prompt_missing_canonical_slot");
 
 const mapSource = await readFile("src/domain/field-map.ts", "utf8");
 const mapped = new Set();

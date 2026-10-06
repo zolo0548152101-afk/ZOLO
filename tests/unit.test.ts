@@ -2035,6 +2035,22 @@ test("claim-guard drops invented save/approval claims", async () => {
     applyClaimGuard("Is the item fully working and usable?", "Thanks.", false).rejected,
     true,
   );
+  assert.equal(
+    applyClaimGuard(
+      "האם תרצה שנפנה למקבל לצורך אימות הפרטים?",
+      "קיבלתי, אבל לפני שנמשיך נא לשלוח תמונה של המיטה.",
+      false,
+    ).rejected,
+    true,
+  );
+  assert.equal(
+    applyClaimGuard(
+      "האם תרצה שנפנה למקבל לצורך אימות הפרטים?",
+      "קיבלתי, אבל לפני שנמשיך נא לשלוח תמונה של המיטה.",
+      false,
+    ).text,
+    "האם תרצה שנפנה למקבל לצורך אימות הפרטים?",
+  );
 });
 
 test("named outside towns reject in code, including English, and negation does not", () => {

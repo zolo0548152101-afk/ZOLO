@@ -242,12 +242,16 @@ function decodePromptSource(_c: Config): PromptSource {
   return { mode: "git", instructions: ACTION_INSTRUCTIONS };
 }
 
-function replyPromptSource(_c: Config): PromptSource {
-  return { mode: "git", instructions: REPLY_INSTRUCTIONS };
+function withCanonical(instructions: string, canonical: string): string {
+  return instructions.split("{{canonical}}").join(canonical);
 }
 
-function phrasePromptSource(_c: Config, _canonical: string): PromptSource {
-  return { mode: "git", instructions: REPLY_INSTRUCTIONS };
+function replyPromptSource(_c: Config, canonical = ""): PromptSource {
+  return { mode: "git", instructions: withCanonical(REPLY_INSTRUCTIONS, canonical) };
+}
+
+function phrasePromptSource(_c: Config, canonical: string): PromptSource {
+  return { mode: "git", instructions: withCanonical(REPLY_INSTRUCTIONS, canonical) };
 }
 
 function extractPhraseText(raw: string, fallback: string): string {
@@ -273,9 +277,9 @@ function phraseUserContent(mode: PromptSource["mode"], canonical: string, ctx: C
       ? ""
       : `\nCustomer language: ${lang}. Return the same meaning in that language only.`;
   if (mode === "git")
-    return `נסח מחדש בלבד את המשפט המחייב. החזר טקסט בלבד, בלי JSON.${languageLine}`;
+    return `נסח מחדש בלבד את המשפט המחייב. החזר טקסט בלבד, בלי JSON.${languageLine}\n\nמשפט מחייב:\n${canonical}`;
   return JSON.stringify({
-    phrase_instructions: REPLY_PROMPT_TEXT.replace("{{canonical}}", canonical),
+    phrase_instructions: withCanonical(REPLY_PROMPT_TEXT, canonical),
     customer_message: {
       current_message: `נסח מחדש בלבד: ${canonical}${languageLine}`,
       recent_history: ctx.history,
@@ -471,7 +475,7 @@ export class OpenAIPlanner implements Planner {
     if (!this.c.AI_ENABLED)
       return { text: input.fallback, metadata: { provider: "fallback", ai_enabled: false } };
     const started = Date.now();
-    const source = replyPromptSource(this.c);
+    const source = replyPromptSource(this.c, input.fallback);
     const response = await this.client.responses.create({
       model: this.c.OPENAI_MODEL,
       ...(source.mode === "hosted"
@@ -503,6 +507,7 @@ export class OpenAIPlanner implements Planner {
           active_search: ctx.active_search ?? null,
           operation_result: input.operation,
           fallback_reply: input.fallback,
+          canonical: input.fallback,
         }),
       }],
       reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },
@@ -590,10 +595,10 @@ export class OpenAIPlanner implements Planner {
           role: "user",
           content:
             source.mode === "git"
-              ? `נסח הודעת WhatsApp קצרה ואנושית לצד השני מהמשפט המחייב. החזר טקסט בלבד, בלי JSON.\nנמען: ${notice.phone}`
+              ? `נסח הודעת WhatsApp קצרה ואנושית לצד השני מהמשפט המחייב. החזר טקסט בלבד, בלי JSON.\nנמען: ${notice.phone}\n\nמשפט מחייב:\n${notice.text}`
               : JSON.stringify({
-                  phrase_instructions: REPLY_PROMPT_TEXT.replace(
-                    "{{canonical}}",
+                  phrase_instructions: withCanonical(
+                    REPLY_PROMPT_TEXT,
                     notice.text,
                   ),
                   customer_message: {

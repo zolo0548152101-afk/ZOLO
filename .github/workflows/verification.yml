@@ -1,0 +1,34 @@
+name: verification
+
+# Phase 3.1 verification remains disposable and live-system isolated.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  docker-verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run disposable PostgreSQL verification and regression gate
+        run: docker compose -f compose.test.yml up --build --abort-on-container-exit --exit-code-from tests
+      - name: Remove disposable containers and volumes
+        if: always()
+        run: docker compose -f compose.test.yml down -v --remove-orphans
+      - name: Audit static plan probes and prompt wiring
+        run: |
+          node scripts/audit-offline-probes.mjs
+          node scripts/validate-spec.mjs
+          node scripts/validate-prompt-wiring.mjs
+          git diff --check
+      - name: Upload machine-readable regression evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-evidence
+          path: |
+            artifacts/qa/regression-report.json
+            artifacts/qa/golden-report.json
+          if-no-files-found: error

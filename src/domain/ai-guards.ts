@@ -85,11 +85,12 @@ export function claimsOperationalOutcome(text: string): boolean {
  * A required line in the rule reply must still be recognizable after rewording.
  * Photo and the condition question count in Hebrew and in the fixed translations.
  */
+const PHOTO_ASK = {
+  canonical: /תמונה|\bphoto\b|صورة|фото/iu,
+  phrased: /תמונה|\bphoto\b|صورة|фото/iu,
+};
 const REQUIRED_PHRASES: { canonical: RegExp; phrased: RegExp }[] = [
-  {
-    canonical: /תמונה|\bphoto\b|صورة|фото/iu,
-    phrased: /תמונה|\bphoto\b|صورة|фото/iu,
-  },
+  PHOTO_ASK,
   {
     canonical: /האם הפריט תקין|תקין ושמיש|fully working|سليم وقابل|исправен/iu,
     phrased: /תקין|fully working|usable|سليم|исправен/iu,
@@ -100,6 +101,11 @@ function dropsRequiredPhrase(canonical: string, phrased: string): boolean {
   return REQUIRED_PHRASES.some(
     (phrase) => phrase.canonical.test(canonical) && !phrase.phrased.test(phrased),
   );
+}
+
+/** Reply manager must not invent a photo gate the committed sentence did not ask. */
+function inventsPhotoGate(canonical: string, phrased: string): boolean {
+  return PHOTO_ASK.phrased.test(phrased) && !PHOTO_ASK.canonical.test(canonical);
 }
 
 /**
@@ -126,6 +132,7 @@ export function applyClaimGuard(
   if (
     extra.length ||
     dropsRequiredPhrase(canonical, candidate) ||
+    inventsPhotoGate(canonical, candidate) ||
     (saveClaim && changedFields.length === 0 && extra.some((marker) => SAVE_MARKERS.includes(marker)))
   )
     return { text: canonical, rejected: true };

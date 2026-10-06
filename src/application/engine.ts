@@ -451,12 +451,14 @@ export class Engine {
         );
         if (!response.understood) throw new AppError("action_manager_unclear");
       } catch (e) {
-        // Transient API failures retry once. After the last attempt (or for
-        // non-retryable AppErrors), prefer rulePlan so deterministic openings
-        // still complete when the model is flaky.
+        // Transient API failures retry once. After the last attempt, a
+        // well-formed opening may still complete via rulePlan. AppErrors
+        // (ungrounded/forged evidence, malformed output) escalate to a human.
         if (!lastAiAttempt && !(e instanceof AppError))
           throw new RetryableError("openai_retry");
-        const deterministic = rulePlan(ctx);
+        const allowRulesFallback =
+          !(e instanceof AppError) || e.code === "ai_disabled";
+        const deterministic = allowRulesFallback ? rulePlan(ctx) : null;
         if (deterministic) {
           plan = deterministic;
           await this.s.pool.query(
@@ -478,21 +480,6 @@ export class Engine {
           await this.finishUnclear(id);
           return;
         } else {
-          // Without an open request, prefer clarify over human escalation so a
-          // flaky model cannot strand a fresh seeker/donor opening.
-          const hasOpen = ctx.requests.some(
-            (request) =>
-              ![
-                "coordinated",
-                "closed",
-                "cancelled",
-                "rejected",
-              ].includes(request.status),
-          );
-          if (!hasOpen) {
-            await this.finishUnclear(id);
-            return;
-          }
           await this.finishFault(id, e);
           return;
         }
@@ -652,9 +639,9 @@ export class Engine {
   }
 
   private async finishFault(id: string, error: unknown): Promise<void> {
-    const soft = await this.s.transaction(async (c) => {
+    await this.s.transaction(async (c) => {
       const ctx = await this.s.context(id, c, true);
-      if (ctx.message.processed_at) return false;
+      if (ctx.message.processed_at) return;
       const phone = ctx.conversation.phone;
       const prior = await this.faultCount(ctx.conversation.id, ctx.message.seq, c);
       const next = prior + 1;
@@ -662,18 +649,19 @@ export class Engine {
         code: errorCode(error),
         fault_count: next,
       });
+      // The first AI/API failure goes to a human, even with no open request.
+      // It does not count as unclear.
       const open =
         ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
         ctx.requests.find(
           (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
         ) ??
         null;
-      // Without an open request, clarify instead of flipping a fresh conversation
-      // into human mode (releaseFailedTurn also lands here).
-      if (!open) return true;
-      open.status = "human";
-      open.human_reason = "ai_fault_after_retries";
-      await this.s.save(c, open);
+      if (open) {
+        open.status = "human";
+        open.human_reason = "ai_fault_after_retries";
+        await this.s.save(c, open);
+      }
       await this.alert(c, ctx, "ai_fault_after_retries", FAULT_REPLY, open);
       const faultReply = this.voiced(ctx, FAULT_REPLY);
       await this.s.outbound(
@@ -681,7 +669,7 @@ export class Engine {
         ctx.message,
         { phone, text: faultReply },
         `reply:${id}`,
-        open.id,
+        open?.id ?? null,
       );
       await c.query(
         "INSERT INTO command_results(message_id,command,result) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
@@ -703,9 +691,7 @@ export class Engine {
         "UPDATE conversations SET mode='human',version=version+1 WHERE id=$1",
         [ctx.conversation.id],
       );
-      return false;
     });
-    if (soft) await this.finishUnclear(id);
   }
 
   private async finishUnclear(id: string): Promise<void> {
@@ -1597,15 +1583,6 @@ export class Engine {
         );
         text = guarded.text;
         rejected = guarded.rejected;
-        // Reply manager must not reintroduce a photo gate the business commit
-        // already cleared (e.g. after a same-turn counterparty handoff).
-        if (
-          /תמונה/u.test(text) &&
-          !/תמונה/u.test(committed.canonicalReply)
-        ) {
-          text = committed.canonicalReply;
-          rejected = true;
-        }
       } catch (e) {
         this.log.error({
           code: errorCode(e),
