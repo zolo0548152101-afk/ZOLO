@@ -133,19 +133,47 @@ export class Commands {
     if (cmd.type === "status") return output(statusText(ctx.requests));
     if (cmd.type === "seek") {
       const id = await this.s.contact(c, phone);
+      let settlement = cmd.settlement ?? null;
+      if (settlement) {
+        const reg = await this.s.region(c, settlement);
+        if (reg.decision === "outside") return output(OUTSIDE);
+        if (reg.decision === "review")
+          return { ...output(HUMAN_REPLY), humanReason: "borderline_area" };
+        settlement = reg.name;
+      }
+      const floor = cmd.floor ?? null;
+      const address = cmd.address ?? null;
+      const name = cmd.name ?? null;
       await c.query(
-        `INSERT INTO searches(contact_id,kind) VALUES($1,$2) ON CONFLICT(contact_id) DO UPDATE SET kind=EXCLUDED.kind,state='active',updated_at=clock_timestamp()`,
-        [id, cmd.kind],
+        `INSERT INTO searches(contact_id,kind,settlement,address,floor,name)
+         VALUES($1,$2,$3,$4,$5,$6)
+         ON CONFLICT(contact_id) DO UPDATE SET
+           kind=EXCLUDED.kind,
+           state='active',
+           settlement=COALESCE(EXCLUDED.settlement, searches.settlement),
+           address=COALESCE(EXCLUDED.address, searches.address),
+           floor=COALESCE(EXCLUDED.floor, searches.floor),
+           name=COALESCE(EXCLUDED.name, searches.name),
+           updated_at=clock_timestamp()`,
+        [id, cmd.kind, settlement, address, floor, name],
       );
+      const saved: string[] = [];
+      if (name) saved.push(`שם ${name}`);
+      if (settlement) saved.push(settlement);
+      if (address) saved.push(address);
+      if (floor !== null) saved.push(`קומה ${floor}`);
+      const ack = saved.length ? `נשמר: ${saved.join(", ")}. ` : "";
       const candidates = await this.s.candidates(phone, c);
       if (!candidates.length)
-        return output("כרגע לא נמצא פריט מתאים. נעדכן כשיהיה פריט מתאים.");
+        return output(
+          `${ack}כרגע לא נמצא פריט מתאים. נעדכן כשיהיה פריט מתאים.`.trim(),
+        );
       const candidate = candidates[0]!.request;
       await this.s.matchPhoto(c, candidate, phone, ctx.message);
       return output(
         candidate.photo_ids.length
-          ? null
-          : "נבקש מהמוסר תמונה של הפריט ונעדכן.",
+          ? ack.trim() || null
+          : `${ack}נבקש מהמוסר תמונה של הפריט ונעדכן.`.trim(),
       );
     }
     if (cmd.type === "donate" || cmd.type === "receive_from_donor") {
@@ -697,6 +725,7 @@ export class Commands {
       if (p.settlement && p.settlement !== "בית שאן") p.floor = 0;
       else if (p.settlement === "בית שאן" && cmd.floor !== null)
         p.floor = cmd.floor;
+      if (cmd.preferred_time) r.preferred_time = cmd.preferred_time;
       if (cmd.address && /^(?:רחוב|שכונת|שכונה|שדרות|שד[׳']?)(?=$|\s)/u.test(cmd.address.trim())) {
         const known = await this.s.region(c, cmd.address.trim());
         if (known.decision === "review")

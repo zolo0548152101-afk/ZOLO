@@ -133,6 +133,13 @@ function floor(text: string): number | null {
   return null;
 }
 
+function preferredTime(text: string): string | null {
+  const match = norm(text).match(
+    /(?:אחרי|לפני|בשעה|סביב)\s+\d{1,2}(?::\d{2})?|בין\s+\d{1,2}\s*[-–]\s*\d{1,2}/u,
+  );
+  return match?.[0] ?? null;
+}
+
 /** "מאשר ליצור קשר" often trails an address line with no punctuation. */
 function contactConsent(text: string): boolean {
   return /מאשר(?:ת)?\s+(?:ליצור(?:\s+אית(?:ה|ו))?\s+קשר|לפנות)/u.test(norm(text));
@@ -372,6 +379,7 @@ function suppliedPartyLocation(text: string, role: "donor" | "receiver"): Comman
         settlement,
         address: `רחוב ${street[1]} ${street[2]}`,
         floor: floor(pickupText),
+        ...(preferredTime(text) ? { preferred_time: preferredTime(text) } : {}),
       };
     }
   }
@@ -392,6 +400,7 @@ function suppliedPartyLocation(text: string, role: "donor" | "receiver"): Comman
     settlement,
     address,
     floor: floor(text),
+    ...(preferredTime(text) ? { preferred_time: preferredTime(text) } : {}),
   };
 }
 
@@ -640,6 +649,7 @@ export function rulePlan(ctx: Context): Plan | null {
           settlement: place,
           address: null,
           floor: floor(text),
+          ...(preferredTime(text) ? { preferred_time: preferredTime(text) } : {}),
         });
     }
     return plan(text, commands);
@@ -728,6 +738,25 @@ export function rulePlan(ctx: Context): Plan | null {
 
   const current = activeRequest(ctx);
   if (!current) {
+    const search = ctx.active_search;
+    if (search) {
+      const settlement =
+        mentionedAllowedSettlement(text) ?? beitShean(text);
+      const address = streetPhrase(text);
+      const seekFloor = floor(text);
+      const seekName = explicitName(text);
+      if (settlement || address || seekFloor !== null || seekName)
+        return plan(text, [
+          {
+            type: "seek",
+            kind: search.kind,
+            ...(seekName ? { name: seekName } : {}),
+            ...(settlement ? { settlement } : {}),
+            ...(address ? { address } : {}),
+            ...(seekFloor !== null ? { floor: seekFloor } : {}),
+          },
+        ]);
+    }
     if (
       mentionedAllowedSettlement(text) ||
       streetPhrase(text) ||

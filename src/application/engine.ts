@@ -47,6 +47,7 @@ import {
   FAULT_REPLY,
   probeReply,
 } from "../domain/ai-guards.js";
+import { diffChangedFields, type ChangedField } from "../domain/field-map.js";
 import {
   conversationLanguage,
   isCustomerClarify,
@@ -311,6 +312,38 @@ export class Engine {
           next = last.id;
         }
       });
+    } else if (pending.rows.length > 1) {
+      const texts = pending.rows.filter(
+        (m) => m.kind === "text" && m.media_state === "none",
+      );
+      const images = pending.rows.filter(
+        (m) => m.kind === "image" && m.media_state === "ready",
+      );
+      if (texts.length && images.length) {
+        const lastText = texts.at(-1)!;
+        const earlierTexts = texts.slice(0, -1);
+        await this.s.transaction(async (c) => {
+          if (earlierTexts.length) {
+            const parts = texts.map((m) => m.text.trim()).filter(Boolean);
+            const shortBurst =
+              parts.length > 1 && parts.every((part) => part.length <= 48);
+            await c.query("UPDATE messages SET text=$2,contacts=$3 WHERE id=$1", [
+              lastText.id,
+              parts.join(shortBurst ? " " : "\n"),
+              JSON.stringify(texts.flatMap((m) => m.contacts)),
+            ]);
+            await c.query(
+              "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id = ANY($1::uuid[])",
+              [earlierTexts.map((m) => m.id), `coalesced_into:${lastText.id}`],
+            );
+          }
+          await c.query(
+            "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id = ANY($1::uuid[])",
+            [images.map((m) => m.id), `attached_to:${lastText.id}`],
+          );
+        });
+        next = lastText.id;
+      }
     }
     await this.process(next, lastAiAttempt);
   }
@@ -384,7 +417,6 @@ export class Engine {
         return;
       }
     }
-    let supersessionCheck = false;
     // Resolve cheap deterministic messages outside the AI error/retry block;
     // a transient DB ordering retry must not be mislabeled as an OpenAI error.
     // A bare כן/לא is not one of those: it may approve a party, confirm a
@@ -404,7 +436,6 @@ export class Engine {
         // Free-form Hebrew is decoded by the AI. Hard limits stay in
         // commands.apply / policies after the model returns commands.
         const response = await this.ai.plan(ctx);
-        supersessionCheck = true;
         const parsed = planSchema.parse(response.plan);
         plan = parsed;
         if (response.understood && !grounded(plan, text))
@@ -428,6 +459,18 @@ export class Engine {
         const deterministic = rulePlan(ctx);
         if (deterministic) {
           plan = deterministic;
+          await this.s.pool.query(
+            `UPDATE messages SET ai_plan=$2,plan_versions=$3,ai_metadata=$4 WHERE id=$1 AND ai_plan IS NULL AND processed_at IS NULL`,
+            [
+              id,
+              JSON.stringify(plan),
+              JSON.stringify(this.versions(ctx)),
+              JSON.stringify({
+                provider: "rules",
+                action_source: "rules_fallback",
+              }),
+            ],
+          );
         } else if (this.holdingForPhoto(ctx, text)) {
           await this.finishPhotoHold(id);
           return;
@@ -456,7 +499,7 @@ export class Engine {
       }
     }
     try {
-      await this.finish(id, plan, undefined, supersessionCheck);
+      await this.finish(id, plan);
     } catch (e) {
       if (e instanceof RetryableError && e.code === "stale_plan")
         await this.s.pool.query(
@@ -789,7 +832,6 @@ export class Engine {
     id: string,
     proposed: Plan | null,
     technicalReason?: string,
-    supersessionCheck = false,
   ): Promise<void> {
     const deferredNotices: {
       outboxId: string;
@@ -809,14 +851,12 @@ export class Engine {
       // AI may have been evaluating while a newer message arrived. The old
       // answer is no longer authoritative: close it without an outbox reply,
       // leave a durable audit trail, and let the newer turn own the response.
-      const newer = supersessionCheck
-        ? await c.query<{ id: string }>(
-            `SELECT m.id FROM messages m
-              WHERE m.conversation_id=$1 AND m.seq>$2 AND m.processed_at IS NULL
-              ORDER BY m.seq LIMIT 1`,
-            [ctx.conversation.id, ctx.message.seq],
-          )
-        : { rows: [] as { id: string }[] };
+      const newer = await c.query<{ id: string }>(
+        `SELECT m.id FROM messages m
+          WHERE m.conversation_id=$1 AND m.seq>$2 AND m.processed_at IS NULL
+          ORDER BY m.seq LIMIT 1`,
+        [ctx.conversation.id, ctx.message.seq],
+      );
       if (newer.rows[0]) {
         const successorId = newer.rows[0].id;
         const successor = await c.query<{ kind: string }>(
@@ -858,6 +898,31 @@ export class Engine {
       const plan = ctx.message.ai_plan
         ? planSchema.parse(ctx.message.ai_plan)
         : proposed;
+      if (proposed && !ctx.message.ai_plan) {
+        await c.query(
+          `UPDATE messages SET ai_plan=$2,plan_versions=$3,
+            ai_metadata=coalesce(ai_metadata,'{}'::jsonb) || $4::jsonb
+           WHERE id=$1 AND ai_plan IS NULL AND processed_at IS NULL`,
+          [
+            id,
+            JSON.stringify(proposed),
+            JSON.stringify(this.versions(ctx)),
+            JSON.stringify({ action_source: "rules", provider: "rules" }),
+          ],
+        );
+      }
+      const beforeRequest = structuredClone(
+        ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+          ctx.requests.find(
+            (r) =>
+              !["coordinated", "closed", "cancelled", "rejected"].includes(
+                r.status,
+              ),
+          ) ??
+          null,
+      );
+      const beforeSearch = structuredClone(ctx.active_search ?? null);
+      let changedFields: ChangedField[] = [];
       let capacityDecision = /^(כן|לא)(?:\s+(\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4}))?\s*$/.exec(text.trim());
       // A bare "כן"/"לא" is ordinary conversation unless the configured
       // administrator actually has a pending capacity decision. A dated
@@ -1213,6 +1278,43 @@ export class Engine {
               index++;
               if (reason || request?.status === "rejected") break;
             }
+            if (request) {
+              const attached = await c.query<{
+                id: string;
+                media_id: string | null;
+                phone: string | null;
+              }>(
+                `SELECT m.id,m.media_id,co.phone
+                   FROM messages m
+                   LEFT JOIN contacts co ON co.id=m.contact_id
+                  WHERE m.conversation_id=$1 AND m.error_code=$2 AND m.kind='image'`,
+                [ctx.conversation.id, `attached_to:${id}`],
+              );
+              for (const photo of attached.rows) {
+                if (!photo.media_id) continue;
+                try {
+                  await this.s.linkPhoto(c, request, {
+                    ...ctx.message,
+                    id: photo.id,
+                    kind: "image",
+                    media_id: photo.media_id,
+                    media_state: "ready",
+                    phone: photo.phone ?? ctx.message.phone,
+                  });
+                } catch {
+                  // Seeker photos or unauthorized images stay attached for audit
+                  // without blocking the text reply.
+                }
+              }
+              if (attached.rows.length && request.photo_ids.length) {
+                if (request.parties.length === 1 && request.origin === "donation")
+                  request.status = "available";
+                await this.s.save(c, request);
+                if (reply && !reply.includes(PHOTO_THANKS))
+                  reply = `${PHOTO_THANKS}\n${reply}`;
+                else if (!reply) reply = PHOTO_THANKS;
+              }
+            }
             // The action manager may save facts and the reply manager decides
             // how to ask for the next missing fact. A photo requirement is a
             // business constraint, not permission to discard other facts.
@@ -1365,6 +1467,13 @@ export class Engine {
         reason = "no_plan";
         intent = "human_escalation";
       }
+      const afterCtx = await this.s.context(id, c);
+      changedFields = diffChangedFields({
+        beforeRequest,
+        afterRequest: request,
+        beforeSearch,
+        afterSearch: afterCtx.active_search ?? null,
+      });
       // protectedReply still marks operational replies that must not be
       // replaced by free model text; claim-guard handles phrasing instead.
       void protectedReply;
@@ -1424,7 +1533,13 @@ export class Engine {
           request_number: request?.number ?? null,
           persisted: !reason,
           outbound_notices_queued: deferredNotices.length,
+          changed_fields: changedFields,
+          missing_required: request
+            ? nextQuestion(request, phone).missing
+            : null,
+          active_search: afterCtx.active_search ?? null,
         },
+        changedFields,
       };
     });
     if (committed) this.log.info(committed);
@@ -1436,6 +1551,34 @@ export class Engine {
       committed.customerOutboxId &&
       committed.canonicalReply
     ) {
+      const newerText = await this.s.pool.query<{ id: string }>(
+        `SELECT m.id FROM messages m
+          WHERE m.conversation_id=(SELECT conversation_id FROM messages WHERE id=$1)
+            AND m.seq>(SELECT seq FROM messages WHERE id=$1)
+            AND m.processed_at IS NULL AND m.kind='text'
+          ORDER BY m.seq LIMIT 1`,
+        [id],
+      );
+      if (newerText.rows[0]) {
+        const successorId = newerText.rows[0].id;
+        await this.s.transaction(async (c) => {
+          await c.query(
+            "UPDATE outbox SET state='cancelled',error_code='reply_merged_into_next_turn' WHERE id=$1 AND format_state='pending'",
+            [committed.customerOutboxId],
+          );
+          await c.query(
+            "UPDATE messages SET reply=NULL,error_code=$2 WHERE id=$1",
+            [id, `reply_merged_into:${successorId}`],
+          );
+          await this.s.event(
+            c,
+            await this.s.message(id, c),
+            "system",
+            "reply_merged_into_next_turn",
+            { successor_message_id: successorId },
+          );
+        });
+      } else {
       const ctx = await this.s.context(id);
       let text = committed.canonicalReply;
       let rejected = false;
@@ -1450,6 +1593,7 @@ export class Engine {
           committed.canonicalReply,
           generated.text,
           Boolean(committed.provenOperational),
+          "changedFields" in committed ? committed.changedFields : [],
         );
         text = guarded.text;
         rejected = guarded.rejected;
@@ -1476,6 +1620,25 @@ export class Engine {
         ? fromTemplate
         : localizeCustomer(text, lang);
       await this.s.transaction(async (c) => {
+        const stillNewer = await c.query<{ id: string }>(
+          `SELECT m.id FROM messages m
+            WHERE m.conversation_id=(SELECT conversation_id FROM messages WHERE id=$1)
+              AND m.seq>(SELECT seq FROM messages WHERE id=$1)
+              AND m.processed_at IS NULL AND m.kind='text'
+            ORDER BY m.seq LIMIT 1`,
+          [id],
+        );
+        if (stillNewer.rows[0]) {
+          await c.query(
+            "UPDATE outbox SET state='cancelled',error_code='reply_merged_into_next_turn' WHERE id=$1 AND format_state='pending'",
+            [committed.customerOutboxId],
+          );
+          await c.query(
+            "UPDATE messages SET reply=NULL,error_code=$2 WHERE id=$1",
+            [id, `reply_merged_into:${stillNewer.rows[0].id}`],
+          );
+          return;
+        }
         await c.query(
           "UPDATE outbox SET text=$2,format_state='ready' WHERE id=$1 AND format_state='pending'",
           [committed.customerOutboxId, text],
@@ -1513,6 +1676,7 @@ export class Engine {
             claim: text.slice(0, 500),
           }, committed.requestId);
       });
+      }
     }
     // Notice wording is AI-assisted, but it is never allowed to hold the
     // business transaction open. Outbox rows wait in format_state=pending;

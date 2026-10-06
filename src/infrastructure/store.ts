@@ -13,6 +13,8 @@ import {
   type Mode,
   type RequestLocation,
   type VerificationState,
+  type Search,
+  type ItemKind,
 } from "../domain/types.js";
 import {
   ACTIVE,
@@ -347,12 +349,39 @@ export class Store {
     const candidates = (await this.candidates(message.phone, c)).filter(
       (candidate) => !resetAt || candidate.request.created_at > resetAt,
     );
+    const searchRow = await c.query<{
+      kind: ItemKind;
+      state: Search["state"];
+      settlement: string | null;
+      address: string | null;
+      floor: number | string | null;
+      name: string | null;
+    }>(
+      `SELECT s.kind,s.state,s.settlement,s.address,s.floor,s.name
+         FROM searches s JOIN contacts co ON co.id=s.contact_id
+        WHERE co.phone=$1 AND s.state='active'`,
+      [message.phone],
+    );
+    const active_search: Search | null = searchRow.rows[0]
+      ? {
+          kind: searchRow.rows[0].kind,
+          state: searchRow.rows[0].state,
+          settlement: searchRow.rows[0].settlement,
+          address: searchRow.rows[0].address,
+          floor:
+            searchRow.rows[0].floor === null
+              ? null
+              : Number(searchRow.rows[0].floor),
+          name: searchRow.rows[0].name,
+        }
+      : null;
     return {
       message,
       conversation: conv.rows[0],
       requests,
       candidates,
       history,
+      active_search,
     };
   }
   async create(

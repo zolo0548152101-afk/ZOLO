@@ -2693,3 +2693,116 @@ test("pressure is a clear limit, and fixed lines localize", () => {
     "לא הבנתי את הכוונה. אפשר לכתוב את זה שוב?",
   );
 });
+
+test("field map lists seeker location and preferred time", async () => {
+  const { renderDataMap, FIELD_MAP } = await import("../src/domain/field-map.js");
+  const rendered = renderDataMap();
+  assert.match(rendered, /searches/);
+  assert.match(rendered, /settlement/);
+  assert.match(rendered, /preferred_time/);
+  assert.match(rendered, /רשמתי/);
+  assert.ok(
+    FIELD_MAP.some(
+      (entry) => entry.table === "searches" && entry.column === "floor" && entry.writer === "seek",
+    ),
+  );
+});
+
+test("claim guard rejects unbacked רשמתי", async () => {
+  const { applyClaimGuard } = await import("../src/domain/ai-guards.js");
+  const guarded = applyClaimGuard(
+    "נא לציין אם ברצונך למסור פריט, לקבל פריט או לתאם הובלה.",
+    "רשמתי: רחוב העלייה, קומה 2",
+    false,
+    [],
+  );
+  assert.equal(guarded.rejected, true);
+  assert.equal(
+    guarded.text,
+    "נא לציין אם ברצונך למסור פריט, לקבל פריט או לתאם הובלה.",
+  );
+  assert.equal(
+    applyClaimGuard("נשמר: רחוב העלייה.", "נשמר: רחוב העלייה.", false, [
+      { table: "searches", column: "address" },
+    ]).rejected,
+    false,
+  );
+});
+
+test("seeker follow-up stores street and floor on the search, not next", () => {
+  const phone = "584152101";
+  const plan = rulePlan({
+    conversation: {
+      id: "c-seek-follow",
+      phone,
+      chat_id: `${phone}@c.us`,
+      mode: "bot",
+      selected_request_id: null,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [],
+    candidates: [],
+    history: [
+      { role: "user", content: "אני רוצה לקבל שולחן" },
+      { role: "assistant", content: "כרגע לא נמצא פריט מתאים. נעדכן כשיהיה פריט מתאים." },
+    ],
+    active_search: {
+      kind: "table",
+      state: "active",
+      settlement: null,
+      address: null,
+      floor: null,
+      name: null,
+    },
+    message: {
+      id: "m-seek-follow",
+      seq: "2",
+      external_id: "e-seek-follow",
+      trace_id: "t-seek-follow",
+      mode: "live",
+      chat_id: `${phone}@c.us`,
+      phone,
+      kind: "text",
+      text: "עדיף רחוב העלייה קומה 2",
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+  });
+  assert.equal(plan?.commands[0]?.type, "seek");
+  if (plan?.commands[0]?.type === "seek") {
+    assert.equal(plan.commands[0].kind, "table");
+    assert.equal(plan.commands[0].address, "רחוב העלייה");
+    assert.equal(plan.commands[0].floor, 2);
+  }
+});
+
+test("nextQuestion asks whether a receive-from-donor item is free", () => {
+  const request = sampleRequest();
+  request.origin = "direct";
+  request.verification_contacted = true;
+  request.represents_both_parties = false;
+  for (const party of request.parties) {
+    party.approved_at = new Date().toISOString();
+    party.approved_by = party.phone;
+    party.name = party.role === "donor" ? "מוסר" : "מקבל";
+    party.settlement = "בית שאן";
+    party.address = "רחוב העלייה 1";
+  }
+  for (const item of request.items) {
+    item.free = null;
+    item.working = true;
+    item.needs_disassembly = false;
+  }
+  request.proposed_run_date = null;
+  const question = nextQuestion(request, request.parties[1]!.phone);
+  assert.equal(question.missing?.field, "free");
+  assert.match(question.text, /חינם/);
+});

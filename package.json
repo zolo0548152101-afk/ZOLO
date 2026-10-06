@@ -36,7 +36,7 @@
     "check:legacy-mapping": "node scripts/validate-legacy-mapping.mjs --file tests/fixtures/legacy-sheets-v9-source.gs",
     "check:ai-eval": "node scripts/validate-ai-eval.mjs",
     "check:prompt-wiring": "node scripts/validate-prompt-wiring.mjs",
-    "check": "npm run build && npm test",
+    "check": "npm run build && npm run check:prompt-wiring && npm test",
     "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {

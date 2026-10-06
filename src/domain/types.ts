@@ -43,7 +43,14 @@ export const commandSchema = z.discriminatedUnion("type", [
     items: z.array(itemInput).min(1).max(20),
     donor_phone: str,
   }),
-  z.strictObject({ type: z.literal("seek"), kind: itemKind }),
+  z.strictObject({
+    type: z.literal("seek"),
+    kind: itemKind,
+    name: str.optional(),
+    settlement: str.optional(),
+    address: str.optional(),
+    floor: z.number().int().min(-3).max(100).nullable().optional(),
+  }),
   z.strictObject({
     type: z.literal("interest"),
     request_number: z.number().int().positive(),
@@ -56,6 +63,7 @@ export const commandSchema = z.discriminatedUnion("type", [
     settlement: str,
     address: str,
     floor: z.number().int().min(-3).max(100).nullable(),
+    preferred_time: str.optional(),
   }),
   z.strictObject({
     type: z.literal("item_facts"),
@@ -213,6 +221,14 @@ export interface Request {
   human_reason: string | null;
   created_at: string;
 }
+export interface Search {
+  kind: ItemKind;
+  state: "active" | "matched" | "closed";
+  settlement: string | null;
+  address: string | null;
+  floor: number | null;
+  name: string | null;
+}
 export interface Candidate {
   request: Request;
   match_id: string | null;
@@ -253,6 +269,7 @@ export interface Context {
   candidates: Candidate[];
   message: Incoming;
   history: { role: "user" | "assistant"; content: string }[];
+  active_search?: Search | null;
 }
 export interface Notice {
   phone: string;

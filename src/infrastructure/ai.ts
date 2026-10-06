@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import OpenAI from "openai";
 import { z } from "zod";
 import type { Config } from "../config.js";
@@ -15,6 +16,8 @@ import {
   type Request,
 } from "../domain/types.js";
 import { conversationLanguage } from "../domain/customer-language.js";
+import { nextQuestion } from "../domain/policies.js";
+import { dataMapSection } from "../domain/field-map.js";
 import { rulePlan } from "../application/rule-planner.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -31,6 +34,13 @@ function loadPrompt(name: string): string {
 }
 const ACTION_PROMPT_TEXT = loadPrompt("haim-action.he.md");
 const REPLY_PROMPT_TEXT = loadPrompt("haim-reply.he.md");
+const DATA_MAP_TEXT = loadPrompt("haim-data-map.he.md");
+const ACTION_INSTRUCTIONS = `${ACTION_PROMPT_TEXT}\n\n${dataMapSection(DATA_MAP_TEXT, "מה נשמר ואיפה")}`;
+const REPLY_INSTRUCTIONS = `${REPLY_PROMPT_TEXT}\n\n${dataMapSection(DATA_MAP_TEXT, "מה מותר לומר")}`;
+
+export function promptSha(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
 
 export interface DecodeResult {
   understood: boolean;
@@ -190,6 +200,9 @@ function snapshotForDecode(ctx: Context) {
   );
   const selected =
     open.find((r) => r.id === ctx.conversation.selected_request_id) ?? open[0] ?? null;
+  const missing = selected
+    ? nextQuestion(selected, ctx.conversation.phone).missing
+    : null;
   return {
     conversation: ctx.conversation,
     selected_request: selected
@@ -198,7 +211,10 @@ function snapshotForDecode(ctx: Context) {
           status: selected.status,
           origin: selected.origin,
           proposed_run_date: selected.proposed_run_date,
+          preferred_time: selected.preferred_time ?? null,
+          represents_both_parties: selected.represents_both_parties ?? false,
           verification_contacted: selected.verification_contacted,
+          verification_states: selected.verification_states ?? [],
           parties: selected.parties,
           items: selected.items,
         }
@@ -208,7 +224,8 @@ function snapshotForDecode(ctx: Context) {
       status: r.status,
       origin: r.origin,
     })),
-    missing: null,
+    missing_required: missing,
+    active_search: ctx.active_search ?? null,
     history: ctx.history,
   };
 }
@@ -222,11 +239,15 @@ function decodePromptSource(_c: Config): PromptSource {
   // rule that suppresses explicit facts such as "I want to give a bed to Tal".
   // Keep the action contract versioned in the repository and send it as the
   // actual Responses instruction so the model cannot treat it as user data.
-  return { mode: "git", instructions: ACTION_PROMPT_TEXT };
+  return { mode: "git", instructions: ACTION_INSTRUCTIONS };
 }
 
-function phrasePromptSource(c: Config, _canonical: string): PromptSource {
-  return { mode: "hosted", id: c.OPENAI_REPLY_PROMPT_ID, version: c.OPENAI_REPLY_PROMPT_VERSION };
+function replyPromptSource(_c: Config): PromptSource {
+  return { mode: "git", instructions: REPLY_INSTRUCTIONS };
+}
+
+function phrasePromptSource(_c: Config, _canonical: string): PromptSource {
+  return { mode: "git", instructions: REPLY_INSTRUCTIONS };
 }
 
 function extractPhraseText(raw: string, fallback: string): string {
@@ -425,6 +446,7 @@ export class OpenAIPlanner implements Planner {
         prompt_mode: source.mode,
         prompt_id: source.mode === "hosted" ? source.id : "git:prompts/haim-action.he.md",
         prompt_version: source.mode === "hosted" ? source.version : "git",
+        prompt_sha: promptSha(ACTION_INSTRUCTIONS),
         model: this.c.OPENAI_MODEL,
         action_source: useAi
           ? "ai_action_manager"
@@ -449,9 +471,27 @@ export class OpenAIPlanner implements Planner {
     if (!this.c.AI_ENABLED)
       return { text: input.fallback, metadata: { provider: "fallback", ai_enabled: false } };
     const started = Date.now();
+    const source = replyPromptSource(this.c);
     const response = await this.client.responses.create({
       model: this.c.OPENAI_MODEL,
-      prompt: { id: this.c.OPENAI_REPLY_PROMPT_ID, version: this.c.OPENAI_REPLY_PROMPT_VERSION },
+      ...(source.mode === "hosted"
+        ? { prompt: { id: source.id, version: source.version } }
+        : {
+            instructions: source.instructions,
+            text: {
+              format: {
+                type: "json_schema",
+                name: "haim_reply",
+                strict: true,
+                schema: {
+                  type: "object",
+                  properties: { reply: { type: "string" } },
+                  required: ["reply"],
+                  additionalProperties: false,
+                },
+              },
+            },
+          }),
       input: [{
         role: "user",
         content: JSON.stringify({
@@ -460,6 +500,7 @@ export class OpenAIPlanner implements Planner {
           history: ctx.history,
           requests: ctx.requests,
           candidates: ctx.candidates,
+          active_search: ctx.active_search ?? null,
           operation_result: input.operation,
           fallback_reply: input.fallback,
         }),
@@ -474,8 +515,10 @@ export class OpenAIPlanner implements Planner {
       text: parsed.data.reply,
       metadata: {
         provider: "openai_responses_reply_manager",
-        prompt_id: this.c.OPENAI_REPLY_PROMPT_ID,
-        prompt_version: this.c.OPENAI_REPLY_PROMPT_VERSION,
+        prompt_mode: source.mode,
+        prompt_id: source.mode === "hosted" ? source.id : "git:prompts/haim-reply.he.md",
+        prompt_version: source.mode === "hosted" ? source.version : "git",
+        prompt_sha: promptSha(REPLY_INSTRUCTIONS),
         model: this.c.OPENAI_MODEL,
         response_id: response.id,
         elapsed_ms: Date.now() - started,
@@ -515,7 +558,7 @@ export class OpenAIPlanner implements Planner {
         provider: "openai_responses_phrase",
         prompt_mode: source.mode,
         prompt_id:
-          source.mode === "hosted" ? source.id : "git:prompts/phrase.txt",
+          source.mode === "hosted" ? source.id : "git:prompts/haim-reply.he.md",
         prompt_version: source.mode === "hosted" ? source.version : "git",
         model: this.c.OPENAI_MODEL,
         response_id: response.id,
@@ -578,7 +621,7 @@ export class OpenAIPlanner implements Planner {
         provider: "openai_responses_phrase",
         prompt_mode: source.mode,
         prompt_id:
-          source.mode === "hosted" ? source.id : "git:prompts/phrase.txt",
+          source.mode === "hosted" ? source.id : "git:prompts/haim-reply.he.md",
         prompt_version: source.mode === "hosted" ? source.version : "git",
         model: this.c.OPENAI_MODEL,
         response_id: response.id,

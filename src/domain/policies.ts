@@ -4,6 +4,7 @@ import {
   type Item,
   type Party,
   type Plan,
+  type Role,
 } from "./types.js";
 export const SERVICE_TOWNS =
   "בית שאן, מסילות, ירדנה, בית אלפא, טירת צבי, כפר רופין ומחולה";
@@ -412,15 +413,30 @@ export function appliance(i: Item): boolean {
     "dishwasher",
   ].includes(i.kind);
 }
+export type MissingRequired = {
+  field: string;
+  role: Role | null;
+  request_number: number;
+} | null;
+
+function missingOf(
+  r: Request,
+  field: string,
+  role: Role | null,
+): MissingRequired {
+  return { field, role, request_number: r.number };
+}
+
 export function nextQuestion(
   r: Request,
   phone: string,
-): { text: string; floorNote: boolean } {
+): { text: string; floorNote: boolean; missing: MissingRequired } {
   if (r.status === "coordinated")
-    return { text: statusText([r]), floorNote: false };
+    return { text: statusText([r]), floorNote: false, missing: null };
   if (isClosed(r))
-    return { text: `פנייה ${r.number} סגורה.`, floorNote: false };
-  if (r.status === "human") return { text: HUMAN_REPLY, floorNote: false };
+    return { text: `פנייה ${r.number} סגורה.`, floorNote: false, missing: null };
+  if (r.status === "human")
+    return { text: HUMAN_REPLY, floorNote: false, missing: null };
   const p = ownParty(r, phone);
   const donor = p.role === "donor";
   if (
@@ -432,11 +448,13 @@ export function nextQuestion(
     return {
       text: `האם תרצה שנפנה ל${donor ? "מקבל" : "מוסר"} לצורך אימות הפרטים?`,
       floorNote: false,
+      missing: missingOf(r, "contact_counterparty", p.role),
     };
   if (r.origin === "direct" && !r.parties.some((x) => x.role !== p.role))
     return {
       text: `האם תרצה שנפנה ל${donor ? "מקבל" : "מוסר"} לצורך אימות הפרטים? אם כן, נא לשלוח מספר טלפון או כרטיס איש קשר.`,
       floorNote: false,
+      missing: missingOf(r, "counterparty", p.role),
     };
   if (
     donor &&
@@ -447,18 +465,24 @@ export function nextQuestion(
     return {
       text: "אפשר להעביר רק ארון קטן שניתן להעביר שלם, ללא פירוק והרכבה. האם זה ארון כזה?",
       floorNote: false,
+      missing: missingOf(r, "wardrobe_small_whole", "donor"),
     };
   if (donor && r.items.some((i) => i.working === null))
     return {
       text: CONDITION_QUESTION,
       floorNote: false,
+      missing: missingOf(r, "working", "donor"),
     };
   if (
     donor &&
     r.origin !== "direct" &&
     r.items.some((i) => i.kind === "oven" && i.oven_type === null)
   )
-    return { text: "האם זה תנור בילט־אין או תנור משולב?", floorNote: false };
+    return {
+      text: "האם זה תנור בילט־אין או תנור משולב?",
+      floorNote: false,
+      missing: missingOf(r, "oven_type", "donor"),
+    };
   if (
     donor &&
     r.origin !== "direct" &&
@@ -467,11 +491,16 @@ export function nextQuestion(
         !appliance(i) && i.kind !== "wardrobe" && i.needs_disassembly === null,
     )
   )
-    return { text: "האם נדרש פירוק של הפריט לצורך ההובלה?", floorNote: false };
+    return {
+      text: "האם נדרש פירוק של הפריט לצורך ההובלה?",
+      floorNote: false,
+      missing: missingOf(r, "needs_disassembly", "donor"),
+    };
   if (!p.approved_at)
     return {
       text: `נא לאשר את חלקך ב${p.role === "donor" ? "מסירה" : "קבלה"} בפנייה ${r.number}. אישור חלקך נפרד מאישור מועד ההובלה.`,
       floorNote: false,
+      missing: missingOf(r, "approved_at", p.role),
     };
   if (!p.settlement)
     return {
@@ -479,6 +508,7 @@ export function nextQuestion(
         ? "באיזה יישוב נמצא הפריט?"
         : "לאיזה יישוב צריך להעביר את הפריט?",
       floorNote: false,
+      missing: missingOf(r, "settlement", p.role),
     };
   if (!p.name || !p.address)
     return {
@@ -497,6 +527,7 @@ export function nextQuestion(
             : "תודה. חסר רק תיאור כללי של המקום ביישוב, למשל ״בכניסה״ או ״ליד המזכירות״.",
       floorNote:
         p.settlement === "בית שאן" && !p.floor_note_shown && p.floor === null,
+      missing: missingOf(r, !p.name ? "name" : "address", p.role),
     };
   if (!r.parties.some((x) => x.role !== p.role))
     return {
@@ -504,6 +535,13 @@ export function nextQuestion(
         ? "האם יש מקבל מסוים? אם כן, נא לשלוח את מספרו או כרטיס איש קשר."
         : "נא לשלוח את מספר המוסר או כרטיס איש קשר.",
       floorNote: false,
+      missing: missingOf(r, "counterparty", p.role),
+    };
+  if (r.items.some((i) => i.free === null))
+    return {
+      text: "האם הפריט נמסר בחינם, בלי תשלום?",
+      floorNote: false,
+      missing: missingOf(r, "free", "donor"),
     };
   const proposal = r.proposed_run_date;
   if (proposal && p.schedule_approved_date !== proposal) {
@@ -511,12 +549,17 @@ export function nextQuestion(
     return {
       text: `הוצע מועד ההובלה ליום שלישי ${day}/${month}/${year}, בין 16:00–20:00. נא לאשר את המועד במפורש.`,
       floorNote: false,
+      missing: missingOf(r, "schedule_approved_date", p.role),
     };
   }
   const other = r.parties.find((x) => x.phone !== p.phone);
   if (proposal && other && other.schedule_approved_date !== proposal)
-    return { text: `אישרת את מועד ההובלה בפנייה ${r.number}. ממתינים לאישור המועד של הצד השני.`, floorNote: false };
-  return { text: "הפרטים נשמרו. נעדכן.", floorNote: false };
+    return {
+      text: `אישרת את מועד ההובלה בפנייה ${r.number}. ממתינים לאישור המועד של הצד השני.`,
+      floorNote: false,
+      missing: missingOf(r, "schedule_approved_date", other.role),
+    };
+  return { text: "הפרטים נשמרו. נעדכן.", floorNote: false, missing: null };
 }
 export function readyToProposeSchedule(r: Request): boolean {
   if (

@@ -54,6 +54,20 @@ const CLAIM_MARKERS = [
   "נאסוף",
   "נבוא",
   "ניקח",
+  "רשמתי",
+  "שמרתי",
+  "עדכנתי",
+  "רשמנו",
+  "עדכנו",
+];
+
+const SAVE_MARKERS = [
+  "נשמר",
+  "רשמתי",
+  "שמרתי",
+  "עדכנתי",
+  "רשמנו",
+  "עדכנו",
 ];
 
 function markersIn(text: string): Set<string> {
@@ -97,6 +111,7 @@ export function applyClaimGuard(
   canonical: string,
   phrased: string | null | undefined,
   _proven: boolean,
+  changedFields: { table: string; column: string }[] = [],
 ): { text: string; rejected: boolean } {
   const candidate = (phrased ?? "").trim();
   if (!candidate) return { text: canonical, rejected: false };
@@ -104,9 +119,15 @@ export function applyClaimGuard(
   const extra = [...markersIn(candidate)].filter(
     (marker) => !canonicalMarkers.has(marker),
   );
+  const saveClaim = SAVE_MARKERS.some((marker) => candidate.includes(marker));
   // Each claim token must already be in the committed sentence.
   // A proven operational result does not license extra claims.
-  if (extra.length || dropsRequiredPhrase(canonical, candidate))
+  // A save verb with no changed field is never allowed in the phrased reply.
+  if (
+    extra.length ||
+    dropsRequiredPhrase(canonical, candidate) ||
+    (saveClaim && changedFields.length === 0 && extra.some((marker) => SAVE_MARKERS.includes(marker)))
+  )
     return { text: canonical, rejected: true };
   return { text: candidate, rejected: false };
 }
