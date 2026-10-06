@@ -31,6 +31,7 @@ import {
   PHOTO_FIRST,
   HUMAN_REPLY,
   OUTSIDE,
+  isOperationsAlert,
   namedOutsideSettlement,
   customerCancelIntent,
   grounded,
@@ -426,10 +427,19 @@ export class Engine {
           return;
         }
       } catch (e) {
-        if (!lastAiAttempt && !(e instanceof AppError))
-          throw new RetryableError("openai_retry");
-        await this.finishFault(id, e);
-        return;
+        if (e instanceof AppError && e.code === "ai_disabled") {
+          const deterministic = rulePlan(ctx);
+          if (!deterministic) {
+            await this.finishUnclear(id);
+            return;
+          }
+          plan = deterministic;
+        } else {
+          if (!lastAiAttempt && !(e instanceof AppError))
+            throw new RetryableError("openai_retry");
+          await this.finishFault(id, e);
+          return;
+        }
       }
     }
     try {
@@ -538,6 +548,51 @@ export class Engine {
       (reply) => reply === FAULT_REPLY,
       c,
     );
+  }
+
+  /**
+   * A conversation job that cannot be processed must not stay failed.
+   * pg-boss key_strict_fifo blocks every later message for that phone while
+   * a failed or retry job still holds the singleton key.
+   */
+  async releaseFailedTurn(messageId: string, error: unknown): Promise<void> {
+    try {
+      let message: Awaited<ReturnType<Store["message"]>> | null = null;
+      try {
+        message = await this.s.message(messageId);
+      } catch (e) {
+        if (e instanceof AppError && e.code === "message_not_found") return;
+        throw e;
+      }
+      if (!message || message.processed_at) return;
+      await this.finishFault(messageId, error);
+    } catch (e) {
+      this.log.error({
+        code: errorCode(e),
+        stage: "release_failed_turn",
+        message_id: messageId,
+      });
+      await this.s.pool
+        .query(
+          "UPDATE messages SET processed_at=clock_timestamp(),error_code='conversation_released' WHERE id=$1 AND processed_at IS NULL",
+          [messageId],
+        )
+        .catch(() => undefined);
+    }
+  }
+
+  async abandonIngest(messageId: string, error: unknown): Promise<void> {
+    this.log.error({
+      code: errorCode(error),
+      stage: "ingest_released",
+      message_id: messageId,
+    });
+    await this.s.pool
+      .query(
+        "UPDATE messages SET processed_at=clock_timestamp(),error_code='ingest_released' WHERE id=$1 AND processed_at IS NULL",
+        [messageId],
+      )
+      .catch(() => undefined);
   }
 
   private async finishFault(id: string, error: unknown): Promise<void> {
@@ -1413,6 +1468,22 @@ export class Engine {
       );
       const out = rows.rows[0];
       if (!out) return null;
+      if (isOperationsAlert(out.text) && out.phone !== this.s.config.ADMIN_PHONE) {
+        await c.query(
+          "UPDATE outbox SET state='cancelled',error_code='ops_alert_customer_blocked' WHERE id=$1",
+          [id],
+        );
+        this.log.error({
+          code: "ops_alert_customer_blocked",
+          outbox_id: id,
+          phone: out.phone,
+        });
+        return null;
+      }
+      if (isOperationsAlert(out.text)) {
+        out.chat_id = `972${out.phone}@c.us`;
+        await c.query("UPDATE outbox SET chat_id=$2 WHERE id=$1", [id, out.chat_id]);
+      }
       if (out.format_state === "pending")
         throw new RetryableError("notice_format_pending");
       if (["sent", "shadow", "simulation", "cancelled"].includes(out.state))

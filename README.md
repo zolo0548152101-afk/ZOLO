@@ -28,7 +28,7 @@ npm test
 npm run test:chaos
 ```
 
-`npm run test:chaos` runs the shadow conversation suite against a local disposable database (`postgres://postgres:disposable-test-only@127.0.0.1:5432/haim_chaos`, schema `haim_core_test`). It mocks WhatsApp and the model. It refuses a non-local database. After every scenario it deletes that phone’s requests and resets the conversation with the named cleanup `POST /admin/requests/cancel-phone` (confirm `בטל פניות`), which frees Tuesday capacity. The suite calls that same purge directly, and one scenario also calls the HTTP action.
+`npm run test:chaos` runs the shadow conversation suite against a local disposable database (`postgres://postgres:disposable-test-only@127.0.0.1:5432/haim_chaos`, schema `haim_core_test`). It mocks WhatsApp and the model. It refuses a non-local database. After every scenario it deletes that phone’s requests and resets the conversation with the named cleanup `POST /admin/requests/cancel-phone` (confirm `בטל פניות`), which frees Tuesday capacity and drops that phone’s pending, retrying, and failed conversation jobs. `POST /admin/conversations/:phone/release-queue` clears only the failed FIFO blocker for a phone so the messages already waiting can run. The suite calls that same purge directly, and one scenario also calls the HTTP action.
 
 לאחר הגדרת משתני ENV.example דרך סביבת ההרצה:
 

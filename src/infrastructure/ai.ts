@@ -360,8 +360,29 @@ export class OpenAIPlanner implements Planner {
   }
 
   async plan(ctx: Context): Promise<DecodeResult> {
-    if (!this.c.AI_ENABLED) throw new AppError("ai_disabled");
     const text = ctx.message.transcript ?? ctx.message.text;
+    if (!this.c.AI_ENABLED) {
+      const deterministic = rulePlan(ctx);
+      if (deterministic)
+        return {
+          understood: true,
+          plan: deterministic,
+          metadata: {
+            provider: "rules",
+            ai_enabled: false,
+            action_source: "rules_ai_disabled",
+          },
+        };
+      return {
+        understood: false,
+        plan: { commands: [{ type: "next" }], evidence: text.slice(0, 2000) },
+        metadata: {
+          provider: "rules",
+          ai_enabled: false,
+          action_source: "unclear_ai_disabled",
+        },
+      };
+    }
     const started = Date.now();
     const snapshot = snapshotForDecode(ctx);
     const source = decodePromptSource(this.c);
@@ -439,7 +460,11 @@ export class OpenAIPlanner implements Planner {
     canonical: string,
     ctx: Context,
   ): Promise<{ text: string; metadata: Record<string, unknown> }> {
-    if (!this.c.AI_ENABLED) throw new AppError("ai_disabled");
+    if (!this.c.AI_ENABLED)
+      return {
+        text: canonical,
+        metadata: { provider: "rules", ai_enabled: false, action_source: "canonical" },
+      };
     const started = Date.now();
     const source = phrasePromptSource(this.c, canonical);
     const response = await this.client.responses.create({
@@ -492,7 +517,11 @@ export class OpenAIPlanner implements Planner {
     notice: Notice,
     request: Request | null,
   ): Promise<{ text: string; metadata: Record<string, unknown> }> {
-    if (!this.c.AI_ENABLED) throw new AppError("ai_disabled");
+    if (!this.c.AI_ENABLED)
+      return {
+        text: notice.text,
+        metadata: { provider: "rules", ai_enabled: false, action_source: "canonical" },
+      };
     const started = Date.now();
     const source = phrasePromptSource(this.c, notice.text);
     const response = await this.client.responses.create({

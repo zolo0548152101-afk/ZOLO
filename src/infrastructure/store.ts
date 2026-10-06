@@ -17,6 +17,7 @@ import {
 import {
   ACTIVE,
   canonicalPhone,
+  isOperationsAlert,
   DEFAULT_TRANSPORT_CAPACITY,
   MAX_TRANSPORT_CAPACITY,
   norm,
@@ -637,8 +638,11 @@ export class Store {
     formatState: "ready" | "pending" = "ready",
   ): Promise<string | null> {
     const phone = canonicalPhone(notice.phone);
-    const chat =
-      ctx.phone === phone && ctx.chat_id
+    if (isOperationsAlert(notice.text) && phone !== this.config.ADMIN_PHONE)
+      return null;
+    const chat = isOperationsAlert(notice.text)
+      ? `972${phone}@c.us`
+      : ctx.phone === phone && ctx.chat_id
         ? ctx.chat_id
         : ((
             await c.query<{ chat_id: string }>(
@@ -832,9 +836,16 @@ export class Store {
    * capacity is freed) and reset the conversation, counters, and history.
    * Safe in live: it does not use the destructive clear-all guard.
    */
-  async purgePhone(phone: string): Promise<{ deletedRequests: number }> {
+  async purgePhone(
+    phone: string,
+  ): Promise<{ deletedRequests: number; releasedJobs: number }> {
     const canonical = canonicalPhone(phone);
-    return this.transaction(async (c) => {
+    const releasedJobs = await this.queue.releaseSingleton(
+      "conversation",
+      canonical,
+      ["created", "retry", "failed"],
+    );
+    const deletedRequests = await this.transaction(async (c) => {
       const contacts = await c.query<{ id: string }>(
         "SELECT id FROM contacts WHERE phone=$1 FOR UPDATE",
         [canonical],
@@ -889,7 +900,7 @@ export class Store {
           requestIds,
         ]);
       }
-      if (!contactIds.length) return { deletedRequests: requestIds.length };
+      if (!contactIds.length) return requestIds.length;
       const conversations = await c.query<{ id: string }>(
         "SELECT id FROM conversations WHERE contact_id=ANY($1::uuid[])",
         [contactIds],
@@ -960,7 +971,8 @@ export class Store {
       await c.query("DELETE FROM searches WHERE contact_id=ANY($1::uuid[])", [
         contactIds,
       ]);
-      return { deletedRequests: requestIds.length };
+      return requestIds.length;
     });
+    return { deletedRequests, releasedJobs };
   }
 }

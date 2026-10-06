@@ -842,6 +842,23 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
         });
         return { ok: true, phone };
       });
+      admin.post("/conversations/:phone/release-queue", async (req) => {
+        const phone = canonicalPhone(
+            z.object({ phone: z.string() }).parse(req.params).phone,
+          ),
+          s = runtime.requireStore();
+        const released = await s.queue.releaseSingleton("conversation", phone, ["failed"]);
+        await s.transaction(async (client) => {
+          await s.event(
+            client,
+            { trace_id: req.id },
+            "admin",
+            "conversation_queue_released",
+            adminAuditRecord(req, "release_conversation_queue", `phone:${phone}`, "success", { phone, released }),
+          );
+        });
+        return { ok: true, phone, released };
+      });
       admin.post("/conversations/reset-all", async (req) => {
         const s = runtime.requireStore();
         await s.transaction(async (client) => {

@@ -13,7 +13,9 @@ import { Engine } from "../src/application/engine.js";
 import { Runtime } from "../src/application/runtime.js";
 import { makeHttp } from "../src/http.js";
 import { canonicalPhone } from "../src/domain/policies.js";
-import type { Command, Context, Party, Plan } from "../src/domain/types.js";
+import { AppError, type Command, type Context, type Party, type Plan } from "../src/domain/types.js";
+import { HUMAN_REPLY, PHOTO_FIRST } from "../src/domain/policies.js";
+import { FAULT_REPLY } from "../src/domain/ai-guards.js";
 import { asItem } from "../src/application/commands.js";
 import {
   config,
@@ -255,6 +257,207 @@ async function ingest(phone: string, message: ScenarioMessage): Promise<string> 
   return saved.id;
 }
 
+class DisabledPlanner extends FakePlanner {
+  override async plan(): Promise<never> {
+    throw new AppError("ai_disabled");
+  }
+  override async phraseReply(): Promise<never> {
+    throw new AppError("ai_disabled");
+  }
+  override async phraseNotice(): Promise<never> {
+    throw new AppError("ai_disabled");
+  }
+}
+
+async function identify(id: string): Promise<void> {
+  for (let n = 0; n < 8; n++) {
+    if ((await store.message(id)).phone) return;
+    await engine.ingestNext();
+  }
+  throw new Error(`message ${id} was not identified`);
+}
+
+async function replyOf(id: string): Promise<string> {
+  const row = await pool.query<{ reply: string | null }>(
+    "SELECT reply FROM messages WHERE id=$1",
+    [id],
+  );
+  return row.rows[0]?.reply ?? "";
+}
+
+async function conversationJobs(phone: string, states: string[]): Promise<number> {
+  const row = await pool.query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM ${queue.schema}.job
+      WHERE name='conversation' AND singleton_key=$1 AND state::text = ANY($2::text[])`,
+    [phone, states],
+  );
+  return row.rows[0]!.n;
+}
+
+async function runnableConversationJobs(phone: string): Promise<number> {
+  const row = await pool.query<{ n: number }>(
+    `SELECT count(*)::int AS n
+       FROM ${queue.schema}.job j
+      WHERE j.name='conversation' AND j.singleton_key=$1 AND j.state::text='created'
+        AND NOT EXISTS (
+          SELECT 1 FROM ${queue.schema}.job b
+           WHERE b.name=j.name AND b.singleton_key=j.singleton_key
+             AND b.state::text IN ('active','retry','failed') AND b.id <> j.id
+        )`,
+    [phone],
+  );
+  return row.rows[0]!.n;
+}
+
+async function incidentChecks(): Promise<string[]> {
+  const problems: string[] = [];
+  const phone = canonicalPhone("0530222333");
+  const off = new Engine(store, new DisabledPlanner(), channel, storage, log, () => monday);
+  try {
+    await purge(phone);
+    const photoId = await ingest(phone, { text: "יש לי מיטה למסירה בבית שאן" });
+    await identify(photoId);
+    await off.process(photoId);
+    const photoReply = await replyOf(photoId);
+    if (!photoReply.includes("תמונה") || photoReply.includes(FAULT_REPLY))
+      problems.push(`ai-off photo reply: ${photoReply.slice(0, 160)}`);
+    if (photoReply !== PHOTO_FIRST && !photoReply.includes("תמונה"))
+      problems.push(`ai-off photo missing photo-first: ${photoReply.slice(0, 160)}`);
+
+    await purge(phone);
+    const outsideId = await ingest(phone, { text: "אני גר בטבריה ורוצה למסור מקרר" });
+    await identify(outsideId);
+    await off.process(outsideId);
+    const outsideReply = await replyOf(outsideId);
+    if (!outsideReply.includes("לא נוכל") || outsideReply.includes(FAULT_REPLY))
+      problems.push(`ai-off outside reply: ${outsideReply.slice(0, 160)}`);
+
+    await purge(phone);
+    const unclearId = await ingest(phone, { text: "שדגכ כעי" });
+    await identify(unclearId);
+    await off.process(unclearId);
+    const unclearReply = await replyOf(unclearId);
+    if (!unclearReply || unclearReply.includes(FAULT_REPLY))
+      problems.push(`ai-off unclear reply: ${unclearReply.slice(0, 160)}`);
+    const againId = await ingest(phone, { text: "עדיין לא מובן בכלל" });
+    await identify(againId);
+    await off.process(againId);
+    const againReply = await replyOf(againId);
+    const mode = await pool.query<{ mode: string }>(
+      `SELECT cv.mode FROM conversations cv JOIN contacts co ON co.id=cv.contact_id WHERE co.phone=$1`,
+      [phone],
+    );
+    if (againReply !== HUMAN_REPLY && mode.rows[0]?.mode !== "human")
+      problems.push(`ai-off second unclear did not escalate: ${againReply.slice(0, 160)} mode ${mode.rows[0]?.mode}`);
+
+    await purge(phone);
+    const customerChat = `972${phone}@c.us`;
+    const blocked = await store.transaction((c) =>
+      store.outbound(
+        c,
+        { trace_id: randomUUID(), mode: "shadow", phone, chat_id: customerChat },
+        { phone, text: "נדרשת בדיקת מערכת חיים יחד. תורים חסומים: {}" },
+        `ops-customer:${randomUUID()}`,
+      ),
+    );
+    if (blocked !== null) problems.push("ops alert was stored for a customer phone");
+    const adminId = await store.transaction((c) =>
+      store.outbound(
+        c,
+        { trace_id: randomUUID(), mode: "shadow", phone, chat_id: customerChat },
+        { phone: cfg.ADMIN_PHONE, text: "נדרשת בדיקת מערכת חיים יחד. תורים חסומים: {}" },
+        `ops-admin:${randomUUID()}`,
+      ),
+    );
+    const adminRow = await pool.query<{ phone: string; chat_id: string }>(
+      "SELECT phone,chat_id FROM outbox WHERE id=$1",
+      [adminId],
+    );
+    if (adminRow.rows[0]?.phone !== cfg.ADMIN_PHONE)
+      problems.push(`ops alert phone ${adminRow.rows[0]?.phone}`);
+    if (adminRow.rows[0]?.chat_id !== `972${cfg.ADMIN_PHONE}@c.us`)
+      problems.push(`ops alert used customer chat ${adminRow.rows[0]?.chat_id}`);
+    const leaked = await pool.query(
+      "INSERT INTO outbox(dedupe_key,trace_id,mode,phone,chat_id,text) VALUES($1,$2,'live',$3,$4,$5) RETURNING id",
+      [randomUUID(), randomUUID(), phone, customerChat, "נדרשת בדיקת מערכת חיים יחד. אל תשלח ללקוח"],
+    );
+    const before = channel.sent.length;
+    await engine.send(leaked.rows[0]!.id);
+    const sentLeak = channel.sent.slice(before).some((item) => item.text.includes("נדרשת בדיקת מערכת"));
+    const cancelled = await pool.query<{ state: string }>(
+      "SELECT state FROM outbox WHERE id=$1",
+      [leaked.rows[0]!.id],
+    );
+    if (sentLeak || cancelled.rows[0]?.state !== "cancelled")
+      problems.push(`ops alert reached a customer send state=${cancelled.rows[0]?.state}`);
+
+    await purge(phone);
+    const pendingId = await ingest(phone, { text: "יש לי מיטה למסירה בבית שאן" });
+    await identify(pendingId);
+    if ((await conversationJobs(phone, ["created", "retry", "failed"])) < 1)
+      problems.push("cancel setup did not enqueue a conversation job");
+    const cancel = await app.inject({
+      method: "POST",
+      url: "/admin/requests/cancel-phone",
+      headers: {
+        "x-admin-token": cfg.HAIM_ADMIN_TOKEN,
+        "content-type": "application/json",
+      },
+      payload: { phone, confirm: "בטל פניות" },
+    });
+    if (cancel.statusCode !== 200)
+      problems.push(`cancel-phone HTTP ${cancel.statusCode} ${cancel.body}`);
+    if ((await conversationJobs(phone, ["created", "retry", "failed"])) !== 0)
+      problems.push("cancel-phone left conversation jobs");
+    await assert.rejects(
+      () => engine.processNext(pendingId),
+      (error: unknown) => error instanceof AppError && error.code === "message_not_found",
+    );
+    await engine.releaseFailedTurn(pendingId, new AppError("message_not_found"));
+    const nextId = await ingest(phone, { text: "יש לי מיטה למסירה בבית שאן" });
+    await identify(nextId);
+    await off.process(nextId);
+    if (!(await replyOf(nextId)).includes("תמונה"))
+      problems.push("message after cancel-phone did not get a photo-first reply");
+
+    await purge(phone);
+    const successorId = await ingest(phone, { text: "יש לי מיטה למסירה בבית שאן" });
+    await identify(successorId);
+    const blocker = await queue.boss.send("conversation", { id: randomUUID() }, { singletonKey: phone });
+    await pool.query(
+      `UPDATE ${queue.schema}.job
+          SET state='failed', retry_count=retry_limit, completed_on=clock_timestamp()
+        WHERE id=$1`,
+      [blocker],
+    );
+    const blockedKeys = await queue.boss.getBlockedKeys("conversation");
+    if (!blockedKeys.includes(phone)) problems.push("failed job did not block the phone key");
+    if ((await runnableConversationJobs(phone)) !== 0)
+      problems.push("successor stayed runnable behind a failed job");
+    const release = await app.inject({
+      method: "POST",
+      url: `/admin/conversations/${phone}/release-queue`,
+      headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
+    });
+    if (release.statusCode !== 200)
+      problems.push(`release-queue HTTP ${release.statusCode} ${release.body}`);
+    else if (!release.json().released)
+      problems.push("release-queue deleted nothing");
+    if ((await queue.boss.getBlockedKeys("conversation")).includes(phone))
+      problems.push("phone stayed blocked after release-queue");
+    if ((await runnableConversationJobs(phone)) < 1)
+      problems.push("successor was not runnable after release-queue");
+    await off.process(successorId);
+    if (!(await replyOf(successorId)).includes("תמונה"))
+      problems.push("message after failed-job release did not reply");
+  } catch (error) {
+    problems.push(error instanceof Error ? error.message : String(error));
+  } finally {
+    try { await purge(phone); } catch { /* keep the reported failure */ }
+  }
+  return problems;
+}
+
 async function loadScenarios(): Promise<Scenario[]> {
   const dir = join(process.cwd(), "tests/scenarios");
   const files = (await readdir(dir)).filter((name) => name.endsWith(".json")).sort();
@@ -451,6 +654,13 @@ test("chaos conversation limits", async () => {
       detail: problems.join(" | ") || "ok",
     });
   }
+  const incident = await incidentChecks();
+  report.push({
+    id: "incident-ai-off-fifo",
+    phone: "0530222333",
+    pass: incident.length === 0,
+    detail: incident.join(" | ") || "ok",
+  });
   await mkdir("/opt/cursor/artifacts", { recursive: true });
   await mkdir("artifacts/qa", { recursive: true });
   const body = JSON.stringify({ scenarios: report.length, failed: report.filter((row) => !row.pass), report }, null, 2);

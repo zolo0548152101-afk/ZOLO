@@ -16,6 +16,7 @@ export interface JobData {
 }
 export class Queue {
   readonly boss: PgBoss;
+  readonly schema: string;
   started = false;
   constructor(
     c: Config,
@@ -23,6 +24,7 @@ export class Queue {
     migrate = false,
     overrides: Partial<ConstructorOptions> = {},
   ) {
+    this.schema = `${c.DB_SCHEMA}_jobs`;
     this.boss = new PgBoss({
       connectionString: c.DATABASE_URL,
       schema: `${c.DB_SCHEMA}_jobs`,
@@ -76,6 +78,41 @@ export class Queue {
     });
     if (!id) throw new RetryableError("job_not_enqueued");
     return id;
+  }
+  /**
+   * Remove jobs that hold a strict-FIFO key. A failed or retry job blocks every
+   * later job with the same singleton key until that row is gone.
+   */
+  async releaseSingleton(
+    name: QueueName,
+    key: string,
+    states: Array<"created" | "retry" | "active" | "failed">,
+  ): Promise<number> {
+    if (!states.length) return 0;
+    const result = await this.boss.getDb().executeSql(
+      `DELETE FROM ${this.schema}.job
+        WHERE name=$1 AND singleton_key=$2 AND state::text = ANY($3::text[])
+        RETURNING id`,
+      [name, key, states],
+    );
+    return result.rows.length;
+  }
+  async failedJobs(
+    name: QueueName,
+  ): Promise<{ id: string; singletonKey: string; messageId: string | null }[]> {
+    const result = await this.boss.getDb().executeSql(
+      `SELECT id::text AS id, singleton_key AS "singletonKey", data->>'id' AS "messageId"
+         FROM ${this.schema}.job
+        WHERE name=$1 AND state='failed'
+        ORDER BY created_on
+        LIMIT 20`,
+      [name],
+    );
+    return result.rows as {
+      id: string;
+      singletonKey: string;
+      messageId: string | null;
+    }[];
   }
   async stop(): Promise<void> {
     this.started = false;

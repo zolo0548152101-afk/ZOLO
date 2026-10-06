@@ -16,6 +16,11 @@ export const MAX_TRANSPORT_CAPACITY = 100;
 export const GREETING =
   "שלום, שמחים שפניתם אלינו 😊\nנוכל לעזור בימי שלישי בין השעות 16:00–20:00. ניתן לתאם עד 10 הובלות בכל יום שלישי; מעבר לכך נבקש אישור מנהל לפני תיאום נוסף.\n\nלהמשך התיאום, נא לוודא שהמוסר והמקבל — כל אחד לחוד ובעצמו — ישלחו הודעה עם הפרטים הבאים:\n\n1. שם מלא\n2. תמונה ושם של החפץ\n3. כתובת\n\nכמה הבהרות:\n\n- אנו לא מפרקים ומרכיבים ארונות\n- אנו מעבירים עד 2 רהיטים לאדם\n- הפעילות בהתנדבות\n- אנו מעבירים רק רהיטים שנמסרו ולא נקנו\n- הפעילות מתקיימת בבית שאן ובעמק הקרוב";
 export const HUMAN_REPLY = "העברתי את הפנייה לטיפול אנושי. נעדכן.";
+/** Internal monitor text. It may be delivered only to the configured admin phone. */
+export const OPS_ALERT_PREFIX = "נדרשת בדיקת מערכת";
+export function isOperationsAlert(text: string): boolean {
+  return text.startsWith(OPS_ALERT_PREFIX);
+}
 export const SUKKAH =
   "בשמחה. נא למלא את הטופס הבא, ולאחר מכן יצרו איתכם קשר להמשך:\nhttps://docs.google.com/forms/d/e/1FAIpQLSd-lls8Yp8pstD3M_OsBAV9JK-FbDHHTLatPZbqnGtmhUN1vA/viewform";
 export const DONATION = "https://pe4ch.com/ref/av01FlQj2che?lang=he";

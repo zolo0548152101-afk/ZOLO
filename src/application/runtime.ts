@@ -101,8 +101,14 @@ export class Runtime {
           "ingest",
           { ...settings, localConcurrency: 1 },
           async (jobs) => {
-            for (const j of jobs)
-              await engine.ingestNext(j.retryCount >= j.retryLimit);
+            for (const j of jobs) {
+              try {
+                await engine.ingestNext(j.retryCount >= j.retryLimit);
+              } catch (error) {
+                if (j.retryCount < j.retryLimit) throw error;
+                await engine.abandonIngest(j.data.id, error);
+              }
+            }
           },
         );
         await queue.boss.work<JobData, void, typeof settings>(
@@ -117,8 +123,20 @@ export class Runtime {
           "conversation",
           settings,
           async (jobs) => {
-            for (const j of jobs)
-              await engine.processNext(j.data.id, j.retryCount >= 1);
+            for (const j of jobs) {
+              try {
+                await engine.processNext(j.data.id, j.retryCount >= 1);
+              } catch (error) {
+                const code = error instanceof AppError ? error.code : "";
+                const gone = [
+                  "message_not_found",
+                  "conversation_missing",
+                  "request_not_found",
+                ].includes(code);
+                if (!gone && j.retryCount < j.retryLimit) throw error;
+                await engine.releaseFailedTurn(j.data.id, error);
+              }
+            }
           },
         );
         await queue.boss.work<JobData, void, typeof settings>(
@@ -376,7 +394,21 @@ export class Runtime {
       "INSERT INTO worker_heartbeats(id) VALUES($1) ON CONFLICT(id) DO UPDATE SET updated_at=clock_timestamp()",
       [this.workerId],
     );
+    await this.unblockFailedConversations();
     if (this.config.INTEGRATION_DISPATCH) await this.recoverIntegrationQueue();
+  }
+  /**
+   * A failed conversation job holds its phone's FIFO key forever. Settle the
+   * message and delete the failed row so the queued successors can run.
+   */
+  private async unblockFailedConversations(): Promise<void> {
+    if (!this.queue || !this.engine) return;
+    const failed = await this.queue.failedJobs("conversation");
+    for (const job of failed) {
+      if (job.messageId)
+        await this.engine.releaseFailedTurn(job.messageId, new Error("fifo_failed_job"));
+      await this.queue.releaseSingleton("conversation", job.singletonKey, ["failed"]);
+    }
   }
   async check(): Promise<void> {
     if (!this.ready || !this.engine || !this.queue?.started)
