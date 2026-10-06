@@ -11,6 +11,7 @@ export const OUTSIDE =
   `אנחנו פועלים רק ב${SERVICE_TOWNS}. לא נוכל לסייע בהובלה הזו.`;
 export const PHOTO_THANKS = "תודה, התמונה התקבלה.";
 export const PHOTO_FIRST = "בשמחה. כדי להמשיך, נא לשלוח תמונה של הפריט.";
+export const CONDITION_QUESTION = "האם הפריט תקין ושמיש ב־100%?";
 export const DEFAULT_TRANSPORT_CAPACITY = 10;
 export const MAX_TRANSPORT_CAPACITY = 100;
 export const GREETING =
@@ -91,7 +92,10 @@ export function donationIntent(t: string): boolean {
   return (
     /(?:למסירה|לתרומה|למסור|לתרום|מוסר|מוסרת|להעביר|מעביר|מעבירה|יש לי להעביר)/.test(
       t,
-    ) || /\b(?:donate|donation|give away)\b/i.test(t)
+    ) ||
+    /\b(?:donate|donation|give away)\b/i.test(t) ||
+    /تبرع|أتبرع|للتبرع/u.test(t) ||
+    /отдать|отдаю|пожертв/iu.test(t)
   );
 }
 export function customerCancelIntent(text: string): boolean {
@@ -127,6 +131,7 @@ const OUTSIDE_PLACES: { name: string; pattern: RegExp }[] = [
   { name: "ירושלים", pattern: /\bjerusalem\b/i },
   { name: "טבריה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?טברי[הא](?=$|[^א-ת])/u },
   { name: "טבריה", pattern: /\btiberias\b/i },
+  { name: "טבריה", pattern: /طبري[اة]/u },
   { name: "עפולה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?עפול[הא](?=$|[^א-ת])/u },
   { name: "עפולה", pattern: /\bafula\b/i },
   { name: "חיפה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?חיפה(?=$|[^א-ת])/u },
@@ -176,6 +181,7 @@ export function namedOutsideSettlement(text: string): string | null {
 const ALLOWED_PLACES: { name: string; pattern: RegExp }[] = [
   { name: "בית שאן", pattern: /בית\s*[-־]?\s*שאן/u },
   { name: "בית שאן", pattern: /\bbeit\s+she'?an\b/i },
+  { name: "בית שאן", pattern: /بيت\s*شان|بيسان|бейт[\s-]*шеан/iu },
   { name: "מסילות", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?מסילות(?=$|[^א-ת])/u },
   { name: "ירדנה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?ירדנה(?=$|[^א-ת])/u },
   { name: "בית אלפא", pattern: /בית\s*[-־]?\s*אלפא/u },
@@ -338,7 +344,7 @@ export function nextQuestion(
     };
   if (donor && r.items.some((i) => i.working === null))
     return {
-      text: "האם הפריט תקין ושמיש ב־100%?",
+      text: CONDITION_QUESTION,
       floorNote: false,
     };
   if (

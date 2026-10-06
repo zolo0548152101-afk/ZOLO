@@ -15,6 +15,7 @@ import {
   type Request,
 } from "../domain/types.js";
 import { nextQuestion } from "../domain/policies.js";
+import { conversationLanguage } from "../domain/customer-language.js";
 import { rulePlan } from "../application/rule-planner.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -299,6 +300,27 @@ function extractPhraseText(raw: string, fallback: string): string {
   return trimmed;
 }
 
+function phraseUserContent(mode: PromptSource["mode"], canonical: string, ctx: Context): string {
+  const lang = conversationLanguage(ctx);
+  const languageLine =
+    lang === "he"
+      ? ""
+      : `\nCustomer language: ${lang}. Return the same meaning in that language only.`;
+  if (mode === "git")
+    return `נסח מחדש בלבד את המשפט המחייב. החזר טקסט בלבד, בלי JSON.${languageLine}`;
+  return JSON.stringify({
+    phrase_instructions: PHRASE_PROMPT_TEXT.replace("{{canonical}}", canonical),
+    customer_message: {
+      current_message: `נסח מחדש בלבד: ${canonical}${languageLine}`,
+      recent_history: ctx.history,
+      has_location: false,
+    },
+    sender_phone: ctx.conversation.phone,
+    existing_record: { canonical },
+    ...(lang === "he" ? {} : { customer_language: lang }),
+  });
+}
+
 const OPENING_COMMANDS = new Set(["donate", "receive_from_donor", "seek"]);
 
 function hasOpenRequest(ctx: Context): boolean {
@@ -475,22 +497,7 @@ export class OpenAIPlanner implements Planner {
       input: [
         {
           role: "user",
-          content:
-            source.mode === "git"
-              ? "נסח מחדש בלבד את המשפט המחייב. החזר טקסט בלבד, בלי JSON."
-              : JSON.stringify({
-                  phrase_instructions: PHRASE_PROMPT_TEXT.replace(
-                    "{{canonical}}",
-                    canonical,
-                  ),
-                  customer_message: {
-                    current_message: `נסח מחדש בלבד: ${canonical}`,
-                    recent_history: ctx.history,
-                    has_location: false,
-                  },
-                  sender_phone: ctx.conversation.phone,
-                  existing_record: { canonical },
-                }),
+          content: phraseUserContent(source.mode, canonical, ctx),
         },
       ],
       reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },

@@ -46,6 +46,11 @@ import {
   FAULT_REPLY,
   probeReply,
 } from "../domain/ai-guards.js";
+import {
+  conversationLanguage,
+  localizeCustomer,
+  pressureCanonical,
+} from "../domain/customer-language.js";
 
 export class Engine {
   private readonly commands: Commands;
@@ -363,6 +368,21 @@ export class Engine {
       await this.finishOutside(id, outsideTown);
       return;
     }
+    // Cancel and impossible-window pressure are rules, not model choices.
+    // They run before any planner so an AI plan cannot turn them into the
+    // next collection question or into "לא הבנתי".
+    if (customerCancelIntent(text)) {
+      const planned = rulePlan(ctx);
+      if (planned?.commands.some((command) => command.type === "cancel")) {
+        await this.finish(id, planned);
+        return;
+      }
+    }
+    const pressure = pressureCanonical(text);
+    if (pressure) {
+      await this.finishPressure(id, pressure);
+      return;
+    }
     if (
       ctx.message.kind === "image" ||
       ctx.message.kind === "location" ||
@@ -627,16 +647,17 @@ export class Engine {
         await this.s.save(c, open);
       }
       await this.alert(c, ctx, "ai_fault_after_retries", FAULT_REPLY, open);
+      const faultReply = this.voiced(ctx, FAULT_REPLY);
       await this.s.outbound(
         c,
         ctx.message,
-        { phone, text: FAULT_REPLY },
+        { phone, text: faultReply },
         `reply:${id}`,
         open?.id ?? null,
       );
       await c.query(
         "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
-        [id, FAULT_REPLY, "openai_failure_escalated"],
+        [id, faultReply, "openai_failure_escalated"],
       );
       await c.query(
         "UPDATE conversations SET mode='human',version=version+1 WHERE id=$1",
@@ -665,10 +686,11 @@ export class Engine {
           await this.s.save(c, open);
         }
         await this.alert(c, ctx, "unclear_after_two_clarifications", HUMAN_REPLY, open);
+        const handoff = this.voiced(ctx, HUMAN_REPLY);
         await this.s.outbound(
           c,
           ctx.message,
-          { phone, text: HUMAN_REPLY },
+          { phone, text: handoff },
           `reply:${id}`,
           open?.id ?? null,
         );
@@ -677,7 +699,7 @@ export class Engine {
         });
         await c.query(
           "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
-          [id, HUMAN_REPLY, "unclear_escalated"],
+          [id, handoff, "unclear_escalated"],
         );
         await c.query(
           "UPDATE conversations SET mode='human',version=version+1 WHERE id=$1",
@@ -685,7 +707,7 @@ export class Engine {
         );
         return;
       }
-      const reply = probeReply(ctx.message.text);
+      const reply = this.voiced(ctx, probeReply(ctx.message.text));
       await this.s.outbound(
         c,
         ctx.message,
@@ -695,7 +717,7 @@ export class Engine {
       );
       await this.s.event(c, ctx.message, phone, "unclear_clarify", {
         unclear_count: next,
-        probe: reply !== CLARIFY_REPLY,
+        probe: reply !== this.voiced(ctx, CLARIFY_REPLY),
       });
       await c.query(
         "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
@@ -742,16 +764,17 @@ export class Engine {
         ) ??
         ctx.requests.find((candidate) => photoGate(candidate)) ??
         null;
+      const photoReply = this.voiced(ctx, PHOTO_FIRST);
       await this.s.outbound(
         c,
         ctx.message,
-        { phone: ctx.conversation.phone, text: PHOTO_FIRST },
+        { phone: ctx.conversation.phone, text: photoReply },
         `reply:${id}`,
         request?.id ?? null,
       );
       await c.query(
         "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
-        [id, PHOTO_FIRST],
+        [id, photoReply],
       );
     });
   }
@@ -801,18 +824,58 @@ export class Engine {
         { settlement },
         request?.id ?? null,
       );
+      const outsideReply = this.voiced(ctx, OUTSIDE);
       await this.s.outbound(
         c,
         ctx.message,
-        { phone, text: OUTSIDE },
+        { phone, text: outsideReply },
         `reply:${id}`,
         request?.id ?? null,
       );
       await c.query(
         "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
-        [id, OUTSIDE, "outside_area_rejected"],
+        [id, outsideReply, "outside_area_rejected"],
       );
     });
+  }
+
+  /** Polite limit or empathy, then the same next step. Not an unclear turn. */
+  private async finishPressure(id: string, canonical: string): Promise<void> {
+    await this.s.transaction(async (c) => {
+      const ctx = await this.s.context(id, c, true);
+      if (ctx.message.processed_at) return;
+      const terminal = ["coordinated", "closed", "cancelled", "rejected", "cancel_pending", "human"];
+      const open =
+        ctx.requests.find(
+          (request) =>
+            request.id === ctx.conversation.selected_request_id &&
+            !terminal.includes(request.status),
+        ) ??
+        ctx.requests.find((request) => !terminal.includes(request.status)) ??
+        null;
+      let body = canonical;
+      if (open && photoGate(open)) body = `${canonical}\n${PHOTO_FIRST}`;
+      else if (open) {
+        const question = nextQuestion(open, ctx.conversation.phone).text;
+        if (question) body = `${canonical}\n${question}`;
+      }
+      const text = this.voiced(ctx, body);
+      await this.s.outbound(
+        c,
+        ctx.message,
+        { phone: ctx.conversation.phone, text },
+        `reply:${id}`,
+        open?.id ?? null,
+      );
+      await c.query(
+        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
+        [id, text],
+      );
+    });
+  }
+
+  private voiced(ctx: Context, text: string): string {
+    return localizeCustomer(text, conversationLanguage(ctx));
   }
 
   private async finish(
@@ -1495,6 +1558,7 @@ export class Engine {
           stage: "customer_phrase",
         });
       }
+      text = localizeCustomer(text, conversationLanguage(ctx));
       await this.s.transaction(async (c) => {
         await c.query(
           "UPDATE outbox SET text=$2,format_state='ready' WHERE id=$1 AND format_state='pending'",

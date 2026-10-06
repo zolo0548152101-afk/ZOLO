@@ -72,6 +72,9 @@ function kindAndDescription(text: string): { kind: ItemKind; description: string
   const match: [RegExp, ItemKind, string][] = [
     [/מיקרוגל|\bmicrowaves?\b/i, "other", "מיקרוגל"],
     [/\bfridges?\b|\brefrigerators?\b/i, "fridge", "מקרר"],
+    [/ثلاج/u, "fridge", "מקרר"],
+    [/холодильник/iu, "fridge", "מקרר"],
+    [/диван/iu, "sofa", "ספה"],
     [/\bbeds?\b/i, "bed", "מיטה"],
     [/\bsofas?\b|\bcouches?\b/i, "sofa", "ספה"],
     [/מיטה/i, "bed", "מיטה"],
@@ -137,7 +140,11 @@ function beitShean(text: string): string | null {
   const cleaned = text
     .replace(/(?:ליד|קרוב\s*ל?|באזור|סמוך\s*ל?)\s*בית\s*[-־]?\s*שאן/gu, " ")
     .replace(/\bnear\s+beit\s+she'?an\b/gi, " ");
-  if (/בית\s*[-־]?\s*שאן/.test(cleaned) || /\bbeit\s+she'?an\b/i.test(cleaned))
+  if (
+    /בית\s*[-־]?\s*שאן/.test(cleaned) ||
+    /\bbeit\s+she'?an\b/i.test(cleaned) ||
+    /بيت\s*شان|بيسان|бейт[\s-]*шеан/iu.test(cleaned)
+  )
     return "בית שאן";
   return null;
 }
