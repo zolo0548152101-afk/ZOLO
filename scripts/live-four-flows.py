@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import subprocess
 import time
 import urllib.parse
@@ -30,7 +31,18 @@ TAL = "972536662043@c.us"
 ISRAEL = "584152101"
 SESSION = "HAIM_YAHAD"
 PHOTO_WORDS = ("תמונה", "צלם", "צילום", "שלח תמונה", "מצרף תמונה", "photo")
-CONSENT_CLAIM = ("נפנה", "פנינו", "יצרנו קשר", "שולחים הודעה", "נשלח הודעה")
+# Past-tense / assertive claims only. "האם תרצה שנפנה…" is a consent ASK, not a claim.
+CONSENT_CLAIM = ("פנינו", "יצרנו קשר", "שולחים הודעה", "נשלח הודעה", "נפנה לצד השני עכשיו")
+
+
+def invents_contact_before_consent(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    # Permission questions are the allowed consent prompt.
+    if re.search(r"(?:האם|תרצ[הי]|רוצה|אפשר).{0,30}נפנה", t):
+        return False
+    return contains_any(t, CONSENT_CLAIM)
 
 
 def db(sql: str) -> str:
@@ -308,13 +320,39 @@ def snapshot(label: str):
     return snap
 
 
-def send_and_wait(text: str, wait=22):
+def wait_processed(marker_substr: str, timeout=50):
+    """Wait until the inbound message is processed (and ideally has a reply)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        row = db(
+            "SELECT id::text, coalesce(reply,''), coalesce(error_code,''), "
+            "(processed_at is not null)::text "
+            f"FROM messages WHERE text LIKE '%{marker_substr.replace('|','')}%' "
+            "ORDER BY seq DESC LIMIT 1"
+        )
+        if row and "|" in row:
+            mid, reply, err, processed = row.split("|", 3)
+            if processed == "true":
+                return {"id": mid, "reply": reply or None, "error": err or None}
+        time.sleep(1.2)
+    return None
+
+
+def send_and_wait(text: str, wait=8):
     before = now_db()
     print(f"\n>>> SEND: {text}", flush=True)
     res = waha_send(text)
-    time.sleep(wait)
-    reply = wait_reply(ISRAEL, before, timeout=45)
+    # Prefer durable DB processing over outbox timing — reply-manager can lag.
+    marker = text[-40:] if len(text) > 40 else text
+    processed = wait_processed(marker, timeout=55)
+    reply = wait_reply(ISRAEL, before, timeout=20)
+    if not reply and processed and processed.get("reply"):
+        reply = {"text": processed["reply"], "status": "db", "request_id": None, "created_at": now_db()}
     print(f"<<< REPLY: {(reply or {}).get('text')}", flush=True)
+    if processed and processed.get("error"):
+        print(f"<<< ERROR_CODE: {processed['error']}", flush=True)
+    # small settle for request rows after commit
+    time.sleep(wait)
     return res, reply
 
 
@@ -358,7 +396,7 @@ check(
 )
 check(
     "direct: does not invent contact/send before consent",
-    reply1 is not None and not contains_any(reply1.get("text") or "", CONSENT_CLAIM),
+    reply1 is not None and not invents_contact_before_consent(reply1.get("text") or ""),
     (reply1 or {}).get("text"),
 )
 recv = next((p for p in snap1["parties"] if p["role"] == "receiver"), None)
