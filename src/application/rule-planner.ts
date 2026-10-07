@@ -79,7 +79,8 @@ function kindAndDescription(text: string): { kind: ItemKind; description: string
     [/диван/iu, "sofa", "ספה"],
     [/\bbeds?\b/i, "bed", "מיטה"],
     [/\bsofas?\b|\bcouches?\b/i, "sofa", "ספה"],
-    [/מיטה/i, "bed", "מיטה"],
+    // מטה is the common missing-י typo for מיטה in live WhatsApp traffic.
+    [/מיטה|(?:^|[^\u05D0-\u05EA])מטה(?=[^\u05D0-\u05EA]|$)/iu, "bed", "מיטה"],
     [/שידה/i, "other", "שידה"],
     [/מנורת?\s*שולחן|מנורה/i, "other", "מנורה"],
     [/גוף\s*תאורה/i, "other", "גוף תאורה"],
@@ -125,12 +126,21 @@ const plan = (text: string, commands: Command[]): Plan => ({
 });
 
 function floor(text: string): number | null {
-  if (/קומת? קרקע/.test(text)) return 0;
-  const matches = [...text.matchAll(/קומה\s*(-?\d+)/g)];
+  const t = norm(text);
+  // Customer may answer a floor ask with bare «קרקע» / «קומת קרקע».
+  if (/קומת?\s*קרקע|(?:^|[\s,])קרקע(?:[\s,!.]|$)/u.test(t)) return 0;
+  const matches = [...t.matchAll(/קומה\s*(-?\d+)/g)];
   const match = matches.at(-1);
   if (match) return Number(match[1]);
   // An apartment number is not a floor. Never invent קומה from «דירה N».
   return null;
+}
+
+function preferredTime(text: string): string | null {
+  const match = norm(text).match(
+    /(?:אחרי|לפני|בשעה|סביב)\s+\d{1,2}(?::\d{2})?|בין\s+\d{1,2}\s*[-–]\s*\d{1,2}/u,
+  );
+  return match?.[0] ?? null;
 }
 
 /** "מאשר ליצור קשר" often trails an address line with no punctuation. */
@@ -372,6 +382,7 @@ function suppliedPartyLocation(text: string, role: "donor" | "receiver"): Comman
         settlement,
         address: `רחוב ${street[1]} ${street[2]}`,
         floor: floor(pickupText),
+        ...(preferredTime(text) ? { preferred_time: preferredTime(text) } : {}),
       };
     }
   }
@@ -392,6 +403,7 @@ function suppliedPartyLocation(text: string, role: "donor" | "receiver"): Comman
     settlement,
     address,
     floor: floor(text),
+    ...(preferredTime(text) ? { preferred_time: preferredTime(text) } : {}),
   };
 }
 
@@ -488,9 +500,48 @@ function hasPartialNamedHandoff(ctx: Context): boolean {
  * Handles the predictable parts of the conversation without an external model.
  * Returning null intentionally delegates only genuinely free-form language to AI.
  */
+function replaceExtraChoice(text: string): "replace" | "add" | null {
+  const t = norm(text);
+  if (/^(?:במקום|להחליף|החלף|תחת)(?:\s|$)/u.test(t) || /(?:^|[\s,])במקום(?:[\s,]|$)/u.test(t))
+    return "replace";
+  if (
+    /^(?:בנוסף|גם|ועוד)(?:\s|$)/u.test(t) ||
+    /(?:^|[\s,])בנוסף(?:[\s,]|$)/u.test(t) ||
+    /פריט\s+נוסף|עוד\s+פריט/.test(t)
+  )
+    return "add";
+  return null;
+}
+
+function recipientExtraChoice(text: string): "same" | "other" | null {
+  const t = norm(text);
+  if (/אותו\s+מקבל|לאותו\s+מקבל|לאותו\s+אדם|לאותה|אותו/.test(t) && !/אחר/.test(t))
+    return "same";
+  if (/מקבל\s+אחר|לאדם\s+אחר|אדם\s+אחר|מישהו\s+אחר|אחר/.test(t))
+    return "other";
+  return null;
+}
+
 export function rulePlan(ctx: Context): Plan | null {
   const text = (ctx.message.transcript ?? ctx.message.text).trim();
   if (!text) return null;
+  const pendingExtra = ctx.conversation.pending_extra_item ?? null;
+  if (pendingExtra?.stage === "replace_or_add") {
+    const choice = replaceExtraChoice(text);
+    // Compat: still resolve במקום/בנוסף when pending_extra exists.
+    // Unclear answers defer to AI — do not force sticky {type:next}.
+    if (choice) return plan(text, [{ type: "resolve_extra_item", choice }]);
+    return null;
+  }
+  if (pendingExtra?.stage === "same_or_other_recipient") {
+    const choice = recipientExtraChoice(text);
+    if (choice) return plan(text, [{ type: "resolve_extra_recipient", choice }]);
+    return null;
+  }
+  if (pendingExtra?.stage === "confirm_another_delivery") {
+    // AI owns follow-up donate/next; do not force a sticky plan.
+    return null;
+  }
   if (customerCancelIntent(text)) {
     const requests = ctx.requests ?? [];
     const selected = requests.find(
@@ -595,14 +646,23 @@ export function rulePlan(ctx: Context): Plan | null {
     // as direct and never enters the open-donation photo gate.
     const other = selfMove
       ? ctx.conversation.phone
-      : namedRecipientPhone(text) ?? standalonePhone(text);
+      : namedRecipientPhone(text) ??
+        standalonePhone(text) ??
+        ctx.message.contacts[0]?.phone ??
+        null;
     const commands: Command[] = [
       {
         type: "donate",
         items: [{ ...item, quantity: 1 }],
         counterparty_phone: other,
-        counterparty_name: namedRecipientName(text),
-        direct: Boolean(other) || directHandoffIntent(text),
+        counterparty_name:
+          namedRecipientName(text) ??
+          ctx.message.contacts[0]?.name?.replace(/^אא\s+/u, "").trim() ??
+          null,
+        direct:
+          Boolean(other) ||
+          directHandoffIntent(text) ||
+          Boolean(ctx.message.contacts[0]?.phone),
         free: true,
         working:
           /שבור|מקולקל|לא\s+(?:תקין|שמיש|עובד)/.test(text)
@@ -640,6 +700,7 @@ export function rulePlan(ctx: Context): Plan | null {
           settlement: place,
           address: null,
           floor: floor(text),
+          ...(preferredTime(text) ? { preferred_time: preferredTime(text) } : {}),
         });
     }
     return plan(text, commands);
@@ -664,14 +725,19 @@ export function rulePlan(ctx: Context): Plan | null {
       );
     const recipientPhone =
       ctx.conversation.pending_counterparty_phone ??
+      ctx.message.contacts[0]?.phone ??
       standalonePhone(text) ??
       namedRecipientPhone(text);
+    const recipientFromCard =
+      recipientName ??
+      ctx.message.contacts[0]?.name?.replace(/^אא\s+/u, "").trim() ??
+      null;
     return plan(text, [
       {
         type: "donate",
         items: [{ ...item, quantity: 1 }],
         counterparty_phone: recipientPhone,
-        counterparty_name: recipientName,
+        counterparty_name: recipientFromCard,
         direct: true,
         free: true,
         working: true,
@@ -682,6 +748,34 @@ export function rulePlan(ctx: Context): Plan | null {
   // Named handoff without an item yet: remember the recipient and ask only
   // for the missing item. Do not escalate or invent a donation.
   if (!item && directHandoffIntent(text))
+    return plan(text, [{ type: "next" }]);
+  // Self-name after "רוצה למסור ל…" (pending or recent history): keep the
+  // sticky handoff and ask for the item — never re-ask מסירה/קבלה.
+  if (
+    !item &&
+    !activeRequest(ctx) &&
+    explicitName(text) &&
+    (ctx.conversation.pending_counterparty_name || hasPartialNamedHandoff(ctx))
+  )
+    return plan(text, [{ type: "next" }]);
+  // Contact card / phone after a sticky donate handoff: store the number and
+  // ask for the item. Do not fall through to choose_request / path re-ask.
+  if (
+    !item &&
+    !activeRequest(ctx) &&
+    (standalonePhone(text) || ctx.message.contacts[0]?.phone) &&
+    (ctx.conversation.pending_counterparty_name ||
+      hasPartialNamedHandoff(ctx) ||
+      donationIntent(
+        (ctx.history ?? [])
+          .filter((entry) => entry.role === "user")
+          .slice(-6)
+          .map((entry) => entry.content)
+          .join("\n") +
+          "\n" +
+          text,
+      ))
+  )
     return plan(text, [{ type: "next" }]);
   if (
     !item &&
@@ -728,8 +822,29 @@ export function rulePlan(ctx: Context): Plan | null {
 
   const current = activeRequest(ctx);
   if (!current) {
+    const search = ctx.active_search;
+    if (search) {
+      const settlement =
+        mentionedAllowedSettlement(text) ?? beitShean(text);
+      const address = streetPhrase(text);
+      const seekFloor = floor(text);
+      const seekName = explicitName(text);
+      if (settlement || address || seekFloor !== null || seekName)
+        return plan(text, [
+          {
+            type: "seek",
+            kind: search.kind,
+            ...(seekName ? { name: seekName } : {}),
+            ...(settlement ? { settlement } : {}),
+            ...(address ? { address } : {}),
+            ...(seekFloor !== null ? { floor: seekFloor } : {}),
+          },
+        ]);
+    }
     if (
       mentionedAllowedSettlement(text) ||
+      streetPhrase(text) ||
+      floor(text) !== null ||
       (/(?:ליד|קרוב|באזור|סמוך)/u.test(normalizedText) &&
         /בית\s*שאן|beit\s+she'?an/i.test(text))
     )
@@ -880,6 +995,34 @@ export function rulePlan(ctx: Context): Plan | null {
     }
   }
 
+  // Bare personal name after we asked for the name (e.g. «שלי»).
+  if (!party.name) {
+    const prior = ctx.history.at(-1)?.content ?? "";
+    const askedName =
+      /חסר(?:ה)?(?:\s+רק)?\s+השם|מה שמך|נא לציין שם|שואלים לשמך|שם מלא/u.test(
+        prior,
+      );
+    const bare = norm(text).trim();
+    if (
+      askedName &&
+      looksLikePersonName(bare) &&
+      !/(?:רחוב|שכונ|קומה|בית\s*שאן|תמונה|כן|לא)/u.test(bare)
+    ) {
+      return plan(text, [
+        {
+          type: "details",
+          request_number: current.number,
+          role: party.role,
+          name: bare,
+          settlement: null,
+          address: null,
+          floor: null,
+          preferred_time: null,
+        },
+      ]);
+    }
+  }
+
   // A direct handoff commonly arrives as two WhatsApp messages: first the
   // item/name, then a phone number or contact card. Persist that second
   // message deterministically before asking the AI to phrase anything.
@@ -906,8 +1049,10 @@ export function rulePlan(ctx: Context): Plan | null {
     askedVerification &&
     current.origin === "direct" &&
     current.parties.some((item) => item.role !== party.role) &&
-    (yes(text) || no(text) || explicitApproval(text))
+    (yes(text) || no(text) || explicitApproval(text) || contactConsent(text))
   ) {
+    // Bare «כן» still reaches contact_counterparty; the command refuses to
+    // message a third party without an explicit confirmation phrase.
     const consent = !no(text);
     const commands: Command[] = [];
     if (consent) {
@@ -1092,11 +1237,16 @@ export function rulePlan(ctx: Context): Plan | null {
 
   if (party.settlement && !party.address) {
     const address = norm(text);
+    const repeatsTown =
+      Boolean(party.settlement && norm(party.settlement) === address) ||
+      mentionedAllowedSettlement(text) !== null;
     if (
       address &&
       !yes(address) &&
       !no(address) &&
-      !/^(?:בעצם\s+)?קומה\s*-?\d+$/u.test(address)
+      !/^(?:בעצם\s+)?קומה\s*-?\d+$/u.test(address) &&
+      !repeatsTown &&
+      floor(address) === null
     )
       return plan(text, [
         {
@@ -1107,6 +1257,22 @@ export function rulePlan(ctx: Context): Plan | null {
           settlement: null,
           address,
           floor: floor(address),
+        },
+      ]);
+  }
+
+  if (party.address && party.floor === null) {
+    const value = floor(text);
+    if (value !== null)
+      return plan(text, [
+        {
+          type: "details",
+          request_number: current.number,
+          role: party.role,
+          name: null,
+          settlement: null,
+          address: null,
+          floor: value,
         },
       ]);
   }

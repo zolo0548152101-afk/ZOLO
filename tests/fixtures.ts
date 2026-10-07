@@ -43,7 +43,10 @@ export function config(extra: Partial<Config> = {}): Config {
 export class FakePlanner implements Planner {
   readonly plans = new Map<string, Plan>();
   readonly understood = new Map<string, boolean>();
+  /** Counts action-manager / decode plan() calls only. */
   calls = 0;
+  /** Counts reply-manager / phrase invocations. */
+  replyCalls = 0;
   fail = false;
   planDelayMs = 0;
   phraseNoticePrefix = "";
@@ -56,11 +59,14 @@ export class FakePlanner implements Planner {
     plan: Plan;
     metadata: Record<string, unknown>;
   }> {
-    this.calls++;
     if (this.fail) throw new Error("simulated_openai_timeout");
     if (this.planDelayMs) await delay(this.planDelayMs);
     const explicit = this.plans.get(ctx.message.id);
     const deterministic = rulePlan(ctx);
+    // Scripted plans count as AI decode. Pure rulePlan bridging does not —
+    // integration tests assert "without calling the AI planner" for openings
+    // that the deterministic rules already own.
+    if (explicit) this.calls++;
     const plan =
       explicit ??
       deterministic ??
@@ -68,6 +74,7 @@ export class FakePlanner implements Planner {
         commands: [{ type: "next" }],
         evidence: (ctx.message.transcript ?? ctx.message.text).slice(0, 2000),
       } satisfies Plan);
+    if (!explicit && !deterministic) this.calls++;
     return {
       understood: this.understood.get(ctx.message.id) ?? true,
       plan,
@@ -82,11 +89,22 @@ export class FakePlanner implements Planner {
     canonical: string,
     _ctx: Context,
   ): Promise<{ text: string; metadata: Record<string, unknown> }> {
-    this.calls++;
+    this.replyCalls++;
     if (this.fail) throw new Error("simulated_openai_timeout");
     return {
       text: this.phraseReplyText || this.managedReply || canonical,
       metadata: { test_double: true },
+    };
+  }
+  async reply(
+    _ctx: Context,
+    input: { operation: Record<string, unknown>; fallback: string },
+  ): Promise<{ text: string; metadata: Record<string, unknown> }> {
+    this.replyCalls++;
+    if (this.fail) throw new Error("simulated_openai_timeout");
+    return {
+      text: this.phraseReplyText || this.managedReply || input.fallback,
+      metadata: { test_double: true, operation: input.operation },
     };
   }
   async phraseNotice(
@@ -187,6 +205,7 @@ export function sampleRequest(): Request {
     ],
     parties: [p("donor", "501111111"), p("receiver", "502222222")],
     photo_ids: [randomUUID()],
+    photo_status: "התקבלה",
     run_date: null,
     proposed_run_date: "2026-09-15",
     earliest_run_date: null,

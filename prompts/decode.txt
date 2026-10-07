@@ -10,18 +10,21 @@ understood=false רק כשאי אפשר להבין את הכוונה. אז comma
 
 פקודות:
 - donate: פתיחת מסירה/תרומה. items, counterparty_phone, counterparty_name, direct, free, working.
-  מסירה ישירה לטל/מספר = donate עם direct=true ו־counterparty_phone.
+  מסירה ישירה בשם בלבד («להעביר לטל מיטה») = donate עם direct=true, counterparty_name, counterparty_phone=null.
+  מסירה ישירה עם מספר = donate עם direct=true ו־counterparty_phone.
   העברה לעצמי/אליי = donate עם counterparty_phone של השולח ו־direct=true.
+  אל תפתח donate כפול לאותו פריט פתוח — הוספת מקבל = counterparty על request_number הקיים. שולחן+כיסאות = פריט אחד.
+  מקום עמום (מאילת/אילת/טירת צבי בלי רחוב או בית שאן) = next לבירור, לא details עם settlement מחוץ לתחום.
 - seek: חיפוש לקבל פריט («אני מחפש/מבקש/צריך לקבל»). kind בלבד. לא donate ולא תמונה.
 - details: request_number, role donor|receiver, name, settlement, address, floor.
   איסוף = donor. מסירה = receiver. «השם שלי» = name של השולח.
   דירה היא לא קומה. אל תמלא floor מתוך «דירה N».
   details לבד בלי פנייה פתוחה אינו פותח פנייה — חייב donate או seek קודם.
 - item_facts: working, free, needs_disassembly, wardrobe_small_whole, oven_type.
-  «מאשר את המועד» אינו פירוק ואין לשלוח needs_disassembly.
+  «מאשר את המועד» אינו פירוק ואין לשלוח needs_disassembly. אל תחליף פריט בשקט — אם עמום במקום/בנוסף החזר next.
 - approve_self: אישור זהות של השולח בלבד. לא מאשר אדם אחר.
 - approve_schedule: date בתבנית YYYY-MM-DD, רק אם זו proposed_run_date שכבר ב-snapshot והשולח מאשר את המועד.
-- contact_counterparty: true רק על «מאשר ליצור קשר» או סירוב מפורש. מספר טלפון לבדו אינו הסכמה.
-- counterparty, cancel, escalate, status, select, next: לפי המשמעות. next כשאין עובדה חדשה והבקשה ברורה.
+- contact_counterparty: true על «כן» / «בסדר» / «תפנו» אחרי ששאלנו אם לפנות לצד השני לאימות, או על סירוב מפורש (contact=false). מספר טלפון לבדו אינו הסכמה. אין לדרוש ניסוח כמו «כן, תפנה אליו».
+- counterparty, cancel, escalate, status, select, next: לפי המשמעות. next כשאין עובדה חדשה, כשיש שאלת הבהרה מהלקוח, או כשצריך לברר במקום/בנוסף בלי כתיבה.
 
-אזור, שלישי 16:00–20:00, קיבולת, והסכמה לפני פנייה לצד השני נאכפים בקוד. אל תמציא אותם.
+גבולות קשים בקוד: אזור שירות; שלישי 16:00–20:00; קיבולת עד עשר; כפילות מוסר+מקבל+פריט(+תאריך) — לא לפתוח פנייה תאומה בלי אישור מפורש להובלה נוספת (ואם גם התאריך זהה — רק עדכון). שגיאות כתיב בפריט — פרש לפי כוונה סבירה.

@@ -1,21 +1,309 @@
 import {
   AppError,
+  type PhotoStatus,
   type Request,
   type Item,
   type Party,
   type Plan,
+  type Role,
 } from "./types.js";
 export const SERVICE_TOWNS =
-  "בית שאן, מסילות, ירדנה, בית אלפא, טירת צבי, כפר רופין ומחולה";
+  "בית שאן, מסילות, ירדנה, בית אלפא, טירת צבי, שדה אליהו, כפר רופין ומחולה";
 export const OUTSIDE =
   `אנחנו פועלים רק ב${SERVICE_TOWNS}. לא נוכל לסייע בהובלה הזו.`;
+/** Uncertain / borderline settlement: keep collecting; team checks distance. */
+export const DISTANCE_REVIEW_REPLY =
+  "נברר אם המרחק מתאים ונחזור אליך.";
+/** Bot cannot answer a question: park for team, keep collecting. */
+export const CHECK_LATER_REPLY = "אבדוק ואחזור אליך עם תשובה.";
 export const PHOTO_THANKS = "תודה, התמונה התקבלה.";
+/** Legacy fixed line — prefer SOFT_PHOTO_ASK + summarizeTurnChanges for new replies. */
 export const PHOTO_FIRST = "בשמחה. כדי להמשיך, נא לשלוח תמונה של הפריט.";
+/** Soft photo nudge: optional, never blocks the next missing detail. */
+export const SOFT_PHOTO_ASK =
+  "אם יש תמונה של הפריט — אפשר לשלוח עכשיו; אם אין, נמשיך בפרטים.";
+/** Persisted request.photo_status values (Hebrew, match DB CHECK). */
+export const PHOTO_STATUS = {
+  NOT_ASKED: "לא בוקשה",
+  ASKED: "בוקשה",
+  NO_PHOTO: "אין תמונה",
+  RECEIVED: "התקבלה",
+} as const satisfies Record<string, PhotoStatus>;
 /** Same-day pickup is not a promise. Deliveries stay on the Tuesday window. */
 export const SAME_DAY_WINDOW =
   "אי אפשר לאסוף היום. ההובלות רק ביום שלישי בין 16:00 ל־20:00.";
 export function sameDayDemand(text: string): boolean {
   return /(?:^|[^א-ת])היום(?=$|[^א-ת])/u.test(norm(text));
+}
+/** Customer declined or deferred a photo — continue to the next missing field. */
+export function photoDeclined(text: string): boolean {
+  const t = norm(text);
+  return (
+    /אין(?:\s+לי)?\s+תמונה|בלי\s+תמונה|לא\s+(?:אשלח|שולח|יש)\s+תמונה|תמונה\s+אין|כרגע\s+אין(?:\s+לי)?(?:\s+תמונה)?|אין\s+כרגע/.test(
+      t,
+    ) || /no\s+photo|don'?t\s+have\s+(?:a\s+)?photo/i.test(text)
+  );
+}
+/** After a one-time ask, any non-photo reply closes the photo gate. */
+export function photoStatusSkipsGate(status: PhotoStatus | undefined): boolean {
+  return (
+    status === PHOTO_STATUS.ASKED ||
+    status === PHOTO_STATUS.NO_PHOTO ||
+    status === PHOTO_STATUS.RECEIVED
+  );
+}
+/**
+ * True when the customer already understands the product path
+ * (donate / receive / item / contact) — no self-intro needed.
+ */
+export function customerIntentClear(text: string): boolean {
+  const t = norm(text).replace(/\s+/gu, " ").trim();
+  if (!t) return false;
+  if (
+    /^(?:שלום|היי|הי|בוקר טוב|ערב טוב|צחרים טובים|צהריים טובים)[.!?]*$/u.test(t)
+  )
+    return false;
+  if (
+    /(?:למסור|לתרום|להעביר|לקבל|מבקש|צריך|מסירה|תרומה|מוסר|מקבל)/u.test(t)
+  )
+    return true;
+  if (
+    /מיטה|(?:^|[^\u05D0-\u05EA])מטה(?=[^\u05D0-\u05EA]|$)|ספה|שידה|מנורה|שולחן|כיסא|מקרר|מכונת|תנור|ארון|פריט|רהיט/u.test(
+      t,
+    )
+  )
+    return true;
+  if (/כרטיס איש קשר|BEGIN:VCARD/i.test(text)) return true;
+  if (/\d{8,10}/.test(t) && /(?:ל|עבור|אל)/u.test(t)) return true;
+  return false;
+}
+export function displayPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, "");
+  const local =
+    digits.length === 12 && digits.startsWith("972")
+      ? digits.slice(3)
+      : digits.length === 10 && digits.startsWith("0")
+        ? digits.slice(1)
+        : digits;
+  if (local.length === 9 && local.startsWith("5"))
+    return `0${local.slice(0, 2)}-${local.slice(2)}`;
+  return phone;
+}
+/**
+ * Ack only fields that were written this turn (from before→after).
+ * Values come from `after` (DB state after the write) — never invented.
+ * Returns null when nothing new was persisted.
+ */
+export function summarizeTurnChanges(
+  before: Request | null | undefined,
+  after: Request | null | undefined,
+): string | null {
+  if (!after) return null;
+  const beforeItems = before?.items ?? [];
+  const afterItems = after.items ?? [];
+  const itemsNew =
+    afterItems.length > 0 &&
+    (beforeItems.length === 0 ||
+      afterItems.some(
+        (item, i) =>
+          item.description && item.description !== beforeItems[i]?.description,
+      ));
+  const itemText = itemsNew
+    ? afterItems
+        .map((i) => i.description?.trim())
+        .filter((x): x is string => Boolean(x))
+        .join(" ו")
+    : "";
+
+  const beforeReceiver = before?.parties?.find((p) => p.role === "receiver");
+  const afterReceiver = after.parties.find((p) => p.role === "receiver");
+  const receiverNew = Boolean(afterReceiver && !beforeReceiver);
+  const receiverNameNew =
+    receiverNew ||
+    Boolean(
+      afterReceiver?.name && afterReceiver.name !== (beforeReceiver?.name ?? null),
+    );
+  const receiverPhoneNew =
+    receiverNew ||
+    Boolean(
+      afterReceiver?.phone &&
+        afterReceiver.phone !== (beforeReceiver?.phone ?? null),
+    );
+  const beforeOwn = before?.parties?.find((p) => p.phone === after.parties.find((x) => x.role === "donor")?.phone);
+  const afterDonor = after.parties.find((p) => p.role === "donor");
+  const beforeDonor = before?.parties?.find((p) => p.role === "donor");
+  const settlementNew = Boolean(
+    afterDonor?.settlement &&
+      afterDonor.settlement !== (beforeDonor?.settlement ?? null),
+  );
+  const addressNew = Boolean(
+    afterDonor?.address && afterDonor.address !== (beforeDonor?.address ?? null),
+  );
+  const nameNew = Boolean(
+    afterDonor?.name && afterDonor.name !== (beforeDonor?.name ?? null),
+  );
+  const floorNew = Boolean(
+    afterDonor &&
+      afterDonor.floor !== null &&
+      afterDonor.floor !== (beforeDonor?.floor ?? null),
+  );
+
+  // Nothing newly written this turn.
+  if (
+    !itemText &&
+    !receiverNameNew &&
+    !receiverPhoneNew &&
+    !settlementNew &&
+    !addressNew &&
+    !nameNew &&
+    !floorNew
+  )
+    return null;
+
+  // Fresh handoff write: item and/or receiver captured together.
+  if (itemText || receiverNameNew || receiverPhoneNew) {
+    const name = receiverNameNew ? afterReceiver?.name : null;
+    const phone = receiverPhoneNew ? afterReceiver?.phone : null;
+    if (itemText && name && phone)
+      return `מעולה, רשמתי שאתה רוצה למסור ${itemText} ל${name} (${displayPhone(phone)})`;
+    if (itemText && name)
+      return `מעולה, רשמתי שאתה רוצה למסור ${itemText} ל${name}`;
+    if (itemText && phone)
+      return `מעולה, רשמתי שאתה רוצה למסור ${itemText} למספר ${displayPhone(phone)}`;
+    if (itemText) return `מעולה, רשמתי שאתה רוצה למסור ${itemText}`;
+    if (name && phone)
+      return `מעולה, רשמתי מסירה ל${name} (${displayPhone(phone)})`;
+    if (name) return `מעולה, רשמתי מסירה ל${name}`;
+  }
+
+  // Later turns: only the field that just changed.
+  if (settlementNew && afterDonor?.settlement)
+    return `מעולה, רשמתי ${afterDonor.settlement}`;
+  if (addressNew && afterDonor?.address) {
+    const place = [afterDonor.address, afterDonor.settlement]
+      .filter(Boolean)
+      .join(" ");
+    return `מעולה, רשמתי ${place}`;
+  }
+  const afterRecvSettlementNew = Boolean(
+    afterReceiver?.settlement &&
+      afterReceiver.settlement !== (beforeReceiver?.settlement ?? null),
+  );
+  const afterRecvAddressNew = Boolean(
+    afterReceiver?.address &&
+      afterReceiver.address !== (beforeReceiver?.address ?? null),
+  );
+  if (afterRecvAddressNew && afterReceiver?.address) {
+    const place = [afterReceiver.address, afterReceiver.settlement]
+      .filter(Boolean)
+      .join(" ");
+    return `מעולה, רשמתי יעד ${place}`;
+  }
+  if (afterRecvSettlementNew && afterReceiver?.settlement)
+    return `מעולה, רשמתי יעד ${afterReceiver.settlement}`;
+  if (floorNew && afterDonor && afterDonor.floor !== null)
+    return afterDonor.floor === 0
+      ? "מעולה, רשמתי קומת קרקע"
+      : `מעולה, רשמתי קומה ${afterDonor.floor}`;
+  if (nameNew && afterDonor?.name)
+    return `נעים מאוד ${afterDonor.name}, רשמתי`;
+  void beforeOwn;
+  return null;
+}
+
+/** When nothing new was written — never resend the identical previous question. */
+export function noProgressReply(
+  r: Request,
+  phone: string,
+  customerText: string,
+  previousBot: string,
+): string {
+  const q = nextQuestion(r, phone);
+  const p = ownParty(r, phone);
+  const t = norm(customerText);
+  const alreadyStored =
+    Boolean(p.settlement && t.includes(norm(p.settlement))) ||
+    Boolean(p.address && t.includes(norm(p.address))) ||
+    Boolean(p.name && t.includes(norm(p.name)));
+  const field = q.missing?.field ?? null;
+  const required =
+    field === "settlement" ||
+    field === "address" ||
+    field === "name" ||
+    field === "floor";
+  const needLabel =
+    field === "settlement"
+      ? "היישוב"
+      : field === "address"
+        ? "הכתובת או תיאור המקום"
+        : field === "floor"
+          ? "הקומה"
+          : field === "name"
+            ? "השם"
+            : "הפרט החסר";
+  // Contact consent: plain כן/לא is enough — do not demand a special phrase.
+  if (field === "contact_counterparty" || /אימות הפרטים/.test(q.text)) {
+    const other = r.parties.find((x) => x.phone !== phone);
+    const who =
+      other?.name ?? (p.role === "donor" ? "המקבל" : "המוסר");
+    return `אפשר שאכתוב ל${who} כדי לאמת את הפרטים? כן או לא מספיק.`;
+  }
+  let ask = q.text;
+  // Soft variant when the previous bot line already asked the same thing.
+  if (previousBot && ask && previousBot.includes(ask.slice(0, Math.min(24, ask.length)))) {
+    if (field === "address")
+      ask =
+        p.settlement === "בית שאן"
+          ? "כדי להמשיך צריך כתובת מדויקת — רחוב ומספר בית."
+          : "כדי להמשיך צריך תיאור קצר של המקום ביישוב, למשל «ליד המזכירות» או «בכניסה».";
+    else if (field === "settlement")
+      ask = "כדי להמשיך צריך את שם היישוב שבו נמצא הפריט.";
+    else if (field === "floor")
+      ask = "כדי להמשיך צריך לדעת באיזו קומה — אפשר גם לכתוב «קרקע».";
+    else if (required) ask = `כדי להמשיך צריך את ${needLabel}.`;
+  }
+  if (alreadyStored)
+    return `הפרט הזה כבר רשום אצלנו. ${ask}`.trim();
+  if (required)
+    return `אפשר לענות על ${needLabel}? ${ask}`.trim();
+  return `אפשר לענות על זה בבקשה? ${ask}`.trim();
+}
+export function photoAskAlreadySent(
+  history: { role: string; content: string }[],
+): boolean {
+  return history.some(
+    (entry) =>
+      entry.role === "assistant" &&
+      /תמונה/.test(entry.content) &&
+      /(?:שלח|לשלוח|אפשר לשלוח|נא לשלוח|אם יש)/u.test(entry.content),
+  );
+}
+/** Next ask, optionally prefixed with this-turn DB ack only. */
+export function composeTurnReply(
+  ask: string,
+  before: Request | null | undefined,
+  after: Request | null | undefined,
+): string {
+  const ack = summarizeTurnChanges(before, after);
+  const next = ask.trim();
+  if (ack && next && !next.includes(ack)) return `${ack}\n${next}`;
+  return next || ack || "";
+}
+/** @deprecated use composeTurnReply — kept as alias for call sites mid-migration */
+export function composeRecordedReply(
+  r: Request,
+  _phone: string,
+  ask: string,
+  before: Request | null | undefined = null,
+): string {
+  return composeTurnReply(ask, before, r);
+}
+export function openingPhotoReply(
+  r: Request,
+  _phone?: string,
+  before: Request | null | undefined = null,
+): string {
+  return composeTurnReply(SOFT_PHOTO_ASK, before, r);
 }
 export const CONDITION_QUESTION = "האם הפריט תקין ושמיש ב־100%?";
 export const DEFAULT_TRANSPORT_CAPACITY = 10;
@@ -162,7 +450,6 @@ const OUTSIDE_PLACES: { name: string; pattern: RegExp }[] = [
   { name: "ניר דוד", pattern: /ניר\s+דוד/u },
   { name: "בית השיטה", pattern: /בית\s+השיטה/u },
   { name: "חמדיה", pattern: /חמדיה/u },
-  { name: "שדה אליהו", pattern: /שדה\s+אליהו/u },
   { name: "עין הנציב", pattern: /עין\s+הנציב/u },
   { name: "מנחמיה", pattern: /מנחמיה/u },
   { name: "בית יוסף", pattern: /בית\s+יוסף/u },
@@ -206,9 +493,31 @@ const ALLOWED_PLACES: { name: string; pattern: RegExp }[] = [
   { name: "ירדנה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?ירדנה(?=$|[^א-ת])/u },
   { name: "בית אלפא", pattern: /בית\s*[-־]?\s*אלפא/u },
   { name: "טירת צבי", pattern: /(?:קיבוץ\s+)?טירת\s+צבי/u },
+  { name: "שדה אליהו", pattern: /(?:קיבוץ\s+)?שדה\s+אליהו/u },
   { name: "כפר רופין", pattern: /כפר\s+רופין/u },
   { name: "מחולה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?מחולה(?=$|[^א-ת])/u },
 ];
+
+/** Customer keeps pushing after a clear denial (outside area / policy). */
+export function customerInsistsAfterDenial(text: string): boolean {
+  const t = norm(text);
+  return (
+    /בכל\s*זאת|עדיין\s+(?:רוצה|מבקש)|אני\s+מתעקש|תעשו\s+(?:לי|בכל)|חייבים|אין\s+ברירה|למה\s+לא|אני\s+צריך\s+ש|תמצאו\s+דרך/.test(
+      t,
+    ) || /insist|anyway|still\s+want/i.test(text)
+  );
+}
+
+export function appendTeamNote(
+  existing: string | null | undefined,
+  note: string,
+): string {
+  const clean = note.trim();
+  if (!clean) return (existing ?? "").trim();
+  if (!existing?.trim()) return clean;
+  if (existing.includes(clean)) return existing.trim();
+  return `${existing.trim()}\n${clean}`;
+}
 
 /** An allowed town named as the place itself, not merely "near Beit She'an". */
 export function mentionedAllowedSettlement(text: string): string | null {
@@ -321,7 +630,8 @@ export function directHandoffIntent(t: string): boolean {
     return true;
   // "אולי יעזור למישהו" is an open donation, not a named/direct handoff.
   // Require an explicit qualifier when no real recipient name/phone exists.
-  if (/(?:מקבל(?:ת)?\s+(?:מסוים|מוגדר)|ל(?:מישהו|מישהי|אדם)\s+(?:מסוים|מסוימת|ספציפי(?:ת)?|מוגדר(?:ת)?))/ .test(text))
+  // "מישו" is a common typo for "מישהו".
+  if (/(?:מקבל(?:ת)?\s+(?:מסוים|מוגדר)|ל(?:מישהו|מישהי|מישו|אדם)\s+(?:מסוים|מסוימת|ספציפי(?:ת)?|מוגדר(?:ת)?))/ .test(text))
     return /(?:להעביר|למסור|מסירה|מסירה ישירה)/.test(text);
   // A named recipient is often written naturally as "למסור מיטה לטל" or
   // "למסירה לטל". Bare "למסירה" / place names stay open donations.
@@ -336,18 +646,46 @@ export function directHandoffIntent(t: string): boolean {
     )
   );
 }
+/**
+ * Evidence must come from the customer message. The action manager owns field
+ * values (spelling, kind labels, normalized addresses), so a light typo fix in
+ * the quote — e.g. מטה→מיטה — is allowed. Inventing a different sentence is not.
+ */
+function foldEvidence(value: string): string {
+  return value
+    .normalize("NFKC")
+    .replace(/[\s,.!?;:״׳"'`\-–—]+/gu, "")
+    .replace(/[יו]/gu, "")
+    .toLowerCase();
+}
+
+function evidenceSupportedByText(evidence: string, text: string): boolean {
+  const quote = evidence.trim();
+  const message = text.trim();
+  if (!quote || !message) return false;
+  if (message.includes(quote)) return true;
+  const foldedQuote = foldEvidence(quote);
+  const foldedMessage = foldEvidence(message);
+  if (!foldedQuote || !foldedMessage) return false;
+  return (
+    foldedMessage.includes(foldedQuote) || foldedQuote.includes(foldedMessage)
+  );
+}
+
 export function grounded(plan: Plan, text: string): boolean {
   return (
     plan.commands.every((c) => c.type === "status" || c.type === "next") ||
-    (plan.evidence.length > 0 && text.includes(plan.evidence))
+    (plan.evidence.length > 0 && evidenceSupportedByText(plan.evidence, text))
   );
 }
 export function photoGate(r: Request): boolean {
+  // Ask at most once while photo_status is still «לא בוקשה».
+  // Once «בוקשה» / «אין תמונה» / «התקבלה», never fire again on this request.
   return (
-    r.origin === "donation" &&
+    (r.origin === "donation" || r.origin === "direct") &&
     r.parties.some((p) => p.role === "donor") &&
-    !r.parties.some((p) => p.role === "receiver") &&
-    r.photo_ids.length === 0
+    r.photo_ids.length === 0 &&
+    (r.photo_status ?? PHOTO_STATUS.NOT_ASKED) === PHOTO_STATUS.NOT_ASKED
   );
 }
 export function isClosed(r: Request): boolean {
@@ -383,10 +721,10 @@ export function ownParty(
   return p;
 }
 export function itemError(items: Item[], hasPhoto: boolean): string | null {
+  // Furniture count / grouping is prompt-only (AI decides). Code does not
+  // enforce a numeric item ceiling here — only program disqualifiers below.
   if (items.some((i) => i.kind === "piano" || i.kind === "house_move"))
     return "לא ניתן לסייע בהובלת פסנתרים או בהובלות דירה.";
-  if (items.reduce((n, i) => n + i.quantity, 0) > 2)
-    return "ניתן לסייע בהובלת עד שני פריטים. שולחן וכיסאות נחשבים פריט אחד.";
   if (items.some((i) => i.free === false))
     return "התוכנית מסייעת במסירה בחינם בלבד.";
   if (items.some((i) => i.working === false))
@@ -412,32 +750,89 @@ export function appliance(i: Item): boolean {
     "dishwasher",
   ].includes(i.kind);
 }
+export type MissingRequired = {
+  field: string;
+  role: Role | null;
+  request_number: number;
+} | null;
+
+function missingOf(
+  r: Request,
+  field: string,
+  role: Role | null,
+): MissingRequired {
+  return { field, role, request_number: r.number };
+}
+
+/**
+ * Own-party identity/location must be complete and items must already pass
+ * program rules before we ask consent to contact the other party.
+ */
+export function itemsReadyForHandoff(r: Request): boolean {
+  if (itemError(r.items, r.photo_ids.length > 0)) return false;
+  return r.items.every(
+    (i) =>
+      i.free === true &&
+      i.working === true &&
+      (i.kind !== "wardrobe" || i.wardrobe_small_whole === true) &&
+      (r.origin === "direct" || i.kind !== "oven" || i.oven_type !== null) &&
+      (r.origin === "direct" ||
+        appliance(i) ||
+        i.kind === "wardrobe" ||
+        i.needs_disassembly !== null) &&
+      i.evacuation !== "different",
+  );
+}
+
+export function ownPartyDetailsComplete(r: Request, phone: string): boolean {
+  try {
+    const p = ownParty(r, phone);
+    return Boolean(
+      p.approved_at &&
+        p.approved_by === p.phone &&
+        p.name &&
+        p.settlement &&
+        p.address &&
+        p.floor !== null,
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Ask "contact the other party?" only after own details + transport rules. */
+export function readyToAskContactCounterparty(
+  r: Request,
+  phone: string,
+): boolean {
+  if (
+    r.origin !== "direct" ||
+    r.represents_both_parties ||
+    r.verification_contacted
+  )
+    return false;
+  let role: Role | null = null;
+  try {
+    role = ownParty(r, phone).role;
+  } catch {
+    return false;
+  }
+  if (!r.parties.some((x) => x.role !== role)) return false;
+  return ownPartyDetailsComplete(r, phone) && itemsReadyForHandoff(r);
+}
+
 export function nextQuestion(
   r: Request,
   phone: string,
-): { text: string; floorNote: boolean } {
+): { text: string; floorNote: boolean; missing: MissingRequired } {
   if (r.status === "coordinated")
-    return { text: statusText([r]), floorNote: false };
+    return { text: statusText([r]), floorNote: false, missing: null };
   if (isClosed(r))
-    return { text: `פנייה ${r.number} סגורה.`, floorNote: false };
-  if (r.status === "human") return { text: HUMAN_REPLY, floorNote: false };
+    return { text: `פנייה ${r.number} סגורה.`, floorNote: false, missing: null };
+  if (r.status === "human")
+    return { text: HUMAN_REPLY, floorNote: false, missing: null };
   const p = ownParty(r, phone);
   const donor = p.role === "donor";
-  if (
-    r.origin === "direct" &&
-    !r.represents_both_parties &&
-    !r.verification_contacted &&
-    r.parties.some((x) => x.role !== p.role)
-  )
-    return {
-      text: `האם תרצה שנפנה ל${donor ? "מקבל" : "מוסר"} לצורך אימות הפרטים?`,
-      floorNote: false,
-    };
-  if (r.origin === "direct" && !r.parties.some((x) => x.role !== p.role))
-    return {
-      text: `האם תרצה שנפנה ל${donor ? "מקבל" : "מוסר"} לצורך אימות הפרטים? אם כן, נא לשלוח מספר טלפון או כרטיס איש קשר.`,
-      floorNote: false,
-    };
   if (
     donor &&
     r.items.some(
@@ -447,18 +842,24 @@ export function nextQuestion(
     return {
       text: "אפשר להעביר רק ארון קטן שניתן להעביר שלם, ללא פירוק והרכבה. האם זה ארון כזה?",
       floorNote: false,
+      missing: missingOf(r, "wardrobe_small_whole", "donor"),
     };
   if (donor && r.items.some((i) => i.working === null))
     return {
       text: CONDITION_QUESTION,
       floorNote: false,
+      missing: missingOf(r, "working", "donor"),
     };
   if (
     donor &&
     r.origin !== "direct" &&
     r.items.some((i) => i.kind === "oven" && i.oven_type === null)
   )
-    return { text: "האם זה תנור בילט־אין או תנור משולב?", floorNote: false };
+    return {
+      text: "האם זה תנור בילט־אין או תנור משולב?",
+      floorNote: false,
+      missing: missingOf(r, "oven_type", "donor"),
+    };
   if (
     donor &&
     r.origin !== "direct" &&
@@ -467,11 +868,16 @@ export function nextQuestion(
         !appliance(i) && i.kind !== "wardrobe" && i.needs_disassembly === null,
     )
   )
-    return { text: "האם נדרש פירוק של הפריט לצורך ההובלה?", floorNote: false };
+    return {
+      text: "האם נדרש פירוק של הפריט לצורך ההובלה?",
+      floorNote: false,
+      missing: missingOf(r, "needs_disassembly", "donor"),
+    };
   if (!p.approved_at)
     return {
       text: `נא לאשר את חלקך ב${p.role === "donor" ? "מסירה" : "קבלה"} בפנייה ${r.number}. אישור חלקך נפרד מאישור מועד ההובלה.`,
       floorNote: false,
+      missing: missingOf(r, "approved_at", p.role),
     };
   if (!p.settlement)
     return {
@@ -479,31 +885,71 @@ export function nextQuestion(
         ? "באיזה יישוב נמצא הפריט?"
         : "לאיזה יישוב צריך להעביר את הפריט?",
       floorNote: false,
+      missing: missingOf(r, "settlement", p.role),
     };
   if (!p.name || !p.address)
     return {
       text:
         p.settlement === "בית שאן"
-          ? (!p.name
-              ? p.address
-                ? "תודה. חסר רק השם."
-                : "נא לציין שם וכתובת."
-              : "תודה. חסרה רק הכתובת המדויקת.") +
-            (!p.floor_note_shown && p.floor === null
-              ? " בבניין עם קומות — לציין קומה."
-              : "")
+          ? !p.name
+            ? p.address
+              ? "תודה. חסר השם."
+              : "נא לציין שם וכתובת."
+            : "תודה. חסרה הכתובת המדויקת."
           : !p.name
             ? "נא לציין שם ותיאור כללי של המקום ביישוב, למשל ״בכניסה״ או ״ליד המזכירות״."
-            : "תודה. חסר רק תיאור כללי של המקום ביישוב, למשל ״בכניסה״ או ״ליד המזכירות״.",
-      floorNote:
-        p.settlement === "בית שאן" && !p.floor_note_shown && p.floor === null,
+            : "תודה. חסר תיאור כללי של המקום ביישוב, למשל ״בכניסה״ או ״ליד המזכירות״.",
+      floorNote: false,
+      missing: missingOf(r, !p.name ? "name" : "address", p.role),
+    };
+  // Always ask floor — never invent קומה 0.
+  if (p.floor === null)
+    return {
+      text: "באיזו קומה?",
+      floorNote: !p.floor_note_shown,
+      missing: missingOf(r, "floor", p.role),
+    };
+  if (r.items.some((i) => i.free === null))
+    return {
+      text: "האם הפריט נמסר בחינם, בלי תשלום?",
+      floorNote: false,
+      missing: missingOf(r, "free", "donor"),
+    };
+  // Contact / counterparty only after own details + item rules above.
+  if (
+    r.origin === "direct" &&
+    !r.represents_both_parties &&
+    !r.verification_contacted &&
+    r.parties.some((x) => x.role !== p.role) &&
+    itemsReadyForHandoff(r)
+  )
+    return {
+      text: `האם תרצה שנפנה ל${donor ? "מקבל" : "מוסר"} לצורך אימות הפרטים?`,
+      floorNote: false,
+      missing: missingOf(r, "contact_counterparty", p.role),
     };
   if (!r.parties.some((x) => x.role !== p.role))
     return {
       text: donor
-        ? "האם יש מקבל מסוים? אם כן, נא לשלוח את מספרו או כרטיס איש קשר."
+        ? r.origin === "direct"
+          ? "נא לשלוח את מספר הטלפון של המקבל או כרטיס איש קשר, כדי שנוכל להמשיך בתיאום."
+          : "האם יש מקבל מסוים? אם כן, נא לשלוח את מספרו או כרטיס איש קשר."
         : "נא לשלוח את מספר המוסר או כרטיס איש קשר.",
       floorNote: false,
+      missing: missingOf(r, "counterparty", p.role),
+    };
+  const other = r.parties.find((x) => x.phone !== p.phone);
+  // After consent to contact the other party — wait for their role approval.
+  if (
+    r.origin === "direct" &&
+    r.verification_contacted &&
+    other &&
+    !other.approved_at
+  )
+    return {
+      text: `ממתינים לאישור של ${other.name ?? (other.role === "receiver" ? "המקבל" : "המוסר")}. נעדכן כשיתקבל.`,
+      floorNote: false,
+      missing: missingOf(r, "approved_at", other.role),
     };
   const proposal = r.proposed_run_date;
   if (proposal && p.schedule_approved_date !== proposal) {
@@ -511,12 +957,16 @@ export function nextQuestion(
     return {
       text: `הוצע מועד ההובלה ליום שלישי ${day}/${month}/${year}, בין 16:00–20:00. נא לאשר את המועד במפורש.`,
       floorNote: false,
+      missing: missingOf(r, "schedule_approved_date", p.role),
     };
   }
-  const other = r.parties.find((x) => x.phone !== p.phone);
   if (proposal && other && other.schedule_approved_date !== proposal)
-    return { text: `אישרת את מועד ההובלה בפנייה ${r.number}. ממתינים לאישור המועד של הצד השני.`, floorNote: false };
-  return { text: "הפרטים נשמרו. נעדכן.", floorNote: false };
+    return {
+      text: `אישרת את מועד ההובלה בפנייה ${r.number}. ממתינים לאישור המועד של הצד השני.`,
+      floorNote: false,
+      missing: missingOf(r, "schedule_approved_date", other.role),
+    };
+  return { text: "הפרטים נשמרו. נעדכן.", floorNote: false, missing: null };
 }
 export function readyToProposeSchedule(r: Request): boolean {
   if (

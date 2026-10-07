@@ -13,6 +13,8 @@ import {
   type Mode,
   type RequestLocation,
   type VerificationState,
+  type Search,
+  type ItemKind,
 } from "../domain/types.js";
 import {
   ACTIVE,
@@ -147,12 +149,12 @@ export class Store {
     const base = await c.query<
       Omit<Request, "parties" | "items" | "photo_ids">
     >(
-      `SELECT id,number::int,version,status,origin,verification_contacted,run_date::text,proposed_run_date::text,earliest_run_date::text,preferred_time,represents_both_parties,closed_at::text,human_reason,created_at::text FROM requests WHERE id=$1 ${lock ? "FOR UPDATE" : ""}`,
+      `SELECT id,number::int,version,status,origin,verification_contacted,run_date::text,proposed_run_date::text,earliest_run_date::text,preferred_time,represents_both_parties,closed_at::text,human_reason,photo_status,needs_distance_check,team_notes,created_at::text FROM requests WHERE id=$1 ${lock ? "FOR UPDATE" : ""}`,
       [id],
     );
     if (!base.rows[0]) throw new AppError("request_not_found", 404);
     const parties = await c.query<Party>(
-      `SELECT p.role,co.phone,p.name,p.settlement,p.address,p.floor,p.floor_note_shown,p.approved_at::text,ap.phone AS approved_by,(p.schedule_approved_date::date=COALESCE(r.proposed_run_date,r.run_date)::date AND p.schedule_approved_date IS NOT NULL) AS schedule_approved,p.schedule_approved_date::text,p.schedule_approved_at::text FROM request_parties p JOIN requests r ON r.id=p.request_id JOIN contacts co ON co.id=p.contact_id LEFT JOIN contacts ap ON ap.id=p.approved_by WHERE p.request_id=$1 ORDER BY role`,
+      `SELECT p.role,co.phone,p.name,p.settlement,p.address,p.floor,p.floor_note_shown,p.approved_at::text,ap.phone AS approved_by,(p.schedule_approved_date::date=COALESCE(r.proposed_run_date,r.run_date)::date AND p.schedule_approved_date IS NOT NULL) AS schedule_approved,p.schedule_approved_date::text,p.schedule_approved_at::text FROM request_parties p JOIN requests r ON r.id=p.request_id LEFT JOIN contacts co ON co.id=p.contact_id LEFT JOIN contacts ap ON ap.id=p.approved_by WHERE p.request_id=$1 ORDER BY role`,
       [id],
     );
     const items = await c.query<Item>(
@@ -239,7 +241,7 @@ export class Store {
     const message = await this.message(id, c, lock);
     if (!message.phone) throw new AppError("identity_unresolved", 409);
     const conv = await c.query<Conversation>(
-      `SELECT cv.id,co.phone,cv.chat_id,cv.mode,cv.selected_request_id,cv.version,cv.pending_counterparty_name,cv.pending_counterparty_phone FROM conversations cv JOIN contacts co ON co.id=cv.contact_id JOIN messages m ON m.conversation_id=cv.id WHERE m.id=$1 ${lock ? "FOR UPDATE OF cv" : ""}`,
+      `SELECT cv.id,co.phone,cv.chat_id,cv.mode,cv.selected_request_id,cv.version,cv.pending_counterparty_name,cv.pending_counterparty_phone,cv.pending_extra_item FROM conversations cv JOIN contacts co ON co.id=cv.contact_id JOIN messages m ON m.conversation_id=cv.id WHERE m.id=$1 ${lock ? "FOR UPDATE OF cv" : ""}`,
       [id],
     );
     if (!conv.rows[0]) throw new AppError("conversation_missing", 409);
@@ -251,17 +253,45 @@ export class Store {
     const requests = (await this.active(message.phone, c)).filter(
       (r) => !resetAt || r.created_at > resetAt,
     );
-    // History for the open business conversation only. A finished/coordinated
-    // handoff is out of scope. Prefer the selected open request, else the
-    // earliest still-open request for this phone.
+    // Keep a selected outside-area rejection visible so the AI updates the
+    // same request when the customer corrects the settlement, instead of
+    // opening a brand-new donation.
+    const selectedId = conv.rows[0]!.selected_request_id;
+    if (selectedId && !requests.some((r) => r.id === selectedId)) {
+      try {
+        const selected = await this.request(selectedId, c);
+        if (
+          selected.status === "rejected" &&
+          (!resetAt || selected.created_at > resetAt) &&
+          selected.parties.some((p) => p.phone === message.phone)
+        ) {
+          const outside = await c.query(
+            `SELECT 1 FROM request_events
+              WHERE request_id=$1 AND event_type='outside_area_rejected'
+              LIMIT 1`,
+            [selectedId],
+          );
+          if (outside.rowCount) requests.push(selected);
+        }
+      } catch {
+        /* selected row may have been cleared */
+      }
+    }
+    // History since the last conversation reset (or the full chat when there
+    // is no reset). Do NOT clip to request.created_at: the lead-in turns that
+    // open a request (greeting, path, name, contact card, self-intro) arrive
+    // before the request row exists, and clipping them caused repeated intros
+    // and lost "רוצה למסור ל…" context on the very next message.
     const open = requests.filter(
       (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
     );
-    const selectedOpen =
-      open.find((r) => r.id === conv.rows[0]!.selected_request_id) ??
+    const earliestOpen =
       [...open].sort((a, b) => a.created_at.localeCompare(b.created_at))[0] ??
       null;
-    const historySince = selectedOpen?.created_at ?? resetAt;
+    const selectedOpen =
+      open.find((r) => r.id === conv.rows[0]!.selected_request_id) ??
+      earliestOpen;
+    const historySince = resetAt;
     const h = await c.query<{
       text: string;
       transcript: string | null;
@@ -325,8 +355,35 @@ export class Store {
         role: "assistant",
         content: latest.rows[0].text.slice(0, 2000),
       });
-    const messageText = (message.transcript ?? message.text).trim();
-    if (/(?:טעיתי|תיקון|בעצם|התכוונתי)/.test(messageText)) {
+    // Self-intro is often the first sent outbox before any request exists.
+    // Mirror it into history from outbox so intro-once does not depend on a
+    // request-scoped message.reply window.
+    const introOutbox = await c.query<{ text: string }>(
+      `SELECT o.text FROM outbox o JOIN messages current ON current.id=$2
+       LEFT JOIN conversation_resets cr ON cr.conversation_id=current.conversation_id
+       WHERE o.phone=$1 AND o.state IN ('sent','shadow','simulation')
+         AND o.created_at<=current.received_at
+         AND (cr.reset_at IS NULL OR o.created_at>cr.reset_at)
+         AND (o.text LIKE '%סוכן האוטומטי%' OR o.text LIKE '%בהרצה ניסיונית%')
+       ORDER BY o.seq ASC LIMIT 3`,
+      [message.phone, id],
+    );
+    for (const row of introOutbox.rows) {
+      if (
+        !history.some(
+          (entry) =>
+            entry.role === "assistant" && entry.content.slice(0, 80) === row.text.slice(0, 80),
+        )
+      )
+        history.unshift({
+          role: "assistant",
+          content: row.text.slice(0, 2000),
+        });
+    }
+    // Also surface a recent outside-area rejection when nothing else is open,
+    // even without explicit "טעיתי" wording — customers often just resend the
+    // correct town.
+    if (!requests.some((r) => r.status !== "rejected")) {
       const correction = await c.query<{ id: string }>(
         `SELECT DISTINCT r.id,r.number
          FROM requests r
@@ -341,18 +398,45 @@ export class Store {
          ORDER BY r.number DESC LIMIT 2`,
         [message.phone, resetAt],
       );
-      if (correction.rows.length === 1)
+      if (correction.rows.length === 1 && !requests.some((r) => r.id === correction.rows[0]!.id))
         requests.push(await this.request(correction.rows[0]!.id, c));
     }
     const candidates = (await this.candidates(message.phone, c)).filter(
       (candidate) => !resetAt || candidate.request.created_at > resetAt,
     );
+    const searchRow = await c.query<{
+      kind: ItemKind;
+      state: Search["state"];
+      settlement: string | null;
+      address: string | null;
+      floor: number | string | null;
+      name: string | null;
+    }>(
+      `SELECT s.kind,s.state,s.settlement,s.address,s.floor,s.name
+         FROM searches s JOIN contacts co ON co.id=s.contact_id
+        WHERE co.phone=$1 AND s.state='active'`,
+      [message.phone],
+    );
+    const active_search: Search | null = searchRow.rows[0]
+      ? {
+          kind: searchRow.rows[0].kind,
+          state: searchRow.rows[0].state,
+          settlement: searchRow.rows[0].settlement,
+          address: searchRow.rows[0].address,
+          floor:
+            searchRow.rows[0].floor === null
+              ? null
+              : Number(searchRow.rows[0].floor),
+          name: searchRow.rows[0].name,
+        }
+      : null;
     return {
       message,
       conversation: conv.rows[0],
       requests,
       candidates,
       history,
+      active_search,
     };
   }
   async create(
@@ -379,13 +463,19 @@ export class Store {
       items,
       parties,
       photo_ids: [],
+      photo_status: "לא בוקשה",
       run_date: null,
       proposed_run_date: null,
       earliest_run_date: null,
       preferred_time: null,
-      represents_both_parties: false,
+      represents_both_parties:
+        parties.length === 2 &&
+        Boolean(parties[0]?.phone) &&
+        parties[0]!.phone === parties[1]!.phone,
       closed_at: null,
       human_reason: null,
+      needs_distance_check: false,
+      team_notes: null,
       created_at: new Date().toISOString(),
     };
     await c.query(
@@ -396,8 +486,14 @@ export class Store {
     return r;
   }
   async save(c: pg.PoolClient, r: Request): Promise<void> {
+    if (
+      r.parties.length === 2 &&
+      r.parties[0]!.phone &&
+      r.parties[0]!.phone === r.parties[1]!.phone
+    )
+      r.represents_both_parties = true;
     const result = await c.query(
-      `UPDATE requests SET version=version+1,status=$2,origin=$3,run_date=$4,proposed_run_date=$12,human_reason=$5,preferred_time=$7,earliest_run_date=$8,verification_contacted=$9,represents_both_parties=$10,closed_at=$11,updated_at=clock_timestamp() WHERE id=$1 AND version=$6`,
+      `UPDATE requests SET version=version+1,status=$2,origin=$3,run_date=$4,proposed_run_date=$12,human_reason=$5,preferred_time=$7,earliest_run_date=$8,verification_contacted=$9,represents_both_parties=$10,closed_at=$11,photo_status=$13,needs_distance_check=$14,team_notes=$15,updated_at=clock_timestamp() WHERE id=$1 AND version=$6`,
       [
         r.id,
         r.status,
@@ -411,12 +507,16 @@ export class Store {
         r.represents_both_parties ?? false,
         r.closed_at,
         r.proposed_run_date,
+        r.photo_status ?? "לא בוקשה",
+        r.needs_distance_check ?? false,
+        r.team_notes ?? null,
       ],
     );
     if (result.rowCount !== 1) throw new AppError("version_conflict", 409);
     r.version++;
     for (const p of r.parties) {
-      const id = await this.contact(c, p.phone);
+      // Name-only receiver (AI decided a counterparty before a phone arrived).
+      const id = p.phone ? await this.contact(c, p.phone) : null;
       await c.query(
         `INSERT INTO request_parties(request_id,role,contact_id,name,settlement,address,floor,floor_note_shown,approved_at,approved_by,schedule_approved,schedule_approved_date,schedule_approved_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         ON CONFLICT(request_id,role) DO UPDATE SET contact_id=EXCLUDED.contact_id,name=EXCLUDED.name,settlement=EXCLUDED.settlement,address=EXCLUDED.address,floor=EXCLUDED.floor,approved_at=EXCLUDED.approved_at,approved_by=EXCLUDED.approved_by,schedule_approved=EXCLUDED.schedule_approved,schedule_approved_date=EXCLUDED.schedule_approved_date,schedule_approved_at=EXCLUDED.schedule_approved_at`,
@@ -430,7 +530,7 @@ export class Store {
           p.floor,
           p.floor_note_shown,
           p.approved_at,
-          p.approved_by ? id : null,
+          p.approved_by && id ? id : null,
           Boolean(
             (r.proposed_run_date ?? r.run_date) &&
               p.schedule_approved_date &&
@@ -554,6 +654,8 @@ export class Store {
       "בית אלפא": "בית אלפא",
       "טירת צבי": "טירת צבי",
       "קיבוץ טירת צבי": "טירת צבי",
+      "שדה אליהו": "שדה אליהו",
+      "קיבוץ שדה אליהו": "שדה אליהו",
       "כפר רופין": "כפר רופין",
       "מחולה": "מחולה",
     };
@@ -564,21 +666,52 @@ export class Store {
     const candidates = [lookup, lookup.replace(/\s+\d+[א-ת]?\s*$/, "").trim()].filter(
       (value, index, all) => value && all.indexOf(value) === index,
     );
+    // Prefer allowed over review when aliases collide.
     const r = await c.query<{
       name: string;
       decision: "allowed" | "outside" | "review";
     }>(
-      `SELECT name,decision FROM service_locations
-       WHERE EXISTS (SELECT 1 FROM unnest($1::text[]) AS candidate WHERE candidate=ANY(aliases))
-       UNION ALL
-       SELECT st.name,'allowed'::text FROM streets st
-       JOIN location_datasets ds ON ds.id=st.dataset_id AND ds.active=true
-       WHERE EXISTS (SELECT 1 FROM unnest($1::text[]) AS candidate
-                     WHERE candidate=st.normalized OR candidate=ANY(st.aliases))
-       ORDER BY name LIMIT 1`,
+      `SELECT name,decision FROM (
+         SELECT name,decision,
+                CASE decision WHEN 'allowed' THEN 0 WHEN 'outside' THEN 1 ELSE 2 END AS rank
+           FROM service_locations
+          WHERE EXISTS (SELECT 1 FROM unnest($1::text[]) AS candidate WHERE candidate=ANY(aliases))
+         UNION ALL
+         SELECT st.name,'allowed'::text, 0
+           FROM streets st
+           JOIN location_datasets ds ON ds.id=st.dataset_id AND ds.active=true
+          WHERE EXISTS (SELECT 1 FROM unnest($1::text[]) AS candidate
+                        WHERE candidate=st.normalized OR candidate=ANY(st.aliases))
+       ) hits
+       ORDER BY rank, name
+       LIMIT 1`,
       [candidates],
     );
     return r.rows[0] ?? { name: s, decision: "review" };
+  }
+  /** Ensure a settlement name exists so request_parties FK can store it. */
+  async ensureLocation(
+    c: DB,
+    name: string,
+    decision: "allowed" | "outside" | "review" = "review",
+  ): Promise<string> {
+    const clean = norm(name).trim() || name.trim();
+    await c.query(
+      `INSERT INTO service_locations(name,aliases,decision,is_city)
+       VALUES($1,ARRAY[$1],$2,false)
+       ON CONFLICT(name) DO UPDATE SET
+         aliases=CASE
+           WHEN EXCLUDED.name=ANY(service_locations.aliases) THEN service_locations.aliases
+           ELSE service_locations.aliases || EXCLUDED.aliases
+         END,
+         decision=CASE
+           WHEN service_locations.decision='allowed' THEN service_locations.decision
+           ELSE EXCLUDED.decision
+         END,
+         updated_at=clock_timestamp()`,
+      [clean, decision],
+    );
+    return clean;
   }
   async event(
     c: pg.PoolClient,
@@ -707,6 +840,7 @@ export class Store {
       [r.id, m.media_id, m.phone],
     );
     if (!r.photo_ids.includes(m.media_id)) r.photo_ids.push(m.media_id);
+    r.photo_status = "התקבלה";
   }
   async matchPhoto(
     c: pg.PoolClient,
@@ -735,8 +869,8 @@ export class Store {
         r.id,
       );
     if (!photo) {
-      const donor = r.parties.find((p) => p.role === "donor");
-      if (donor)
+      const donor = r.parties.find((p) => p.role === "donor" && p.phone);
+      if (donor?.phone)
         await this.outbound(
           c,
           ctx,
@@ -957,13 +1091,17 @@ export class Store {
           [conversationIds],
         );
         await c.query(
+          "DELETE FROM turn_logs WHERE conversation_id=ANY($1::uuid[])",
+          [conversationIds],
+        );
+        await c.query(
           "DELETE FROM conversation_turns WHERE conversation_id=ANY($1::uuid[])",
           [conversationIds],
         );
         await c.query(
           `UPDATE conversations
               SET mode='bot', selected_request_id=NULL, pending_counterparty_name=NULL,
-                  pending_counterparty_phone=NULL, version=version+1
+                  pending_counterparty_phone=NULL, pending_extra_item=NULL, version=version+1
             WHERE id=ANY($1::uuid[])`,
           [conversationIds],
         );

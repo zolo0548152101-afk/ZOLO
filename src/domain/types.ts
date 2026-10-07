@@ -43,7 +43,14 @@ export const commandSchema = z.discriminatedUnion("type", [
     items: z.array(itemInput).min(1).max(20),
     donor_phone: str,
   }),
-  z.strictObject({ type: z.literal("seek"), kind: itemKind }),
+  z.strictObject({
+    type: z.literal("seek"),
+    kind: itemKind,
+    name: str.optional(),
+    settlement: str.optional(),
+    address: str.optional(),
+    floor: z.number().int().min(-3).max(100).nullable().optional(),
+  }),
   z.strictObject({
     type: z.literal("interest"),
     request_number: z.number().int().positive(),
@@ -56,6 +63,7 @@ export const commandSchema = z.discriminatedUnion("type", [
     settlement: str,
     address: str,
     floor: z.number().int().min(-3).max(100).nullable(),
+    preferred_time: str.optional(),
   }),
   z.strictObject({
     type: z.literal("item_facts"),
@@ -123,6 +131,14 @@ export const commandSchema = z.discriminatedUnion("type", [
     type: z.literal("clarify_duplicate"),
     request_number: z.number().int().positive(),
   }),
+  z.strictObject({
+    type: z.literal("resolve_extra_item"),
+    choice: z.enum(["replace", "add"]),
+  }),
+  z.strictObject({
+    type: z.literal("resolve_extra_recipient"),
+    choice: z.enum(["same", "other"]),
+  }),
 ]);
 export const planSchema = z
   .strictObject({
@@ -170,7 +186,8 @@ export interface Item extends ItemInput {
 }
 export interface Party {
   role: Role;
-  phone: string;
+  /** Null when the AI stored a named counterparty before a phone was known. */
+  phone: string | null;
   name: string | null;
   settlement: string | null;
   address: string | null;
@@ -192,6 +209,8 @@ export interface VerificationState {
   role: Role;
   state: string;
 }
+/** Photo ask lifecycle on a request (Hebrew values persisted in DB). */
+export type PhotoStatus = "לא בוקשה" | "בוקשה" | "אין תמונה" | "התקבלה";
 export interface Request {
   id: string;
   number: number;
@@ -202,6 +221,8 @@ export interface Request {
   items: Item[];
   parties: Party[];
   photo_ids: string[];
+  /** לא בוקשה → בוקשה → אין תמונה | התקבלה */
+  photo_status: PhotoStatus;
   locations?: RequestLocation[];
   verification_states?: VerificationState[];
   run_date: string | null;
@@ -211,12 +232,40 @@ export interface Request {
   represents_both_parties?: boolean;
   closed_at?: string | null;
   human_reason: string | null;
+  /** Team should verify distance; conversation continues collecting. */
+  needs_distance_check?: boolean;
+  /** Parked questions / review notes for the team (not a human handoff). */
+  team_notes?: string | null;
   created_at: string;
+}
+export interface Search {
+  kind: ItemKind;
+  state: "active" | "matched" | "closed";
+  settlement: string | null;
+  address: string | null;
+  floor: number | null;
+  name: string | null;
 }
 export interface Candidate {
   request: Request;
   match_id: string | null;
   state: "waiting_photo" | "queued_photo" | "presented" | "interested" | null;
+}
+export interface PendingExtraItem {
+  stage:
+    | "replace_or_add"
+    | "same_or_other_recipient"
+    /** Hard boundary: same donor+receiver+item — confirm before a twin request. */
+    | "confirm_another_delivery";
+  request_id: string;
+  request_number: number;
+  existing_description: string;
+  items: ItemInput[];
+  free: boolean | null;
+  working: boolean | null;
+  direct: boolean;
+  counterparty_phone: string | null;
+  counterparty_name: string | null;
 }
 export interface Conversation {
   id: string;
@@ -227,6 +276,7 @@ export interface Conversation {
   version: number;
   pending_counterparty_name: string | null;
   pending_counterparty_phone?: string | null;
+  pending_extra_item?: PendingExtraItem | null;
 }
 export interface Incoming {
   id: string;
@@ -253,6 +303,7 @@ export interface Context {
   candidates: Candidate[];
   message: Incoming;
   history: { role: "user" | "assistant"; content: string }[];
+  active_search?: Search | null;
 }
 export interface Notice {
   phone: string;

@@ -7,25 +7,32 @@ import {
   type Item,
   type Party,
   type Notice,
+  type PendingExtraItem,
 } from "../domain/types.js";
 import { Store } from "../infrastructure/store.js";
 import {
   HUMAN_REPLY,
   DEFAULT_TRANSPORT_CAPACITY,
   OUTSIDE,
+  DISTANCE_REVIEW_REPLY,
+  CHECK_LATER_REPLY,
   canonicalPhone,
   donationIntent,
   ambiguousStreetCity,
-  explicitApproval,
+  streetPhrase,
   itemError,
   ownParty,
   mutable,
   appliance,
   nextQuestion,
+  composeTurnReply,
+  readyToAskContactCounterparty,
   statusText,
   nextTuesday,
   norm,
   mentionedAllowedSettlement,
+  appendTeamNote,
+  customerInsistsAfterDenial,
 } from "../domain/policies.js";
 export interface Outcome {
   reply: string | null;
@@ -33,9 +40,94 @@ export interface Outcome {
   notices: Notice[];
   humanReason?: string;
 }
+
+/** Pull "קוראים לי X" / "שמי X" from recent user turns when opening a request. */
+function recentSelfName(ctx: Context, text: string): string | null {
+  const blob = [
+    ...(ctx.history ?? [])
+      .filter((entry) => entry.role === "user")
+      .slice(-8)
+      .map((entry) => entry.content),
+    text,
+  ].join("\n");
+  const match = norm(blob).match(
+    /(?:קוראים\s+לי|שמי|השם(?:\s+(?:הוא|שלי))?)\s+([א-ת]{2,}(?:\s+[א-ת]{2,}){0,2})/u,
+  );
+  const name = match?.[1]?.trim() ?? null;
+  if (!name) return null;
+  if (
+    /^(?:רוצה|צריך|צריכה|מוסר|מוסרת|מעביר|מעבירה|מחפש|מחפשת|מבקש|מבקשת|מאשר|מאשרת|מיטה|ספה|מקרר)/u.test(
+      name,
+    )
+  )
+    return null;
+  return name;
+}
+
+function describeItems(items: Array<Pick<Item, "description">>): string {
+  return items.map((i) => i.description).join(", ");
+}
+
+function replaceOrAddQuestion(existingDesc: string, nextDesc: string): string {
+  return `כבר רשומה אצלך מסירה של ${existingDesc}. האם ${nextDesc} במקום ${existingDesc}, או בנוסף אליה? כתוב "במקום" או "בנוסף".`;
+}
+
+function sameOrOtherQuestion(nextDesc: string): string {
+  return `האם ${nextDesc} מיועד/ת לאותו מקבל, או לאדם אחר? כתוב "אותו מקבל" או "מקבל אחר".`;
+}
+
+const ANOTHER_DELIVERY_ASK =
+  "כבר יש אצלנו פנייה פתוחה לאותו מקבל ואותו פריט. האם מדובר בהובלה נוספת נפרדת? כן או לא.";
+
+function bareYes(text: string): boolean {
+  return /^(?:כן|בטח|בוודאי|נכון|מאשר|מאשרת)(?:[\s,!.]|$)/u.test(norm(text));
+}
+function bareNo(text: string): boolean {
+  return /^(?:לא|אין)(?:[\s,!.]|$)/u.test(norm(text));
+}
+function explicitAnotherDelivery(text: string): boolean {
+  const t = norm(text);
+  return (
+    (/כן/.test(t) &&
+      /(?:הובלה|משלוח|פנייה|מסירה)\s+נוס|נוס(?:פת|ף)|עוד\s+(?:אחת|אחד|פנייה|הובלה)/u.test(
+        t,
+      )) ||
+    /^(?:כן[,.]?\s*)?(?:הובלה|משלוח|פנייה)\s+נוס/.test(t) ||
+    /(?:^|[\s,])בנפרד(?:[\s,]|$)|פנייה\s+חדשה|עוד\s+אחת/.test(t)
+  );
+}
+function explicitNotAnotherDelivery(text: string): boolean {
+  const t = norm(text);
+  return (
+    /^(?:לא|לא\s+נוס|אותה\s+פנייה|אותו\s+דבר|רק\s+לעדכן)/u.test(t) ||
+    /לא\s+(?:הובלה|משלוח|פנייה)\s+נוס/.test(t)
+  );
+}
+
+function itemDescriptionsMatch(
+  existing: Array<Pick<Item, "kind" | "description">>,
+  next: Array<Pick<Item, "kind" | "description">>,
+): boolean {
+  if (existing.length !== next.length) return false;
+  return existing.every((item, index) => {
+    const n = next[index];
+    if (!n || item.kind !== n.kind) return false;
+    if (item.kind !== "other") return true;
+    const a = item.description.replace(/\s+/g, "");
+    const b = n.description.replace(/\s+/g, "");
+    return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+  });
+}
+
+function receiverKey(p: Party | undefined): string | null {
+  if (!p) return null;
+  if (p.phone) return `p:${p.phone}`;
+  if (p.name) return `n:${norm(p.name)}`;
+  return null;
+}
 const party = (
   role: Party["role"],
-  phone: string,
+  phone: string | null,
   approved = false,
 ): Party => ({
   role,
@@ -75,10 +167,13 @@ function target(ctx: Context, number: number | null): Request {
   const open = ctx.requests.filter(
     (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
   );
+  const selected =
+    ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+    undefined;
   const r = explicit ?? (byItem.length === 1 ? byItem[0] : undefined) ??
     (open.length === 1 ? open[0] : undefined) ??
-    (ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-      (ctx.requests.length === 1 ? ctx.requests[0] : undefined));
+    selected ??
+    (ctx.requests.length === 1 ? ctx.requests[0] : undefined);
   if (!r)
     throw new AppError(
       "choose_request",
@@ -89,31 +184,36 @@ function target(ctx: Context, number: number | null): Request {
     );
   return r;
 }
-function suppliedPhone(ctx: Context, input: string): string {
-  const phone = canonicalPhone(input),
-    text = (ctx.message.transcript ?? ctx.message.text).replace(/[^\d]/g, "");
-  const samePerson =
-    phone === ctx.conversation.phone &&
-    /(?:לעצמי|אליי|אני\s+(?:שני הצדדים|גם המוסר וגם המקבל))/.test(
-      ctx.message.transcript ?? ctx.message.text,
-    );
-  if (
-    !samePerson &&
-    !text.includes(phone) &&
-    !ctx.message.contacts.some((p) => p.phone === phone)
-  )
-    throw new AppError(
-      "phone_not_supplied",
-      403,
-      "נא לשלוח את מספר הצד השני או כרטיס איש קשר.",
-    );
-  return phone;
+function suppliedPhone(_ctx: Context, input: string): string {
+  // Action manager supplies the phone field; canonicalize and write.
+  return canonicalPhone(input);
 }
 export class Commands {
   constructor(
     private readonly s: Store,
     private readonly now: () => Date,
   ) {}
+
+  private pendingExtra(ctx: Context): PendingExtraItem | null {
+    return (ctx.conversation.pending_extra_item as PendingExtraItem | null) ?? null;
+  }
+
+  private async setPendingExtra(
+    c: pg.PoolClient,
+    ctx: Context,
+    pending: PendingExtraItem | null,
+  ): Promise<void> {
+    await c.query(
+      "UPDATE conversations SET pending_extra_item=$2,version=version+1 WHERE id=$1",
+      [ctx.conversation.id, pending ? JSON.stringify(pending) : null],
+    );
+    ctx.conversation.pending_extra_item = pending;
+  }
+
+  private async clearPendingExtra(c: pg.PoolClient, ctx: Context): Promise<void> {
+    await this.setPendingExtra(c, ctx, null);
+  }
+
   async apply(c: pg.PoolClient, ctx: Context, cmd: Command): Promise<Outcome> {
     const phone = ctx.conversation.phone,
       text = ctx.message.transcript ?? ctx.message.text,
@@ -130,38 +230,172 @@ export class Commands {
         party.schedule_approved_at = null;
       }
     };
+    if (cmd.type === "resolve_extra_item") {
+      const pending = this.pendingExtra(ctx);
+      if (!pending || pending.stage !== "replace_or_add")
+        return output("לא ממתין אצלנו לאישור פריט נוסף. אפשר לכתוב מה תרצה למסור.");
+      const existing = await this.s.request(pending.request_id, c, true);
+      ownParty(existing, phone, "donor");
+      if (cmd.choice === "replace") {
+        mutable(existing);
+        existing.items = pending.items.map((item) => {
+          const next = asItem(item);
+          next.free = pending.free === false ? false : true;
+          next.working =
+            pending.direct ? (pending.working ?? true) : pending.working;
+          return next;
+        });
+        if (pending.direct) existing.origin = "direct";
+        await this.s.save(c, existing);
+        await this.clearPendingExtra(c, ctx);
+        const q = nextQuestion(existing, phone);
+        return output(
+          `עדכנתי את הפריט ל${describeItems(existing.items)}. ${q.text}`.trim(),
+          existing,
+        );
+      }
+      // add → ask same/other recipient
+      pending.stage = "same_or_other_recipient";
+      await this.setPendingExtra(c, ctx, pending);
+      return output(sameOrOtherQuestion(describeItems(pending.items)), existing);
+    }
+    if (cmd.type === "resolve_extra_recipient") {
+      const pending = this.pendingExtra(ctx);
+      if (!pending || pending.stage !== "same_or_other_recipient")
+        return output("לא ממתין אצלנו לאישור מקבל לפריט נוסף.");
+      if (cmd.choice === "same") {
+        const existing = await this.s.request(pending.request_id, c, true);
+        ownParty(existing, phone, "donor");
+        mutable(existing);
+        for (const item of pending.items) {
+          const next = asItem(item);
+          next.free = pending.free === false ? false : true;
+          next.working =
+            pending.direct ? (pending.working ?? true) : pending.working;
+          existing.items.push(next);
+        }
+        await this.s.save(c, existing);
+        await this.clearPendingExtra(c, ctx);
+        const q = nextQuestion(existing, phone);
+        return output(
+          `הוספתי את ${describeItems(pending.items)} לאותה פנייה. ${q.text}`.trim(),
+          existing,
+        );
+      }
+      // other recipient → second request, one item, same donor
+      const items = pending.items.map((item) => {
+        const next = asItem(item);
+        next.free = pending.free === false ? false : true;
+        next.working =
+          pending.direct ? (pending.working ?? true) : pending.working;
+        return next;
+      });
+      const parties = [party("donor", phone, true)];
+      if (pending.counterparty_phone) {
+        const receiverPhone = suppliedPhone(ctx, pending.counterparty_phone);
+        const receiver = party("receiver", receiverPhone, receiverPhone === phone);
+        if (pending.counterparty_name) receiver.name = pending.counterparty_name;
+        parties.push(receiver);
+      } else if (pending.counterparty_name) {
+        const receiver = party("receiver", null, false);
+        receiver.name = pending.counterparty_name;
+        parties.push(receiver);
+      }
+      const r = await this.s.create(
+        c,
+        items,
+        parties,
+        pending.direct || pending.counterparty_phone || pending.counterparty_name
+          ? "direct"
+          : "donation",
+      );
+      await c.query(
+        "UPDATE conversations SET selected_request_id=$2 WHERE id=$1",
+        [ctx.conversation.id, r.id],
+      );
+      if (pending.counterparty_name || pending.counterparty_phone) {
+        await c.query(
+          "UPDATE conversations SET pending_counterparty_name=NULL,pending_counterparty_phone=NULL,version=version+1 WHERE id=$1",
+          [ctx.conversation.id],
+        );
+        ctx.conversation.pending_counterparty_name = null;
+        ctx.conversation.pending_counterparty_phone = null;
+      }
+      await this.clearPendingExtra(c, ctx);
+      return output(composeTurnReply(nextQuestion(r, phone).text, null, r), r);
+    }
     if (cmd.type === "status") return output(statusText(ctx.requests));
     if (cmd.type === "seek") {
       const id = await this.s.contact(c, phone);
+      let settlement = cmd.settlement ?? null;
+      if (settlement) {
+        const reg = await this.s.region(c, settlement);
+        if (reg.decision === "outside") return output(OUTSIDE);
+        if (reg.decision === "review") {
+          settlement = await this.s.ensureLocation(c, reg.name, "review");
+        } else settlement = reg.name;
+      }
+      const floor = cmd.floor ?? null;
+      const address = cmd.address ?? null;
+      const name = cmd.name ?? null;
       await c.query(
-        `INSERT INTO searches(contact_id,kind) VALUES($1,$2) ON CONFLICT(contact_id) DO UPDATE SET kind=EXCLUDED.kind,state='active',updated_at=clock_timestamp()`,
-        [id, cmd.kind],
+        `INSERT INTO searches(contact_id,kind,settlement,address,floor,name)
+         VALUES($1,$2,$3,$4,$5,$6)
+         ON CONFLICT(contact_id) DO UPDATE SET
+           kind=EXCLUDED.kind,
+           state='active',
+           settlement=COALESCE(EXCLUDED.settlement, searches.settlement),
+           address=COALESCE(EXCLUDED.address, searches.address),
+           floor=COALESCE(EXCLUDED.floor, searches.floor),
+           name=COALESCE(EXCLUDED.name, searches.name),
+           updated_at=clock_timestamp()`,
+        [id, cmd.kind, settlement, address, floor, name],
       );
+      const saved: string[] = [];
+      if (name) saved.push(`שם ${name}`);
+      if (settlement) saved.push(settlement);
+      if (address) saved.push(address);
+      if (floor !== null) saved.push(`קומה ${floor}`);
+      const ack = saved.length ? `נשמר: ${saved.join(", ")}. ` : "";
       const candidates = await this.s.candidates(phone, c);
       if (!candidates.length)
-        return output("כרגע לא נמצא פריט מתאים. נעדכן כשיהיה פריט מתאים.");
+        return output(
+          `${ack}כרגע לא נמצא פריט מתאים. נעדכן כשיהיה פריט מתאים.`.trim(),
+        );
       const candidate = candidates[0]!.request;
       await this.s.matchPhoto(c, candidate, phone, ctx.message);
       return output(
         candidate.photo_ids.length
-          ? null
-          : "נבקש מהמוסר תמונה של הפריט ונעדכן.",
+          ? ack.trim() || null
+          : `${ack}נבקש מהמוסר תמונה של הפריט ונעדכן.`.trim(),
       );
     }
     if (cmd.type === "donate" || cmd.type === "receive_from_donor") {
       const items = cmd.items.map(asItem);
-      const isDonor = cmd.type === "donate",
-        other = isDonor ? cmd.counterparty_phone : cmd.donor_phone,
-        direct = Boolean(other) || (cmd.type === "donate" && cmd.direct === true);
-      if (cmd.type === "donate" && !donationIntent(text) && !direct)
-        throw new AppError(
-          "donor_intent_required",
-          400,
-          "האם ברצונך למסור את הפריט בחינם?",
-        );
+      const isDonor = cmd.type === "donate";
+      // Contact cards often arrive in the same coalesced turn as the item.
+      // Enrich missing counterparty phone/name from the vCard before write.
+      const card = ctx.message.contacts[0];
+      let other = isDonor ? cmd.counterparty_phone : cmd.donor_phone;
+      if (isDonor && !other && card?.phone) other = card.phone;
+      if (
+        isDonor &&
+        cmd.type === "donate" &&
+        !cmd.counterparty_name &&
+        card?.name
+      )
+        cmd.counterparty_name = card.name.replace(/^אא\s+/u, "").trim() || card.name;
+      // A named recipient from the action manager is a direct handoff even
+      // when the model omitted direct:true — persist that, do not keep the
+      // open-donation photo loop.
+      const direct =
+          Boolean(other) ||
+          (cmd.type === "donate" &&
+            (cmd.direct === true || Boolean(cmd.counterparty_name)));
+      // Action manager chose donate/receive — persist it. Do not re-judge
+      // donor intent from the raw customer wording.
       if (cmd.type === "donate")
         for (const i of items) {
-          // "למסירה" is an explicit free-donation intent.
           i.free = cmd.free === false ? false : true;
           // A direct handoff has a known recipient or an explicit named
           // handoff intent. It never needs the generic condition question.
@@ -170,6 +404,10 @@ export class Commands {
       const error = itemError(items, false);
       if (error) return output(error);
       const parties = [party(isDonor ? "donor" : "receiver", phone, isDonor)];
+      if (isDonor) {
+        const selfName = recentSelfName(ctx, text);
+        if (selfName) parties[0]!.name = selfName;
+      }
       if (other) {
         const p = suppliedPhone(ctx, other);
         const counterparty = party(
@@ -180,58 +418,252 @@ export class Commands {
         if (isDonor && cmd.counterparty_name)
           counterparty.name = cmd.counterparty_name;
         parties.push(counterparty);
+      } else if (
+        isDonor &&
+        cmd.type === "donate" &&
+        cmd.counterparty_name
+      ) {
+        // Name-only receiver: persist on the party (phone null). Do not use
+        // pending_counterparty_name for this case — prompts ask for phone.
+        const receiver = party("receiver", null, false);
+        receiver.name = cmd.counterparty_name;
+        parties.push(receiver);
       }
-      // Keep an explicit condition from the opening message for open
-      // donations too.  The photo gate may still request a picture, but it
-      // must not discard a fact the donor already supplied and ask it again.
-      let sameOpenRequest = ctx.requests.find(
+      // Soft photo ask is prompt/reply-manager owned.
+      // Hard boundary #4 — duplicate request (donor+receiver+item[+date]):
+      // incomplete fields → update existing; full triple+date → update only;
+      // full triple without date → ask before opening a twin; different
+      // known receiver → new request allowed.
+      const sameItemShape = (existing: Request) =>
+        existing.parties.some((p) => p.role === "donor" && p.phone === phone) &&
+        itemDescriptionsMatch(existing.items, items);
+      const openSameItem = ctx.requests.filter(
         (existing) =>
-          existing.status !== "coordinated" &&
-          !["closed", "cancelled", "rejected", "cancel_pending"].includes(existing.status) &&
-          existing.parties.some((p) => p.role === "donor" && p.phone === phone) &&
-          existing.items.length === items.length &&
-          existing.items.every((item, index) => {
-            const next = items[index];
-            if (!next || item.kind !== next.kind) return false;
-            if (item.kind !== "other") return true;
-            const a = item.description.replace(/\s+/g, "");
-            const b = next.description.replace(/\s+/g, "");
-            return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
-          }),
+          !["coordinated", "closed", "cancelled", "rejected", "cancel_pending"].includes(
+            existing.status,
+          ) && sameItemShape(existing),
       );
-      if (!sameOpenRequest) {
-        const duplicate = await c.query<{ id: string }>(
+      const incomingReceiver = parties.find((p) => p.role === "receiver");
+      const incomingReceiverKey = receiverKey(incomingReceiver);
+      const pendingAnother = this.pendingExtra(ctx);
+      const confirmedAnother =
+        pendingAnother?.stage === "confirm_another_delivery" &&
+        itemDescriptionsMatch(
+          pendingAnother.items.map((i) => ({
+            kind: i.kind,
+            description: i.description,
+          })),
+          items,
+        ) &&
+        (explicitAnotherDelivery(text) || bareYes(text));
+      if (
+        pendingAnother?.stage === "confirm_another_delivery" &&
+        (explicitNotAnotherDelivery(text) ||
+          (bareNo(text) && !explicitAnotherDelivery(text)))
+      ) {
+        await this.clearPendingExtra(c, ctx);
+        const existing = await this.s.request(pendingAnother.request_id, c, true);
+        // Fall through to update path via sameOpenRequest below.
+        openSameItem.unshift(existing);
+      }
+      let sameOpenRequest: Request | undefined;
+      if (!confirmedAnother && openSameItem.length) {
+        const withRecv = openSameItem.map((existing) => {
+          const existingRecv = existing.parties.find((p) => p.role === "receiver");
+          const existingKey = receiverKey(existingRecv);
+          const incomplete = !existingKey || !incomingReceiverKey;
+          const match =
+            Boolean(existingKey && incomingReceiverKey && existingKey === incomingReceiverKey);
+          const different =
+            Boolean(existingKey && incomingReceiverKey && existingKey !== incomingReceiverKey);
+          const existingDate =
+            existing.proposed_run_date?.slice(0, 10) ??
+            existing.run_date?.slice(0, 10) ??
+            existing.earliest_run_date?.slice(0, 10) ??
+            null;
+          // Donate has no date field; date is complete only when existing has one
+          // and the customer restated the same date in this turn.
+          const dateInText = existingDate && text.includes(existingDate);
+          const dateMatch = Boolean(existingDate && dateInText);
+          const dateIncomplete = !existingDate || !dateInText;
+          return { existing, incomplete, match, different, dateMatch, dateIncomplete };
+        });
+        // Prefer updating when incomplete or date-certain match.
+        const updateCandidate =
+          withRecv.find((x) => x.incomplete) ??
+          withRecv.find((x) => x.match && x.dateMatch) ??
+          withRecv.find((x) => x.match && x.dateIncomplete);
+        if (updateCandidate?.incomplete || updateCandidate?.dateMatch) {
+          sameOpenRequest = updateCandidate.existing;
+        } else if (updateCandidate?.match && updateCandidate.dateIncomplete) {
+          // Full donor+receiver+item match, date unknown → ask; do not create.
+          await this.setPendingExtra(c, ctx, {
+            stage: "confirm_another_delivery",
+            request_id: updateCandidate.existing.id,
+            request_number: updateCandidate.existing.number,
+            existing_description: describeItems(updateCandidate.existing.items),
+            items: cmd.type === "donate" ? cmd.items : items,
+            free: cmd.type === "donate" ? (cmd.free ?? null) : null,
+            working: cmd.type === "donate" ? (cmd.working ?? null) : null,
+            direct: Boolean(direct),
+            counterparty_phone: other ?? null,
+            counterparty_name:
+              cmd.type === "donate" ? (cmd.counterparty_name ?? null) : null,
+          });
+          return output(ANOTHER_DELIVERY_ASK, updateCandidate.existing);
+        } else if (!withRecv.some((x) => x.different)) {
+          // Same item, no differing receiver → default update (covers empty #1 + vCard).
+          sameOpenRequest = openSameItem[0];
+        }
+        // else: known different receiver → allow create below
+      }
+      if (!sameOpenRequest && !confirmedAnother) {
+        const rejectedOutside = await c.query<{ id: string }>(
           `SELECT r.id FROM requests r
            JOIN request_parties p ON p.request_id=r.id
            JOIN contacts co ON co.id=p.contact_id
            JOIN request_items i ON i.request_id=r.id
            WHERE co.phone=$1 AND p.role='donor'
-             AND r.status NOT IN ('coordinated','closed','cancelled','rejected','cancel_pending')
+             AND r.status='rejected'
+             AND EXISTS (
+               SELECT 1 FROM request_events e
+               WHERE e.request_id=r.id AND e.event_type='outside_area_rejected'
+             )
              AND (
                (i.kind = ANY($2::text[]) AND i.kind <> 'other')
                OR (i.kind = 'other' AND i.description = ANY($3::text[]))
              )
-           ORDER BY r.number LIMIT 1`,
+           ORDER BY r.number DESC LIMIT 1`,
           [
             phone,
             items.map((item) => item.kind),
             items.filter((item) => item.kind === "other").map((item) => item.description),
           ],
         );
-        if (duplicate.rows[0]) sameOpenRequest = await this.s.request(duplicate.rows[0].id, c);
+        if (rejectedOutside.rows[0])
+          sameOpenRequest = await this.s.request(rejectedOutside.rows[0].id, c);
       }
-      if (sameOpenRequest && !/(?:פנייה\s+חדשה|פריט\s+נוסף|עוד\s+פריט)/.test(text))
-        return output(
-          `כבר קיימת פנייה ${sameOpenRequest.number} עבור פריט דומה. אם זו פנייה חדשה או פריט נוסף, כתוב זאת במפורש.`,
-          sameOpenRequest,
+      if (confirmedAnother) await this.clearPendingExtra(c, ctx);
+      if (sameOpenRequest) {
+        // Reopen outside-area rejection and persist fields the action manager sent.
+        const existing = await this.s.request(sameOpenRequest.id, c, true);
+        if (existing.status === "rejected") {
+          const outside = await c.query(
+            `SELECT 1 FROM request_events
+              WHERE request_id=$1 AND event_type='outside_area_rejected'
+              LIMIT 1`,
+            [existing.id],
+          );
+          if (outside.rowCount) {
+            existing.status = "collecting";
+            existing.human_reason = null;
+          }
+        }
+        const beforeMerge: Request = {
+          ...existing,
+          parties: existing.parties.map((p) => ({ ...p })),
+          items: existing.items.map((i) => ({ ...i })),
+        };
+        mutable(existing);
+        const beforeOrigin = beforeMerge.origin;
+        const beforeReceiver = beforeMerge.parties.find((entry) => entry.role === "receiver");
+        const beforePendingName = ctx.conversation.pending_counterparty_name;
+        existing.items = items.map((item, index) => ({
+          ...(existing.items[index] ?? asItem(item)),
+          ...item,
+          free: item.free === false ? false : true,
+          working:
+            direct
+              ? (item.working ?? existing.items[index]?.working ?? true)
+              : (item.working ?? existing.items[index]?.working ?? null),
+        }));
+        if (direct && isDonor) {
+          existing.origin = "direct";
+          for (const item of existing.items)
+            if (item.working === null) item.working = true;
+          if (other) {
+            const receiverPhone = suppliedPhone(ctx, other);
+            const linked = existing.parties.find((entry) => entry.role === "receiver");
+            if (!linked) {
+              const receiver = party("receiver", receiverPhone, receiverPhone === phone);
+              if (cmd.type === "donate" && cmd.counterparty_name)
+                receiver.name = cmd.counterparty_name;
+              existing.parties.push(receiver);
+            } else if (linked.phone === null || linked.phone === receiverPhone) {
+              linked.phone = receiverPhone;
+              if (cmd.type === "donate" && cmd.counterparty_name)
+                linked.name = cmd.counterparty_name;
+            } else {
+              throw new AppError(
+                "party_already_linked",
+                409,
+                "הצד השני כבר מקושר לפנייה. שינוי זה דורש טיפול אנושי.",
+              );
+            }
+            if (
+              existing.parties.length === 2 &&
+              existing.parties[0]!.phone &&
+              existing.parties[0]!.phone === existing.parties[1]!.phone
+            )
+              existing.represents_both_parties = true;
+          } else if (
+            cmd.type === "donate" &&
+            cmd.counterparty_name &&
+            !existing.parties.some((entry) => entry.role === "receiver")
+          ) {
+            const receiver = party("receiver", null, false);
+            receiver.name = cmd.counterparty_name;
+            existing.parties.push(receiver);
+          } else if (cmd.type === "donate" && cmd.counterparty_name) {
+            const linked = existing.parties.find((entry) => entry.role === "receiver");
+            if (linked && !linked.phone) linked.name = cmd.counterparty_name;
+          }
+        }
+        await this.s.save(c, existing);
+        await c.query(
+          "UPDATE conversations SET selected_request_id=$2 WHERE id=$1",
+          [ctx.conversation.id, existing.id],
         );
+        // Name-only or phone receiver is on the party — clear pending name/phone.
+        if (
+          other ||
+          (cmd.type === "donate" && (cmd.counterparty_phone || cmd.counterparty_name))
+        ) {
+          await c.query(
+            "UPDATE conversations SET pending_counterparty_name=NULL,pending_counterparty_phone=NULL,version=version+1 WHERE id=$1",
+            [ctx.conversation.id],
+          );
+          ctx.conversation.pending_counterparty_name = null;
+          ctx.conversation.pending_counterparty_phone = null;
+        }
+        const q = nextQuestion(existing, phone);
+        const unchangedDirect =
+          beforeOrigin === existing.origin &&
+          beforeReceiver?.phone ===
+            existing.parties.find((entry) => entry.role === "receiver")?.phone &&
+          beforeReceiver?.name ===
+            existing.parties.find((entry) => entry.role === "receiver")?.name &&
+          beforePendingName === ctx.conversation.pending_counterparty_name;
+        // Same facts again: keep the conversation moving with the next missing
+        // detail instead of looping on the opening photo ask.
+        if (unchangedDirect && existing.origin === "direct")
+          return output(
+            `הפרטים האלה כבר רשומים אצלנו. ${q.text}`.trim(),
+            existing,
+          );
+        return output(composeTurnReply(q.text, beforeMerge, existing), existing);
+      }
       const r = await this.s.create(
         c,
         items,
         parties,
         isDonor && !direct ? "donation" : "direct",
       );
-      if (parties.length === 2 && parties[0]!.phone === parties[1]!.phone) {
+      if (
+        parties.length === 2 &&
+        parties[0]!.phone &&
+        parties[0]!.phone === parties[1]!.phone
+      ) {
         r.represents_both_parties = true;
         await this.s.save(c, r);
       }
@@ -239,14 +671,11 @@ export class Commands {
         "UPDATE conversations SET selected_request_id=$2 WHERE id=$1",
         [ctx.conversation.id, r.id],
       );
-      if (!other && cmd.type === "donate" && cmd.counterparty_name) {
-        await c.query(
-          "UPDATE conversations SET pending_counterparty_name=$2,version=version+1 WHERE id=$1",
-          [ctx.conversation.id, cmd.counterparty_name],
-        );
-        ctx.conversation.pending_counterparty_name = cmd.counterparty_name;
-      }
-      if (other || (cmd.type === "donate" && cmd.counterparty_phone)) {
+      // Clear any sticky pending — name-only receiver is already on parties.
+      if (
+        other ||
+        (cmd.type === "donate" && (cmd.counterparty_phone || cmd.counterparty_name))
+      ) {
         await c.query(
           "UPDATE conversations SET pending_counterparty_name=NULL,pending_counterparty_phone=NULL,version=version+1 WHERE id=$1",
           [ctx.conversation.id],
@@ -255,12 +684,14 @@ export class Commands {
         ctx.conversation.pending_counterparty_phone = null;
       }
       for (const p of parties)
-        if (p.phone !== phone && !direct)
+        if (p.phone && p.phone !== phone && !direct)
           notices.push({
             phone: p.phone,
             text: `נפתחה פנייה ${r.number} לגבי ${r.items.map((i) => i.description).join(", ")}. נא לאשר את חלקך ב${p.role === "donor" ? "מסירה" : "קבלה"}. ההובלות בימי שלישי 16:00–20:00, ובדרך כלל עד ${DEFAULT_TRANSPORT_CAPACITY} הובלות בכל יום שלישי. מעבר לכך נבקש תחילה אישור מנהל. נעדכן.`,
           });
-      return output(nextQuestion(r, phone).text, r);
+      // Soft photo ask is prompt/reply-manager owned — do not force PHOTO_FIRST
+      // or set NO_PHOTO here.
+      return output(composeTurnReply(nextQuestion(r, phone).text, null, r), r);
     }
     if (cmd.type === "interest") {
       const candidate = ctx.candidates.find(
@@ -303,16 +734,33 @@ export class Commands {
       return output(nextQuestion(r, phone).text, r);
     }
     if (cmd.type === "escalate" && !ctx.requests.length) {
-      if (cmd.reason !== "borderline_area")
-        return { ...output(HUMAN_REPLY), humanReason: cmd.reason };
+      // Borderline / unknown questions: open a request, park for team, keep talking.
       const r = await this.s.create(c, [], [party("donor", phone)], "donation");
-      r.status = "human";
-      r.human_reason = "borderline_area";
       await c.query(
         "UPDATE conversations SET selected_request_id=$2 WHERE id=$1",
         [ctx.conversation.id, r.id],
       );
-      return { ...output(HUMAN_REPLY, r), humanReason: "borderline_area" };
+      if (cmd.reason === "borderline_area") {
+        r.needs_distance_check = true;
+        r.team_notes = appendTeamNote(
+          r.team_notes,
+          `בדיקת מרחק (לפני פרטי יישוב): ${text.slice(0, 200)}`,
+        );
+        await this.s.save(c, r);
+        return output(
+          `${DISTANCE_REVIEW_REPLY}\n${nextQuestion(r, phone).text}`,
+          r,
+        );
+      }
+      r.team_notes = appendTeamNote(
+        r.team_notes,
+        `שאלה לצוות (${cmd.reason}): ${text.slice(0, 400)}`,
+      );
+      await this.s.save(c, r);
+      return output(
+        `${CHECK_LATER_REPLY}\n${nextQuestion(r, phone).text}`,
+        r,
+      );
     }
     if (cmd.type === "next" && !ctx.requests.length) {
       const town = mentionedAllowedSettlement(text);
@@ -323,7 +771,7 @@ export class Commands {
         /בית\s*שאן|beit\s+she'?an/i.test(text)
       )
         return output(
-          "באיזה יישוב בדיוק? אנחנו פועלים בבית שאן, מסילות, ירדנה, בית אלפא, טירת צבי, כפר רופין ומחולה.",
+          "באיזה יישוב בדיוק? אנחנו פועלים בבית שאן, מסילות, ירדנה, בית אלפא, טירת צבי, שדה אליהו, כפר רופין ומחולה.",
         );
       const pendingName = ctx.conversation.pending_counterparty_name;
       const handoffName = (() => {
@@ -373,19 +821,115 @@ export class Commands {
             return null;
           }
         })();
-      if (pendingName && supplied) {
+      const contactName =
+        ctx.message.contacts[0]?.name?.replace(/^אא\s+/u, "").trim() || null;
+      const stickyName =
+        pendingName ||
+        handoffName ||
+        contactName ||
+        (() => {
+          const recent = (ctx.history ?? [])
+            .filter((entry) => entry.role === "user")
+            .slice(-6)
+            .map((entry) => entry.content)
+            .join("\n");
+          const match = norm(recent).match(
+            /(?:למסור|להעביר|מוסר|מוסרת|מעביר|מעבירה)\s+(?:את\s+)?(?:הפריט|הרהיט|רהיט|מיטה|שולחן|ספה|כיסא|ארון)?\s*ל([א-ת]{2,})/u,
+          );
+          return match?.[1] ?? null;
+        })();
+      if (stickyName && !pendingName) {
         await c.query(
-          "UPDATE conversations SET pending_counterparty_phone=$2,version=version+1 WHERE id=$1",
-          [ctx.conversation.id, supplied],
+          "UPDATE conversations SET pending_counterparty_name=$2,version=version+1 WHERE id=$1",
+          [ctx.conversation.id, stickyName],
         );
+        ctx.conversation.pending_counterparty_name = stickyName;
+      }
+      if ((pendingName || stickyName) && supplied) {
+        const name = pendingName || stickyName!;
+        await c.query(
+          `UPDATE conversations
+              SET pending_counterparty_name=$2,pending_counterparty_phone=$3,version=version+1
+            WHERE id=$1`,
+          [ctx.conversation.id, name, supplied],
+        );
+        ctx.conversation.pending_counterparty_name = name;
         ctx.conversation.pending_counterparty_phone = supplied;
         return output(
-          `רשמתי את מספר הטלפון של ${pendingName}. מה הפריט שברצונך למסור?`,
+          `רשמתי את מספר הטלפון של ${name}. מה הפריט שברצונך למסור?`,
         );
       }
-      if (pendingName)
-        return output(`מה הפריט שברצונך למסור ל${pendingName}?`);
+      if (pendingName || stickyName)
+        return output(
+          `מה הפריט שברצונך למסור ל${pendingName || stickyName}?`,
+        );
+      if (recentSelfName(ctx, text) && donationIntent(
+        (ctx.history ?? [])
+          .filter((entry) => entry.role === "user")
+          .slice(-6)
+          .map((entry) => entry.content)
+          .join("\n") +
+          "\n" +
+          text,
+      ))
+        return output("מה הפריט שברצונך למסור?");
       return output("איך אפשר לעזור — למסור פריט, לקבל פריט או לתאם הובלה?");
+    }
+    // Contact card / counterparty before any request exists: keep sticky
+    // handoff and ask for the item instead of choose_request / path re-ask.
+    if (
+      (cmd.type === "counterparty_candidate" || cmd.type === "counterparty") &&
+      !ctx.requests.length
+    ) {
+      const candidatePhone =
+        "phone" in cmd && cmd.phone
+          ? suppliedPhone(ctx, cmd.phone)
+          : ctx.message.contacts[0]?.phone
+            ? suppliedPhone(ctx, ctx.message.contacts[0].phone)
+            : null;
+      const candidateName =
+        ("name" in cmd && cmd.name) ||
+        ctx.message.contacts[0]?.name?.replace(/^אא\s+/u, "").trim() ||
+        ctx.conversation.pending_counterparty_name;
+      if (candidatePhone || candidateName) {
+        await c.query(
+          `UPDATE conversations
+              SET pending_counterparty_name=COALESCE($2, pending_counterparty_name),
+                  pending_counterparty_phone=COALESCE($3, pending_counterparty_phone),
+                  version=version+1
+            WHERE id=$1`,
+          [ctx.conversation.id, candidateName, candidatePhone],
+        );
+        if (candidateName)
+          ctx.conversation.pending_counterparty_name = candidateName;
+        if (candidatePhone)
+          ctx.conversation.pending_counterparty_phone = candidatePhone;
+        const who = candidateName ?? candidatePhone;
+        return output(
+          candidatePhone
+            ? `רשמתי את מספר הטלפון של ${who}. מה הפריט שברצונך למסור?`
+            : `רשמתי שמדובר במסירה ל${who}. מה הפריט שברצונך למסור?`,
+        );
+      }
+    }
+    if (cmd.type === "details" && !ctx.requests.length) {
+      if (
+        ctx.conversation.pending_counterparty_name ||
+        donationIntent(
+          (ctx.history ?? [])
+            .filter((entry) => entry.role === "user")
+            .slice(-6)
+            .map((entry) => entry.content)
+            .join("\n"),
+        )
+      ) {
+        const who = ctx.conversation.pending_counterparty_name;
+        return output(
+          who
+            ? `מה הפריט שברצונך למסור ל${who}?`
+            : "מה הפריט שברצונך למסור?",
+        );
+      }
     }
     if (cmd.type === "clarify_duplicate") {
       // A duplicate message can arrive after the other party has approved.
@@ -447,8 +991,13 @@ export class Commands {
       r.origin = "direct";
       for (const item of r.items)
         if (item.working === null) item.working = true;
+      // Linking the recipient is not consent to message them and not proof
+      // that own-party details/rules are ready — nextQuestion decides.
       const q = nextQuestion(r, phone);
-      return output(`מעולה, קישרתי את ${candidateName ?? candidatePhone} כמקבל/ת.\n${q.text}`, r);
+      return output(
+        `מעולה, קישרתי את ${candidateName ?? candidatePhone} כמקבל/ת.\n${q.text}`,
+        r,
+      );
     }
     if (cmd.type === "contact_counterparty") {
       const other = r.parties.find((p) => p.phone !== phone);
@@ -465,6 +1014,12 @@ export class Commands {
         )
       )
         return output("הפנייה לצד השני כבר בוצעה.", r);
+      // AI owns consent wording (bare «כן» is enough). Execute contact=true
+      // when own details/rules are ready; otherwise keep asking missing fields.
+      if (cmd.contact && !readyToAskContactCounterparty(r, phone)) {
+        const q = nextQuestion(r, phone);
+        return output(q.text, r);
+      }
       r.verification_contacted = cmd.contact;
       await c.query(
         `INSERT INTO request_verifications(request_id,role,state,consented_at,updated_at,last_error)
@@ -478,18 +1033,19 @@ export class Commands {
           cmd.contact ? null : "user_declined_contact",
         ],
       );
-      if (cmd.contact)
-        notices.push({
-          phone: other.phone,
-          text: `שלום${other.name ? ` ${other.name}` : ""},\n\nפנייה ${r.number}: ${r.items.map((i) => i.description).join(", ")}. ${phone === r.parties.find((p) => p.role === "donor")?.phone ? "המוסר" : "המקבל"} ביקש שנפנה אליך לאימות הפרטים.${other.settlement || other.address || other.floor !== null ? `\nהפרטים שנמסרו: ${[other.settlement, other.address, other.floor === null ? null : `קומה ${other.floor}`].filter(Boolean).join(", ")}.` : ""}\nנא לאשר את חלקך ב${other.role === "donor" ? "מסירה" : "קבלה"}.`,
-        });
-      if (cmd.contact)
-        await c.query(
-          `UPDATE conversations SET selected_request_id=$2,version=version+1
-             WHERE contact_id=(SELECT id FROM contacts WHERE phone=$1)`,
-          [other.phone, r.id],
-        );
-      else invalidateProposal(r);
+      if (cmd.contact) {
+        if (other.phone) {
+          notices.push({
+            phone: other.phone,
+            text: `שלום${other.name ? ` ${other.name}` : ""},\n\nפנייה ${r.number}: ${r.items.map((i) => i.description).join(", ")}. ${phone === r.parties.find((p) => p.role === "donor")?.phone ? "המוסר" : "המקבל"} ביקש שנפנה אליך לאימות הפרטים.${other.settlement || other.address || other.floor !== null ? `\nהפרטים שנמסרו: ${[other.settlement, other.address, other.floor === null ? null : `קומה ${other.floor}`].filter(Boolean).join(", ")}.` : ""}\nנא לאשר את חלקך ב${other.role === "donor" ? "מסירה" : "קבלה"}.`,
+          });
+          await c.query(
+            `UPDATE conversations SET selected_request_id=$2,version=version+1
+               WHERE contact_id=(SELECT id FROM contacts WHERE phone=$1)`,
+            [other.phone, r.id],
+          );
+        }
+      } else invalidateProposal(r);
       const q = nextQuestion(r, phone);
       return output(
         `${cmd.contact ? "נפנה לצד השני עכשיו לצורך אימות." : "בסדר, לא נפנה לצד השני כרגע."}\n${q.text}`,
@@ -497,20 +1053,55 @@ export class Commands {
       );
     }
     if (cmd.type === "escalate") {
-      if (r.status !== "coordinated") {
-        r.status = "human";
-        r.human_reason = cmd.reason;
+      // Human handoff only when the customer insists after a clear denial.
+      if (customerInsistsAfterDenial(text)) {
+        if (r.status !== "coordinated") {
+          r.status = "human";
+          r.human_reason = "customer_insisted";
+        }
+        return { ...output(HUMAN_REPLY, r), humanReason: "customer_insisted" };
       }
-      return { ...output(HUMAN_REPLY, r), humanReason: cmd.reason };
+      if (cmd.reason === "borderline_area") {
+        r.needs_distance_check = true;
+        r.team_notes = appendTeamNote(
+          r.team_notes,
+          `בדיקת מרחק: ${text.slice(0, 200)}`,
+        );
+        if (r.status === "human") r.status = "collecting";
+        r.human_reason = null;
+        return output(
+          composeTurnReply(
+            `${DISTANCE_REVIEW_REPLY}\n${nextQuestion(r, phone).text}`,
+            null,
+            r,
+          ),
+          r,
+        );
+      }
+      if (cmd.reason === "evacuation") {
+        if (r.status !== "coordinated") {
+          r.status = "human";
+          r.human_reason = cmd.reason;
+        }
+        return { ...output(HUMAN_REPLY, r), humanReason: cmd.reason };
+      }
+      // Unknown / unclear questions: park for team, keep collecting.
+      r.team_notes = appendTeamNote(
+        r.team_notes,
+        `שאלה לצוות (${cmd.reason}): ${text.slice(0, 400)}`,
+      );
+      if (r.status === "human" && r.human_reason !== "customer_insisted") {
+        r.status = "collecting";
+        r.human_reason = null;
+      }
+      return output(
+        `${CHECK_LATER_REPLY}\n${nextQuestion(r, phone).text}`,
+        r,
+      );
     }
     if (cmd.type === "cancel") {
       if (cmd.choice === "ask") {
-        if (!/(?:לבטל|ביטול|מבטל|מבטלת)/.test(text))
-          throw new AppError(
-            "cancellation_not_explicit",
-            400,
-            "נא לציין במפורש אם ברצונך לבטל את ההובלה.",
-          );
+        // Trust action-manager cancel choice; do not re-parse customer text.
         const base = r.run_date ?? nextTuesday(this.now()).date,
           after = new Date(base + "T12:00:00Z");
         after.setUTCDate(after.getUTCDate() + 7);
@@ -524,7 +1115,7 @@ export class Commands {
           p.schedule_approved_at = null;
         }
         for (const p of r.parties)
-          if (p.phone !== phone)
+          if (p.phone && p.phone !== phone)
             notices.push({
               phone: p.phone,
               text: `התיאום בפנייה ${r.number} בוטל. נעדכן לגבי המשך הטיפול.`,
@@ -535,12 +1126,6 @@ export class Commands {
         );
       }
       if (cmd.choice === "final") {
-        if (
-          !/(?:סופית|סופי|לגמרי|לא רלוונטי|לבטל|ביטול|תבטלו|תבטל|מבטל|מבטלת)/.test(
-            text,
-          )
-        )
-          throw new AppError("final_cancellation_not_explicit");
         const wasCoordinated = r.status === "coordinated";
         const items = r.items.map((item) => item.description).join(", ") || "פריט";
         r.status = "cancelled";
@@ -554,7 +1139,7 @@ export class Commands {
         }
         if (wasCoordinated)
           for (const party of r.parties)
-            if (party.phone !== phone)
+            if (party.phone && party.phone !== phone)
               notices.push({
                 phone: party.phone,
                 text: `פנייה ${r.number} בוטלה: ${items}. לא תתואם הובלה.`,
@@ -563,8 +1148,6 @@ export class Commands {
       }
       if (r.status !== "cancel_pending")
         throw new AppError("cancellation_not_pending", 409);
-      if (!/(?:שבוע הבא|רלוונטי|כן)/.test(text))
-        throw new AppError("reschedule_not_explicit");
       r.status = "awaiting_approval";
       r.proposed_run_date = null;
       for (const p of r.parties) {
@@ -575,6 +1158,34 @@ export class Commands {
       return output("הפנייה נשמרה. אבדוק מועד פנוי ליום שלישי; התאריך ייחשב רק כהצעה עד ששני הצדדים יאשרו אותו במפורש.", r);
     }
     if (cmd.type === "next") {
+      const pending = this.pendingExtra(ctx);
+      if (pending?.stage === "replace_or_add")
+        return output(
+          replaceOrAddQuestion(
+            pending.existing_description,
+            describeItems(pending.items),
+          ),
+          r,
+        );
+      if (pending?.stage === "same_or_other_recipient")
+        return output(sameOrOtherQuestion(describeItems(pending.items)), r);
+      if (pending?.stage === "confirm_another_delivery") {
+        if (explicitNotAnotherDelivery(text) || bareNo(text)) {
+          await this.clearPendingExtra(c, ctx);
+          return output(
+            `בסדר, נמשיך בפנייה ${pending.request_number}. ${nextQuestion(r, phone).text}`.trim(),
+            r,
+          );
+        }
+        if (explicitAnotherDelivery(text) || bareYes(text)) {
+          // Keep pending so the next donate may open a twin; acknowledge.
+          return output(
+            "הבנתי — הובלה נוספת. אפשר לכתוב שוב את הפריט או הפרטים לפתיחת הפנייה החדשה.",
+            r,
+          );
+        }
+        return output(ANOTHER_DELIVERY_ASK, r);
+      }
       const previous = ctx.history.at(-1)?.content ?? "";
       const speaker = ownParty(r, phone);
       if (ambiguousStreetCity(text) && !speaker.address)
@@ -609,25 +1220,28 @@ export class Commands {
       cmd.type === "details" &&
       r.status === "rejected" &&
       cmd.settlement &&
-      /(?:טעיתי|תיקון|בעצם|התכוונתי)/.test(text) &&
       r.parties.some((candidate) => candidate.phone === phone)
     ) {
-      const latest = await c.query<{ event_type: string }>(
-        `SELECT event_type FROM request_events
-         WHERE request_id=$1
-         ORDER BY id DESC LIMIT 1`,
+      const outsideRejection = await c.query(
+        `SELECT 1 FROM request_events
+         WHERE request_id=$1 AND event_type='outside_area_rejected'
+         LIMIT 1`,
         [r.id],
       );
       const correctedRegion = await this.s.region(c, cmd.settlement);
-      if (
-        latest.rows[0]?.event_type === "outside_area_rejected" &&
-        correctedRegion.decision === "allowed"
-      ) {
+      // Reopen on a corrected allowed town without requiring "טעיתי" wording.
+      if (outsideRejection.rowCount && correctedRegion.decision === "allowed") {
         r.status = "collecting";
         r.human_reason = null;
       }
     }
+    const beforeForAck: Request = {
+      ...r,
+      parties: r.parties.map((p) => ({ ...p })),
+      items: r.items.map((i) => ({ ...i })),
+    };
     mutable(r);
+    let distanceReviewThisTurn = false;
     if (cmd.type === "details") {
       if (cmd.name || cmd.settlement || cmd.address || cmd.floor !== null)
         invalidateProposal(r);
@@ -670,15 +1284,33 @@ export class Commands {
       if (cmd.settlement && !settlementIsTheStreet) {
         const reg = await this.s.region(c, cmd.settlement);
         if (reg.decision === "outside") {
+          // Ambiguous street/city (e.g. אילת): ask before applying the
+          // radius boundary — do not reject or persist the outside town yet.
+          if (ambiguousStreetCity(text) && !streetPhrase(text)) {
+            return output(
+              "האם הכוונה לרחוב אילת בבית שאן, או ליישוב אילת שמחוץ לאזור הפעילות?",
+              r,
+            );
+          }
           r.status = "rejected";
           return output(OUTSIDE, r);
         }
         if (reg.decision === "review") {
-          r.status = "human";
-          r.human_reason = "borderline_area";
-          return { ...output(HUMAN_REPLY, r), humanReason: "borderline_area" };
+          // Save the settlement, mark distance review, keep collecting.
+          p.settlement = await this.s.ensureLocation(c, reg.name, "review");
+          r.needs_distance_check = true;
+          distanceReviewThisTurn = true;
+          r.team_notes = appendTeamNote(
+            r.team_notes,
+            `בדיקת מרחק ליישוב: ${p.settlement}`,
+          );
+          if (r.status === "human") {
+            r.status = "collecting";
+            r.human_reason = null;
+          }
+        } else {
+          p.settlement = reg.name;
         }
-        p.settlement = reg.name;
       }
       if (cmd.name) {
         p.name = cmd.name;
@@ -694,9 +1326,9 @@ export class Commands {
         if (known?.decision === "review")
           p.address = address;
       }
-      if (p.settlement && p.settlement !== "בית שאן") p.floor = 0;
-      else if (p.settlement === "בית שאן" && cmd.floor !== null)
-        p.floor = cmd.floor;
+      // Never invent floor=0 — only store a floor the customer actually gave.
+      if (cmd.floor !== null) p.floor = cmd.floor;
+      if (cmd.preferred_time) r.preferred_time = cmd.preferred_time;
       if (cmd.address && /^(?:רחוב|שכונת|שכונה|שדרות|שד[׳']?)(?=$|\s)/u.test(cmd.address.trim())) {
         const known = await this.s.region(c, cmd.address.trim());
         if (known.decision === "review")
@@ -705,34 +1337,26 @@ export class Commands {
     } else if (cmd.type === "item_facts") {
       invalidateProposal(r);
       ownParty(r, phone, "donor");
-      const oldItems = structuredClone(r.items);
+      // Apply AI items directly — replace-vs-add / furniture-count are prompt-only.
       if (cmd.items)
-        r.items = cmd.items.map((i, index) => ({
-          ...asItem(i),
-          ...(r.items[index] ?? {}),
-          ...i,
-        }));
-      const prior = ctx.history.at(-1)?.content ?? "";
+        // Action manager owns the replacement item list. New kind/description
+        // overwrite the previous row; keep prior free/working only when the
+        // command leaves those fields unset on the item object.
+        r.items = cmd.items.map((i, index) => {
+          const previous = r.items[index];
+          const next = { ...asItem(i), ...i };
+          if (previous) {
+            if (next.free === null && previous.free !== null) next.free = previous.free;
+            if (next.working === null && previous.working !== null)
+              next.working = previous.working;
+          }
+          return next;
+        });
       for (const i of r.items) {
-        if (cmd.free !== null) {
-          if (
-            cmd.free &&
-            !/(?:חינם|תרומה)/.test(text) &&
-            !(explicitApproval(text) && prior.includes("בחינם"))
-          )
-            throw new AppError("free_confirmation_missing");
-          i.free = cmd.free;
-        }
-        if (cmd.working !== null) {
-          if (
-            cmd.working &&
-            !/(?:תקינ|תקין|עובד|שמיש)/.test(text) &&
-            !(explicitApproval(text) && prior.includes("תקין"))
-          )
-            throw new AppError("working_confirmation_missing");
-          i.working = cmd.working;
-        }
-        if (/(?:לא תקין|לא עובד|מקולקל|שבור)/.test(text)) i.working = false;
+        // Trust action-manager field values; do not re-litigate free/working
+        // from raw customer wording.
+        if (cmd.free !== null) i.free = cmd.free;
+        if (cmd.working !== null) i.working = cmd.working;
         if (i.kind === "wardrobe") {
           if (cmd.wardrobe_small_whole !== null)
             i.wardrobe_small_whole = cmd.wardrobe_small_whole;
@@ -747,7 +1371,6 @@ export class Commands {
       const error = itemError(r.items, r.photo_ids.length > 0);
       if (error) {
         r.status = "rejected";
-        if (r.items.reduce((n, i) => n + i.quantity, 0) > 2) r.items = oldItems;
         return output(error, r);
       }
       if (r.items.some((i) => i.evacuation === "different")) {
@@ -761,53 +1384,85 @@ export class Commands {
       if (!cmd.phone) {
         if (role !== "receiver" || !cmd.name)
           throw new AppError("phone_not_supplied", 403, "נא לשלוח את מספר הצד השני או כרטיס איש קשר.");
-        await c.query("UPDATE conversations SET pending_counterparty_name=$2,version=version+1 WHERE id=$1", [ctx.conversation.id, cmd.name]);
-        return output(`רשמתי שהמקבל הוא ${cmd.name}. כדי שנוכל לתאם איתו ב־WhatsApp, נא לשלוח את מספר הטלפון שלו או כרטיס איש קשר. אם אין לך את המספר, כתוב "אין לי מספר" ונמשיך לחיפוש מקבל מתאים.`, r);
-      }
-      const targetPhone = suppliedPhone(ctx, cmd.phone);
-      if (other) {
-        if (other.phone === targetPhone)
-          return output("הצד השני כבר מקושר לפנייה.");
-        throw new AppError(
-          "party_already_linked",
-          409,
-          "הצד השני כבר מקושר לפנייה. שינוי זה דורש טיפול אנושי.",
-        );
-      }
-      const p = party(
-        role,
-        targetPhone,
-        targetPhone === phone &&
-          r.parties.some((x) => x.phone === phone && x.approved_at !== null),
-      );
-      // A contact card is identity data, never consent.
-      p.name =
-        ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ?? ctx.conversation.pending_counterparty_name ?? cmd.name ?? null;
-      r.parties.push(p);
-      invalidateProposal(r);
-      // Adding a named receiver converts an open donation into a direct
-      // handoff.  The generic condition question is not part of this flow.
-      if (role === "receiver")
+        if (other) {
+          other.name = cmd.name;
+        } else {
+          const receiver = party("receiver", null, false);
+          receiver.name = cmd.name;
+          r.parties.push(receiver);
+        }
+        r.origin = "direct";
         for (const item of r.items)
           if (item.working === null) item.working = true;
-      await c.query("UPDATE conversations SET pending_counterparty_name=NULL,version=version+1 WHERE id=$1", [ctx.conversation.id]);
-      r.origin = "direct";
-      if (r.parties.length === 2 && r.parties[0]!.phone === r.parties[1]!.phone)
-        r.represents_both_parties = true;
-      // In a direct handoff, receiving a phone number is not permission to
-      // contact that person. The initiating party must explicitly choose the
-      // verification-message option first.
-    } else if (cmd.type === "approve_self") {
-      if (
-        !explicitApproval(text) ||
-        (/^כן(?:[.! ]|\s+(?:תודה|בטח|ברור))*$/u.test(text.trim()) &&
-          !/(?:נא לאשר|לאשר מחדש)/.test(ctx.history.at(-1)?.content ?? ""))
-      )
-        throw new AppError(
-          "explicit_approval_required",
-          400,
-          "נא לאשר במפורש את חלקך בפנייה.",
+        invalidateProposal(r);
+        await c.query(
+          "UPDATE conversations SET pending_counterparty_name=NULL,pending_counterparty_phone=NULL,version=version+1 WHERE id=$1",
+          [ctx.conversation.id],
         );
+        ctx.conversation.pending_counterparty_name = null;
+        ctx.conversation.pending_counterparty_phone = null;
+        // Fall through to nextQuestion — prompts may ask for phone naturally.
+      } else {
+        const targetPhone = suppliedPhone(ctx, cmd.phone);
+        if (other) {
+          if (other.phone === targetPhone)
+            return output("הצד השני כבר מקושר לפנייה.");
+          if (other.phone === null) {
+            // Attach phone to a prior name-only receiver party.
+            other.phone = targetPhone;
+            other.name =
+              ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ??
+              other.name ??
+              ctx.conversation.pending_counterparty_name ??
+              cmd.name ??
+              null;
+          } else {
+            throw new AppError(
+              "party_already_linked",
+              409,
+              "הצד השני כבר מקושר לפנייה. שינוי זה דורש טיפול אנושי.",
+            );
+          }
+        } else {
+          const p = party(
+            role,
+            targetPhone,
+            targetPhone === phone &&
+              r.parties.some((x) => x.phone === phone && x.approved_at !== null),
+          );
+          // A contact card is identity data, never consent.
+          p.name =
+            ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ??
+            ctx.conversation.pending_counterparty_name ??
+            cmd.name ??
+            null;
+          r.parties.push(p);
+        }
+        invalidateProposal(r);
+        // Adding a named receiver converts an open donation into a direct
+        // handoff.  The generic condition question is not part of this flow.
+        if (role === "receiver")
+          for (const item of r.items)
+            if (item.working === null) item.working = true;
+        await c.query(
+          "UPDATE conversations SET pending_counterparty_name=NULL,pending_counterparty_phone=NULL,version=version+1 WHERE id=$1",
+          [ctx.conversation.id],
+        );
+        ctx.conversation.pending_counterparty_name = null;
+        ctx.conversation.pending_counterparty_phone = null;
+        r.origin = "direct";
+        if (
+          r.parties.length === 2 &&
+          r.parties[0]!.phone &&
+          r.parties[0]!.phone === r.parties[1]!.phone
+        )
+          r.represents_both_parties = true;
+        // In a direct handoff, receiving a phone number is not permission to
+        // contact that person. The initiating party must explicitly choose the
+        // verification-message option first.
+      }
+    } else if (cmd.type === "approve_self") {
+      // Trust action-manager approval command; do not re-litigate wording.
       for (const p of r.parties)
         if (p.phone === phone) {
           p.approved_at ??= this.now().toISOString();
@@ -815,19 +1470,7 @@ export class Commands {
         }
     } else if (cmd.type === "approve_schedule") {
       const proposedDate = r.proposed_run_date?.slice(0, 10) ?? null;
-      const [year, month, day] = proposedDate?.split("-") ?? [];
-      const label = proposedDate ? `${day}/${month}/${year}` : null;
-      if (
-        !proposedDate ||
-        cmd.date !== proposedDate ||
-        !explicitApproval(text) ||
-        !label ||
-        !(
-          (ctx.history.at(-1)?.content.includes(label) &&
-            /(?:נא לאשר את המועד|נא לאשר במפורש|נדרש עדיין אישור(?: שלך)?|ממתינים לאישור המועד)/.test(ctx.history.at(-1)?.content ?? "")) ||
-          text.includes(label)
-        )
-      )
+      if (!proposedDate || cmd.date !== proposedDate)
         throw new AppError(
           "schedule_approval_mismatch",
           400,
@@ -848,19 +1491,12 @@ export class Commands {
     }
     if (r.parties.length === 1 && r.photo_ids.length) r.status = "available";
     let q = nextQuestion(r, phone);
-    const previous = ctx.history.at(-1)?.content ?? "";
-    if (
-      (cmd.type === "details" || cmd.type === "item_facts") &&
-      previous &&
-      q.text.slice(0, 24) &&
-      previous.includes(q.text.slice(0, 24))
-    ) {
-      const asked = r.verification_contacted;
-      r.verification_contacted = true;
-      q = nextQuestion(r, phone);
-      r.verification_contacted = asked;
-    }
     if (q.floorNote) ownParty(r, phone).floor_note_shown = true;
-    return output(q.text, r);
+    if (distanceReviewThisTurn)
+      return output(
+        composeTurnReply(`${DISTANCE_REVIEW_REPLY}\n${q.text}`, beforeForAck, r),
+        r,
+      );
+    return output(composeTurnReply(q.text, beforeForAck, r), r);
   }
 }
