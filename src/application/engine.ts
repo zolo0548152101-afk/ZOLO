@@ -50,6 +50,7 @@ import {
   composeTurnReply,
   openingPhotoReply,
   summarizeTurnChanges,
+  noProgressReply,
 } from "../domain/policies.js";
 import {
   CLARIFY_REPLY,
@@ -1991,13 +1992,27 @@ export class Engine {
         (intent === "ask_photo" ||
           intent === "ask_details" ||
           intent === "acknowledge" ||
-          /^רשמתי מסירה/.test(reply ?? ""))
+          /^(?:מעולה, )?רשמתי/.test(reply ?? ""))
       ) {
         // Keep this-turn soft ask when intent is ask_photo; never re-open gate.
         const ask =
           intent === "ask_photo" ? SOFT_PHOTO_ASK : nextQuestion(request, phone).text;
         const rebuilt = composeTurnReply(ask, beforeRequest, request);
         if (rebuilt.trim()) reply = rebuilt;
+      }
+      // No-progress: nothing new in DB → never resend the identical previous ask.
+      if (request && !reason && changedFields.length === 0 && intent !== "ask_photo") {
+        const previousBot =
+          [...ctx.history]
+            .reverse()
+            .find((entry) => entry.role === "assistant")?.content ?? "";
+        const next = nextQuestion(request, phone).text;
+        const sameAsk =
+          Boolean(reply && previousBot && previousBot.includes((reply ?? "").slice(0, 24))) ||
+          Boolean(next && previousBot && previousBot.includes(next.slice(0, 24))) ||
+          reply === next;
+        if (sameAsk || !reply?.trim())
+          reply = noProgressReply(request, phone, text, previousBot);
       }
       // protectedReply still marks operational replies that must not be
       // replaced by free model text; claim-guard handles phrasing instead.

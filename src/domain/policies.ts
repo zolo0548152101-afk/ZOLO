@@ -154,29 +154,93 @@ export function summarizeTurnChanges(
   )
     return null;
 
+  const floorNew = Boolean(
+    afterDonor &&
+      afterDonor.floor !== null &&
+      afterDonor.floor !== (beforeDonor?.floor ?? null),
+  );
+
   // Fresh handoff write: item and/or receiver captured together.
   if (itemText || receiverNameNew || receiverPhoneNew) {
     const name = receiverNameNew ? afterReceiver?.name : null;
     const phone = receiverPhoneNew ? afterReceiver?.phone : null;
     if (itemText && name && phone)
-      return `רשמתי מסירה של ${itemText} ל${name} (${displayPhone(phone)})`;
-    if (itemText && name) return `רשמתי מסירה של ${itemText} ל${name}`;
+      return `מעולה, רשמתי שאתה רוצה למסור ${itemText} ל${name} (${displayPhone(phone)})`;
+    if (itemText && name)
+      return `מעולה, רשמתי שאתה רוצה למסור ${itemText} ל${name}`;
     if (itemText && phone)
-      return `רשמתי מסירה של ${itemText} למספר ${displayPhone(phone)}`;
-    if (itemText) return `רשמתי מסירה של ${itemText}`;
+      return `מעולה, רשמתי שאתה רוצה למסור ${itemText} למספר ${displayPhone(phone)}`;
+    if (itemText) return `מעולה, רשמתי שאתה רוצה למסור ${itemText}`;
     if (name && phone)
-      return `רשמתי מסירה ל${name} (${displayPhone(phone)})`;
-    if (name) return `רשמתי מסירה ל${name}`;
+      return `מעולה, רשמתי מסירה ל${name} (${displayPhone(phone)})`;
+    if (name) return `מעולה, רשמתי מסירה ל${name}`;
   }
 
   // Later turns: only the field that just changed.
   if (settlementNew && afterDonor?.settlement)
-    return `סבבה, רשמתי ${afterDonor.settlement}`;
-  if (addressNew && afterDonor?.address)
-    return `סבבה, רשמתי את הכתובת`;
-  if (nameNew && afterDonor?.name) return `סבבה, רשמתי את השם ${afterDonor.name}`;
+    return `מעולה, רשמתי ${afterDonor.settlement}`;
+  if (addressNew && afterDonor?.address) {
+    const place = [afterDonor.address, afterDonor.settlement]
+      .filter(Boolean)
+      .join(" ");
+    return `מעולה, רשמתי ${place}`;
+  }
+  if (floorNew && afterDonor && afterDonor.floor !== null)
+    return `מעולה, רשמתי קומה ${afterDonor.floor}`;
+  if (nameNew && afterDonor?.name) return `מעולה, רשמתי את השם ${afterDonor.name}`;
   void beforeOwn;
   return null;
+}
+
+/** When nothing new was written — never resend the identical previous question. */
+export function noProgressReply(
+  r: Request,
+  phone: string,
+  customerText: string,
+  previousBot: string,
+): string {
+  const q = nextQuestion(r, phone);
+  const p = ownParty(r, phone);
+  const t = norm(customerText);
+  const alreadyStored =
+    Boolean(p.settlement && t.includes(norm(p.settlement))) ||
+    Boolean(p.address && t.includes(norm(p.address))) ||
+    Boolean(p.name && t.includes(norm(p.name)));
+  const field = q.missing?.field ?? null;
+  const required =
+    field === "settlement" ||
+    field === "address" ||
+    field === "name" ||
+    field === "floor";
+  const needLabel =
+    field === "settlement"
+      ? "את היישוב"
+      : field === "address"
+        ? "את הכתובת או תיאור המקום"
+        : field === "floor"
+          ? "את הקומה"
+          : field === "name"
+            ? "את השם"
+            : "את הפרט החסר";
+  let ask = q.text;
+  // Soft variant when the previous bot line already asked the same thing.
+  if (previousBot && ask && previousBot.includes(ask.slice(0, Math.min(24, ask.length)))) {
+    if (field === "address")
+      ask =
+        p.settlement === "בית שאן"
+          ? "כדי להמשיך צריך כתובת מדויקת — רחוב ומספר בית."
+          : "כדי להמשיך צריך תיאור קצר של המקום ביישוב, למשל «ליד המזכירות» או «בכניסה».";
+    else if (field === "settlement")
+      ask = "כדי להמשיך צריך את שם היישוב שבו נמצא הפריט.";
+    else if (field === "floor")
+      ask = "כדי להמשיך צריך לדעת באיזו קומה — אפשר גם לכתוב «קרקע».";
+    else if (required) ask = `כדי להמשיך צריך ${needLabel}.`;
+  }
+  if (alreadyStored)
+    return `הפרט הזה כבר רשום אצלנו. ${ask}`.trim();
+  if (required)
+    return `אפשר לענות על ${needLabel}? ${ask}`.trim();
+  return `אפשר לענות על זה בבקשה? ${ask}`.trim();
 }
 export function photoAskAlreadySent(
   history: { role: string; content: string }[],
@@ -702,7 +766,8 @@ export function ownPartyDetailsComplete(r: Request, phone: string): boolean {
         p.approved_by === p.phone &&
         p.name &&
         p.settlement &&
-        p.address,
+        p.address &&
+        p.floor !== null,
     );
   } catch {
     return false;
@@ -800,20 +865,23 @@ export function nextQuestion(
     return {
       text:
         p.settlement === "בית שאן"
-          ? (!p.name
-              ? p.address
-                ? "תודה. חסר רק השם."
-                : "נא לציין שם וכתובת."
-              : "תודה. חסרה רק הכתובת המדויקת.") +
-            (!p.floor_note_shown && p.floor === null
-              ? " בבניין עם קומות — לציין קומה."
-              : "")
+          ? !p.name
+            ? p.address
+              ? "תודה. חסר רק השם."
+              : "נא לציין שם וכתובת."
+            : "תודה. חסרה רק הכתובת המדויקת."
           : !p.name
             ? "נא לציין שם ותיאור כללי של המקום ביישוב, למשל ״בכניסה״ או ״ליד המזכירות״."
             : "תודה. חסר רק תיאור כללי של המקום ביישוב, למשל ״בכניסה״ או ״ליד המזכירות״.",
-      floorNote:
-        p.settlement === "בית שאן" && !p.floor_note_shown && p.floor === null,
+      floorNote: false,
       missing: missingOf(r, !p.name ? "name" : "address", p.role),
+    };
+  // Always ask floor — never invent קומה 0.
+  if (p.floor === null)
+    return {
+      text: "באיזו קומה?",
+      floorNote: !p.floor_note_shown,
+      missing: missingOf(r, "floor", p.role),
     };
   if (r.items.some((i) => i.free === null))
     return {

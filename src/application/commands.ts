@@ -1065,6 +1065,18 @@ export class Commands {
         )
       )
         return output("הפנייה לצד השני כבר בוצעה.", r);
+      // Bare «כן» is not enough to message a third party — need an explicit OK.
+      const explicitContact =
+        /מאשר(?:ת)?\s+(?:ליצור(?:\s+אית(?:ה|ו))?\s+קשר|לפנות)/u.test(norm(text)) ||
+        /(?:^|[\s,])(?:כן[,.]?\s*)?(?:תפנה|לפנות|תיצרו\s+קשר|ליצור\s+קשר|שלח(?:ו)?\s+(?:לו|לה|למקבל|למוסר))/u.test(
+          norm(text),
+        );
+      if (cmd.contact && !explicitContact) {
+        return output(
+          `כדי לוודא — לאשר במפורש שנשלח הודעה ל${other.name ?? (other.role === "receiver" ? "מקבל" : "מוסר")}? למשל «כן, תפנה אליו».`,
+          r,
+        );
+      }
       // Consent to contact only after own details + transport rules hold.
       // Decline can be recorded anytime; early "yes" is deferred via nextQuestion.
       if (cmd.contact && !readyToAskContactCounterparty(r, phone)) {
@@ -1346,9 +1358,8 @@ export class Commands {
         if (known?.decision === "review")
           p.address = address;
       }
-      if (p.settlement && p.settlement !== "בית שאן") p.floor = 0;
-      else if (p.settlement === "בית שאן" && cmd.floor !== null)
-        p.floor = cmd.floor;
+      // Never invent floor=0 — only store a floor the customer actually gave.
+      if (cmd.floor !== null) p.floor = cmd.floor;
       if (cmd.preferred_time) r.preferred_time = cmd.preferred_time;
       if (cmd.address && /^(?:רחוב|שכונת|שכונה|שדרות|שד[׳']?)(?=$|\s)/u.test(cmd.address.trim())) {
         const known = await this.s.region(c, cmd.address.trim());
@@ -1504,18 +1515,6 @@ export class Commands {
     }
     if (r.parties.length === 1 && r.photo_ids.length) r.status = "available";
     let q = nextQuestion(r, phone);
-    const previous = ctx.history.at(-1)?.content ?? "";
-    if (
-      (cmd.type === "details" || cmd.type === "item_facts") &&
-      previous &&
-      q.text.slice(0, 24) &&
-      previous.includes(q.text.slice(0, 24))
-    ) {
-      const asked = r.verification_contacted;
-      r.verification_contacted = true;
-      q = nextQuestion(r, phone);
-      r.verification_contacted = asked;
-    }
     if (q.floorNote) ownParty(r, phone).floor_note_shown = true;
     if (distanceReviewThisTurn)
       return output(`${DISTANCE_REVIEW_REPLY}\n${q.text}`, r);

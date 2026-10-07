@@ -126,8 +126,10 @@ const plan = (text: string, commands: Command[]): Plan => ({
 });
 
 function floor(text: string): number | null {
-  if (/קומת? קרקע/.test(text)) return 0;
-  const matches = [...text.matchAll(/קומה\s*(-?\d+)/g)];
+  const t = norm(text);
+  // Customer may answer a floor ask with bare «קרקע» / «קומת קרקע».
+  if (/קומת?\s*קרקע|(?:^|[\s,])קרקע(?:[\s,!.]|$)/u.test(t)) return 0;
+  const matches = [...t.matchAll(/קומה\s*(-?\d+)/g)];
   const match = matches.at(-1);
   if (match) return Number(match[1]);
   // An apartment number is not a floor. Never invent קומה from «דירה N».
@@ -1014,8 +1016,10 @@ export function rulePlan(ctx: Context): Plan | null {
     askedVerification &&
     current.origin === "direct" &&
     current.parties.some((item) => item.role !== party.role) &&
-    (yes(text) || no(text) || explicitApproval(text))
+    (yes(text) || no(text) || explicitApproval(text) || contactConsent(text))
   ) {
+    // Bare «כן» still reaches contact_counterparty; the command refuses to
+    // message a third party without an explicit confirmation phrase.
     const consent = !no(text);
     const commands: Command[] = [];
     if (consent) {
@@ -1200,11 +1204,16 @@ export function rulePlan(ctx: Context): Plan | null {
 
   if (party.settlement && !party.address) {
     const address = norm(text);
+    const repeatsTown =
+      Boolean(party.settlement && norm(party.settlement) === address) ||
+      mentionedAllowedSettlement(text) !== null;
     if (
       address &&
       !yes(address) &&
       !no(address) &&
-      !/^(?:בעצם\s+)?קומה\s*-?\d+$/u.test(address)
+      !/^(?:בעצם\s+)?קומה\s*-?\d+$/u.test(address) &&
+      !repeatsTown &&
+      floor(address) === null
     )
       return plan(text, [
         {
@@ -1215,6 +1224,22 @@ export function rulePlan(ctx: Context): Plan | null {
           settlement: null,
           address,
           floor: floor(address),
+        },
+      ]);
+  }
+
+  if (party.address && party.floor === null) {
+    const value = floor(text);
+    if (value !== null)
+      return plan(text, [
+        {
+          type: "details",
+          request_number: current.number,
+          role: party.role,
+          name: null,
+          settlement: null,
+          address: null,
+          floor: value,
         },
       ]);
   }
