@@ -395,12 +395,23 @@ export class Commands {
     }
     if (cmd.type === "donate" || cmd.type === "receive_from_donor") {
       const items = cmd.items.map(asItem);
-      const isDonor = cmd.type === "donate",
-        other = isDonor ? cmd.counterparty_phone : cmd.donor_phone,
-        // A named recipient from the action manager is a direct handoff even
-        // when the model omitted direct:true — persist that, do not keep the
-        // open-donation photo loop.
-        direct =
+      const isDonor = cmd.type === "donate";
+      // Contact cards often arrive in the same coalesced turn as the item.
+      // Enrich missing counterparty phone/name from the vCard before write.
+      const card = ctx.message.contacts[0];
+      let other = isDonor ? cmd.counterparty_phone : cmd.donor_phone;
+      if (isDonor && !other && card?.phone) other = card.phone;
+      if (
+        isDonor &&
+        cmd.type === "donate" &&
+        !cmd.counterparty_name &&
+        card?.name
+      )
+        cmd.counterparty_name = card.name.replace(/^אא\s+/u, "").trim() || card.name;
+      // A named recipient from the action manager is a direct handoff even
+      // when the model omitted direct:true — persist that, do not keep the
+      // open-donation photo loop.
+      const direct =
           Boolean(other) ||
           (cmd.type === "donate" &&
             (cmd.direct === true || Boolean(cmd.counterparty_name)));

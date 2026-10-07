@@ -1430,12 +1430,14 @@ export class Engine {
               !reason &&
               !explicitClarification &&
               photoGate(request) &&
-              !handoffTransitionPlanned &&
               !ctx.conversation.pending_extra_item &&
               !["cancelled", "rejected", "human", "closed", "coordinated"].includes(
                 request.status,
               )
             ) {
+              // Direct/named handoff still needs a photo of the item first.
+              // Soft-gate clarifications above stay untouched.
+              void handoffTransitionPlanned;
               reply = PHOTO_FIRST;
               intent = "ask_photo";
             }
@@ -1711,32 +1713,49 @@ export class Engine {
           stage: "customer_phrase",
         });
       }
-      // Intro-once: check sent outbox for this phone, not only request history.
-      // The first self-intro is often sent before any request row exists.
-      const priorIntro = await this.s.pool.query<{ text: string }>(
-        `SELECT o.text FROM outbox o
-          JOIN messages current ON current.id=$2
-         WHERE o.phone=$1
-           AND o.id <> $3
-           AND o.state IN ('sent','shadow','simulation')
-           AND o.created_at <= current.received_at
-           AND (o.text LIKE '%סוכן האוטומטי%' OR o.text LIKE '%בהרצה ניסיונית%')
-         ORDER BY o.seq DESC LIMIT 1`,
+      // Intro-once against outbox: if this phone already received any sent
+      // reply since reset, never introduce again — even when the first reply
+      // itself skipped the intro line.
+      const priorOutbox = await this.s.pool.query<{ n: number; intro: number }>(
+        `SELECT count(*)::int AS n,
+                count(*) FILTER (
+                  WHERE o.text LIKE '%סוכן האוטומטי%' OR o.text LIKE '%בהרצה ניסיונית%'
+                )::int AS intro
+           FROM outbox o
+           JOIN messages current ON current.id=$2
+           LEFT JOIN conversation_resets cr ON cr.conversation_id=current.conversation_id
+          WHERE o.phone=$1
+            AND o.id <> $3
+            AND o.state IN ('sent','shadow','simulation')
+            AND o.created_at <= current.received_at
+            AND (cr.reset_at IS NULL OR o.created_at > cr.reset_at)`,
         [ctx.conversation.phone, id, committed.customerOutboxId],
       );
       const introduced =
-        (priorIntro.rowCount ?? 0) > 0 ||
+        (priorOutbox.rows[0]?.n ?? 0) > 0 ||
+        (priorOutbox.rows[0]?.intro ?? 0) > 0 ||
         ctx.history.some(
           (entry) => entry.role === "assistant" && isSelfIntroText(entry.content),
         );
-      text = stripRepeatedSelfIntro(text, ctx.history, introduced);
-      const lang = conversationLanguage(ctx);
-      const fromTemplate = localizeCustomer(committed.canonicalReply, lang);
-      // A fixed template in the customer's language wins over a Hebrew paraphrase.
-      text = fromTemplate !== committed.canonicalReply
-        ? fromTemplate
-        : localizeCustomer(text, lang);
-      text = stripRepeatedSelfIntro(text, ctx.history, introduced);
+      // Photo-first and other fixed templates must not be replaced by a free
+      // paraphrase that drops the required ask or invents a second intro.
+      const canonical = committed.canonicalReply;
+      const lockPhoto =
+        canonical === PHOTO_FIRST ||
+        canonical.includes(PHOTO_FIRST) ||
+        committed.operation?.action_results?.intent === "ask_photo";
+      if (lockPhoto) {
+        text = stripRepeatedSelfIntro(canonical, ctx.history, introduced);
+      } else {
+        text = stripRepeatedSelfIntro(text, ctx.history, introduced);
+        const lang = conversationLanguage(ctx);
+        const fromTemplate = localizeCustomer(canonical, lang);
+        text =
+          fromTemplate !== canonical
+            ? fromTemplate
+            : localizeCustomer(text, lang);
+        text = stripRepeatedSelfIntro(text, ctx.history, introduced);
+      }
       await this.s.transaction(async (c) => {
         const stillNewer = await c.query<{ id: string }>(
           `SELECT m.id FROM messages m
