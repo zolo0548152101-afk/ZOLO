@@ -728,6 +728,34 @@ export function rulePlan(ctx: Context): Plan | null {
   // for the missing item. Do not escalate or invent a donation.
   if (!item && directHandoffIntent(text))
     return plan(text, [{ type: "next" }]);
+  // Self-name after "רוצה למסור ל…" (pending or recent history): keep the
+  // sticky handoff and ask for the item — never re-ask מסירה/קבלה.
+  if (
+    !item &&
+    !activeRequest(ctx) &&
+    explicitName(text) &&
+    (ctx.conversation.pending_counterparty_name || hasPartialNamedHandoff(ctx))
+  )
+    return plan(text, [{ type: "next" }]);
+  // Contact card / phone after a sticky donate handoff: store the number and
+  // ask for the item. Do not fall through to choose_request / path re-ask.
+  if (
+    !item &&
+    !activeRequest(ctx) &&
+    (standalonePhone(text) || ctx.message.contacts[0]?.phone) &&
+    (ctx.conversation.pending_counterparty_name ||
+      hasPartialNamedHandoff(ctx) ||
+      donationIntent(
+        (ctx.history ?? [])
+          .filter((entry) => entry.role === "user")
+          .slice(-6)
+          .map((entry) => entry.content)
+          .join("\n") +
+          "\n" +
+          text,
+      ))
+  )
+    return plan(text, [{ type: "next" }]);
   if (
     !item &&
     ctx.conversation.pending_counterparty_name &&

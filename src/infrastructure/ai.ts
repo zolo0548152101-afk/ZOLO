@@ -16,6 +16,7 @@ import {
   type Request,
 } from "../domain/types.js";
 import { conversationLanguage } from "../domain/customer-language.js";
+import { conversationAlreadyIntroduced } from "../domain/ai-guards.js";
 import { nextQuestion } from "../domain/policies.js";
 import { dataMapSection } from "../domain/field-map.js";
 import { rulePlan } from "../application/rule-planner.js";
@@ -530,11 +531,7 @@ export class OpenAIPlanner implements Planner {
           operation_result: input.operation,
           fallback_reply: input.fallback,
           canonical: input.fallback,
-          already_introduced: ctx.history.some(
-            (entry) =>
-              entry.role === "assistant" &&
-              /סוכן האוטומטי|בהרצה ניסיונית/.test(entry.content),
-          ),
+          already_introduced: conversationAlreadyIntroduced(ctx.history),
         }),
       }],
       reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },

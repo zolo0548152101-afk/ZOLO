@@ -47,6 +47,29 @@ const OPEN_STATUSES = new Set([
   "cancel_pending",
 ]);
 
+/** Pull "קוראים לי X" / "שמי X" from recent user turns when opening a request. */
+function recentSelfName(ctx: Context, text: string): string | null {
+  const blob = [
+    ...(ctx.history ?? [])
+      .filter((entry) => entry.role === "user")
+      .slice(-8)
+      .map((entry) => entry.content),
+    text,
+  ].join("\n");
+  const match = norm(blob).match(
+    /(?:קוראים\s+לי|שמי|השם(?:\s+(?:הוא|שלי))?)\s+([א-ת]{2,}(?:\s+[א-ת]{2,}){0,2})/u,
+  );
+  const name = match?.[1]?.trim() ?? null;
+  if (!name) return null;
+  if (
+    /^(?:רוצה|צריך|צריכה|מוסר|מוסרת|מעביר|מעבירה|מחפש|מחפשת|מבקש|מבקשת|מאשר|מאשרת|מיטה|ספה|מקרר)/u.test(
+      name,
+    )
+  )
+    return null;
+  return name;
+}
+
 function donorOpenRequests(ctx: Context, phone: string): Request[] {
   return ctx.requests.filter(
     (r) =>
@@ -464,6 +487,10 @@ export class Commands {
         }
       }
       const parties = [party(isDonor ? "donor" : "receiver", phone, isDonor)];
+      if (isDonor) {
+        const selfName = recentSelfName(ctx, text);
+        if (selfName) parties[0]!.name = selfName;
+      }
       if (other) {
         const p = suppliedPhone(ctx, other);
         const counterparty = party(
@@ -795,19 +822,115 @@ export class Commands {
             return null;
           }
         })();
-      if (pendingName && supplied) {
+      const contactName =
+        ctx.message.contacts[0]?.name?.replace(/^אא\s+/u, "").trim() || null;
+      const stickyName =
+        pendingName ||
+        handoffName ||
+        contactName ||
+        (() => {
+          const recent = (ctx.history ?? [])
+            .filter((entry) => entry.role === "user")
+            .slice(-6)
+            .map((entry) => entry.content)
+            .join("\n");
+          const match = norm(recent).match(
+            /(?:למסור|להעביר|מוסר|מוסרת|מעביר|מעבירה)\s+(?:את\s+)?(?:הפריט|הרהיט|רהיט|מיטה|שולחן|ספה|כיסא|ארון)?\s*ל([א-ת]{2,})/u,
+          );
+          return match?.[1] ?? null;
+        })();
+      if (stickyName && !pendingName) {
         await c.query(
-          "UPDATE conversations SET pending_counterparty_phone=$2,version=version+1 WHERE id=$1",
-          [ctx.conversation.id, supplied],
+          "UPDATE conversations SET pending_counterparty_name=$2,version=version+1 WHERE id=$1",
+          [ctx.conversation.id, stickyName],
         );
+        ctx.conversation.pending_counterparty_name = stickyName;
+      }
+      if ((pendingName || stickyName) && supplied) {
+        const name = pendingName || stickyName!;
+        await c.query(
+          `UPDATE conversations
+              SET pending_counterparty_name=$2,pending_counterparty_phone=$3,version=version+1
+            WHERE id=$1`,
+          [ctx.conversation.id, name, supplied],
+        );
+        ctx.conversation.pending_counterparty_name = name;
         ctx.conversation.pending_counterparty_phone = supplied;
         return output(
-          `רשמתי את מספר הטלפון של ${pendingName}. מה הפריט שברצונך למסור?`,
+          `רשמתי את מספר הטלפון של ${name}. מה הפריט שברצונך למסור?`,
         );
       }
-      if (pendingName)
-        return output(`מה הפריט שברצונך למסור ל${pendingName}?`);
+      if (pendingName || stickyName)
+        return output(
+          `מה הפריט שברצונך למסור ל${pendingName || stickyName}?`,
+        );
+      if (recentSelfName(ctx, text) && donationIntent(
+        (ctx.history ?? [])
+          .filter((entry) => entry.role === "user")
+          .slice(-6)
+          .map((entry) => entry.content)
+          .join("\n") +
+          "\n" +
+          text,
+      ))
+        return output("מה הפריט שברצונך למסור?");
       return output("איך אפשר לעזור — למסור פריט, לקבל פריט או לתאם הובלה?");
+    }
+    // Contact card / counterparty before any request exists: keep sticky
+    // handoff and ask for the item instead of choose_request / path re-ask.
+    if (
+      (cmd.type === "counterparty_candidate" || cmd.type === "counterparty") &&
+      !ctx.requests.length
+    ) {
+      const candidatePhone =
+        "phone" in cmd && cmd.phone
+          ? suppliedPhone(ctx, cmd.phone)
+          : ctx.message.contacts[0]?.phone
+            ? suppliedPhone(ctx, ctx.message.contacts[0].phone)
+            : null;
+      const candidateName =
+        ("name" in cmd && cmd.name) ||
+        ctx.message.contacts[0]?.name?.replace(/^אא\s+/u, "").trim() ||
+        ctx.conversation.pending_counterparty_name;
+      if (candidatePhone || candidateName) {
+        await c.query(
+          `UPDATE conversations
+              SET pending_counterparty_name=COALESCE($2, pending_counterparty_name),
+                  pending_counterparty_phone=COALESCE($3, pending_counterparty_phone),
+                  version=version+1
+            WHERE id=$1`,
+          [ctx.conversation.id, candidateName, candidatePhone],
+        );
+        if (candidateName)
+          ctx.conversation.pending_counterparty_name = candidateName;
+        if (candidatePhone)
+          ctx.conversation.pending_counterparty_phone = candidatePhone;
+        const who = candidateName ?? candidatePhone;
+        return output(
+          candidatePhone
+            ? `רשמתי את מספר הטלפון של ${who}. מה הפריט שברצונך למסור?`
+            : `רשמתי שמדובר במסירה ל${who}. מה הפריט שברצונך למסור?`,
+        );
+      }
+    }
+    if (cmd.type === "details" && !ctx.requests.length) {
+      if (
+        ctx.conversation.pending_counterparty_name ||
+        donationIntent(
+          (ctx.history ?? [])
+            .filter((entry) => entry.role === "user")
+            .slice(-6)
+            .map((entry) => entry.content)
+            .join("\n"),
+        )
+      ) {
+        const who = ctx.conversation.pending_counterparty_name;
+        return output(
+          who
+            ? `מה הפריט שברצונך למסור ל${who}?`
+            : "מה הפריט שברצונך למסור?",
+        );
+      }
     }
     if (cmd.type === "clarify_duplicate") {
       // A duplicate message can arrive after the other party has approved.

@@ -288,17 +288,21 @@ export class Engine {
       );
     });
     let next = pending.rows[0]!.id;
-    // Merge only a burst of plain text. Media remains separate so its durable
-    // capture and attachment semantics are never lost.
-    if (
-      pending.rows.length > 1 &&
-      pending.rows.every((m) => m.kind === "text" && m.media_state === "none")
-    ) {
-      const last = pending.rows.at(-1)!;
-      const parts = pending.rows.map((m) => m.text.trim()).filter(Boolean);
+    // Merge a quiet-window burst of text and contact cards into one answer.
+    // Images/voice/location stay separate so durable capture is never lost.
+    const burstable = pending.rows.filter(
+      (m) =>
+        (m.kind === "text" || m.kind === "contact") && m.media_state === "none",
+    );
+    const images = pending.rows.filter(
+      (m) => m.kind === "image" && m.media_state === "ready",
+    );
+    if (pending.rows.length > 1 && burstable.length === pending.rows.length) {
+      const last = burstable.at(-1)!;
+      const parts = burstable.map((m) => m.text.trim()).filter(Boolean);
       const shortBurst = parts.length > 1 && parts.every((part) => part.length <= 48);
       const mergedText = parts.join(shortBurst ? " " : "\n");
-      const mergedContacts = pending.rows.flatMap((m) => m.contacts);
+      const mergedContacts = burstable.flatMap((m) => m.contacts);
       await this.s.transaction(async (c) => {
         const current = await c.query<{ id: string }>(
           `SELECT m.id FROM messages m JOIN contacts co ON co.id=m.contact_id
@@ -311,50 +315,53 @@ export class Engine {
           current.rows.length === pending.rows.length &&
           current.rows.every((m, i) => m.id === pending.rows[i]!.id)
         ) {
-          await c.query("UPDATE messages SET text=$2,contacts=$3 WHERE id=$1", [
-            last.id,
-            mergedText,
-            JSON.stringify(mergedContacts),
-          ]);
+          await c.query(
+            "UPDATE messages SET text=$2,contacts=$3,kind=$4 WHERE id=$1",
+            [
+              last.id,
+              mergedText,
+              JSON.stringify(mergedContacts),
+              mergedContacts.length ? "contact" : "text",
+            ],
+          );
           await c.query(
             "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id = ANY($1::uuid[])",
-            [pending.rows.slice(0, -1).map((m) => m.id), `coalesced_into:${last.id}`],
+            [burstable.slice(0, -1).map((m) => m.id), `coalesced_into:${last.id}`],
           );
           next = last.id;
         }
       });
-    } else if (pending.rows.length > 1) {
-      const texts = pending.rows.filter(
-        (m) => m.kind === "text" && m.media_state === "none",
-      );
-      const images = pending.rows.filter(
-        (m) => m.kind === "image" && m.media_state === "ready",
-      );
-      if (texts.length && images.length) {
-        const lastText = texts.at(-1)!;
-        const earlierTexts = texts.slice(0, -1);
-        await this.s.transaction(async (c) => {
-          if (earlierTexts.length) {
-            const parts = texts.map((m) => m.text.trim()).filter(Boolean);
-            const shortBurst =
-              parts.length > 1 && parts.every((part) => part.length <= 48);
-            await c.query("UPDATE messages SET text=$2,contacts=$3 WHERE id=$1", [
+    } else if (burstable.length && images.length) {
+      const lastText =
+        [...burstable].reverse().find((m) => m.kind === "text") ??
+        burstable.at(-1)!;
+      const earlier = burstable.filter((m) => m.id !== lastText.id);
+      await this.s.transaction(async (c) => {
+        if (earlier.length || burstable.length > 1) {
+          const parts = burstable.map((m) => m.text.trim()).filter(Boolean);
+          const shortBurst =
+            parts.length > 1 && parts.every((part) => part.length <= 48);
+          await c.query(
+            "UPDATE messages SET text=$2,contacts=$3,kind=$4 WHERE id=$1",
+            [
               lastText.id,
               parts.join(shortBurst ? " " : "\n"),
-              JSON.stringify(texts.flatMap((m) => m.contacts)),
-            ]);
+              JSON.stringify(burstable.flatMap((m) => m.contacts)),
+              burstable.some((m) => m.contacts.length) ? "contact" : "text",
+            ],
+          );
+          if (earlier.length)
             await c.query(
               "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id = ANY($1::uuid[])",
-              [earlierTexts.map((m) => m.id), `coalesced_into:${lastText.id}`],
+              [earlier.map((m) => m.id), `coalesced_into:${lastText.id}`],
             );
-          }
-          await c.query(
-            "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id = ANY($1::uuid[])",
-            [images.map((m) => m.id), `attached_to:${lastText.id}`],
-          );
-        });
-        next = lastText.id;
-      }
+        }
+        await c.query(
+          "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id = ANY($1::uuid[])",
+          [images.map((m) => m.id), `attached_to:${lastText.id}`],
+        );
+      });
+      next = lastText.id;
     }
     await this.process(next, lastAiAttempt);
   }
@@ -940,15 +947,71 @@ export class Engine {
       );
       if (newer.rows[0]) {
         const successorId = newer.rows[0].id;
-        const successor = await c.query<{ kind: string }>(
-          "SELECT kind FROM messages WHERE id=$1",
+        const successor = await c.query<{
+          kind: string;
+          text: string;
+          contacts: { phone: string; name: string | null }[];
+        }>(
+          "SELECT kind,text,contacts FROM messages WHERE id=$1",
           [successorId],
         );
         const successorKind = successor.rows[0]?.kind ?? "text";
         // A pending image/voice/location follow-up must not cancel the older
         // text turn that opens the request. FIFO processes media after this
-        // commit. Only a newer free-text turn may supersede a stale AI plan.
-        if (successorKind === "text") {
+        // commit. Newer text OR contact-card turns may supersede a stale plan
+        // so a burst never yields two customer replies for one thought.
+        if (successorKind === "text" || successorKind === "contact") {
+          // Keep donate handoff sticky when the abandoned plan already knew
+          // "רוצה למסור לטל" — otherwise the next short bubble re-asks path.
+          const abandoned = ctx.message.ai_plan as {
+            commands?: Array<{
+              type?: string;
+              counterparty_name?: string | null;
+              counterparty_phone?: string | null;
+            }>;
+          } | null;
+          for (const cmd of abandoned?.commands ?? []) {
+            if (
+              cmd.type === "donate" &&
+              (cmd.counterparty_name || cmd.counterparty_phone)
+            ) {
+              await c.query(
+                `UPDATE conversations
+                    SET pending_counterparty_name=COALESCE($2, pending_counterparty_name),
+                        pending_counterparty_phone=COALESCE($3, pending_counterparty_phone),
+                        version=version+1
+                  WHERE id=$1`,
+                [
+                  ctx.conversation.id,
+                  cmd.counterparty_name ?? null,
+                  cmd.counterparty_phone ?? null,
+                ],
+              );
+              if (cmd.counterparty_name)
+                ctx.conversation.pending_counterparty_name =
+                  ctx.conversation.pending_counterparty_name ??
+                  cmd.counterparty_name;
+              if (cmd.counterparty_phone)
+                ctx.conversation.pending_counterparty_phone =
+                  ctx.conversation.pending_counterparty_phone ??
+                  cmd.counterparty_phone;
+            }
+          }
+          // Fold the superseded bubble into the successor so decode still sees
+          // "רוצה למסור" / "לטל" when the user split them across messages.
+          const priorText = (ctx.message.transcript ?? ctx.message.text ?? "").trim();
+          const nextText = (successor.rows[0]?.text ?? "").trim();
+          if (priorText && nextText && !nextText.includes(priorText)) {
+            const merged = `${priorText} ${nextText}`.trim();
+            const mergedContacts = [
+              ...(ctx.message.contacts ?? []),
+              ...(successor.rows[0]?.contacts ?? []),
+            ];
+            await c.query(
+              "UPDATE messages SET text=$2,contacts=$3 WHERE id=$1",
+              [successorId, merged, JSON.stringify(mergedContacts)],
+            );
+          }
           await c.query(
             "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id=$1 AND processed_at IS NULL",
             [id, `superseded_by:${successorId}`],
@@ -1668,7 +1731,7 @@ export class Engine {
           `SELECT m.id FROM messages m
             WHERE m.conversation_id=(SELECT conversation_id FROM messages WHERE id=$1)
               AND m.seq>(SELECT seq FROM messages WHERE id=$1)
-              AND m.processed_at IS NULL AND m.kind='text'
+              AND m.processed_at IS NULL AND m.kind IN ('text','contact')
             ORDER BY m.seq LIMIT 1`,
           [id],
         );

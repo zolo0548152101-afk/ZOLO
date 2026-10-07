@@ -277,11 +277,11 @@ export class Store {
         /* selected row may have been cleared */
       }
     }
-    // History for the open business conversation only. A finished/coordinated
-    // handoff is out of scope. Always start from the earliest still-open
-    // request for this phone — not the newly selected one — so opening a
-    // second concurrent request does not wipe prior turns (and the one-time
-    // self-intro) from the reply manager's history.
+    // History since the last conversation reset (or the full chat when there
+    // is no reset). Do NOT clip to request.created_at: the lead-in turns that
+    // open a request (greeting, path, name, contact card, self-intro) arrive
+    // before the request row exists, and clipping them caused repeated intros
+    // and lost "רוצה למסור ל…" context on the very next message.
     const open = requests.filter(
       (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
     );
@@ -291,7 +291,7 @@ export class Store {
     const selectedOpen =
       open.find((r) => r.id === conv.rows[0]!.selected_request_id) ??
       earliestOpen;
-    const historySince = earliestOpen?.created_at ?? resetAt;
+    const historySince = resetAt;
     const h = await c.query<{
       text: string;
       transcript: string | null;
