@@ -1664,6 +1664,13 @@ export class Engine {
               index++;
               if (reason || request?.status === "rejected") break;
             }
+            // If this turn just marked «בוקשה» (commands or below), keep the soft
+            // ask even when a later command overwrote the reply with nextQuestion.
+            const photoAskedThisTurn =
+              Boolean(request) &&
+              request!.photo_status === PHOTO_STATUS.ASKED &&
+              (beforeRequest?.photo_status ?? PHOTO_STATUS.NOT_ASKED) ===
+                PHOTO_STATUS.NOT_ASKED;
             let attachedPhotoThisTurn = false;
             if (request) {
               const attached = await c.query<{
@@ -1762,10 +1769,22 @@ export class Engine {
             } else if (
               request &&
               !reason &&
+              !explicitClarification &&
+              photoAskedThisTurn &&
+              !declinedPhoto &&
+              !(reply?.includes(SOFT_PHOTO_ASK) || reply?.includes(PHOTO_FIRST))
+            ) {
+              // Commands already set «בוקשה» but a later command dropped the ask.
+              reply = openingPhotoReply(request, phone, beforeRequest);
+              intent = "ask_photo";
+            } else if (
+              request &&
+              !reason &&
               photoStatusSkipsGate(request.photo_status) &&
+              !photoAskedThisTurn &&
               (reply?.includes(PHOTO_FIRST) || reply?.includes(SOFT_PHOTO_ASK))
             ) {
-              // Never re-surface a photo ask after the gate closed.
+              // Never re-surface a photo ask after the gate closed on a prior turn.
               reply = nextQuestion(request, phone).text;
               if (intent === "ask_photo") intent = "ask_details";
             }

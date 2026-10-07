@@ -134,14 +134,14 @@ export async function makeHttp(
   });
   app.get("/health", async () => ({
     ok: true,
-    version: "0.5.17",
+    version: "0.5.18",
     mode: c.BOT_MODE,
   }));
   app.get("/ready", async () => {
     await runtime.check();
     return {
       ok: true,
-      version: "0.5.17",
+      version: "0.5.18",
       mode: c.BOT_MODE,
       schema: c.DB_SCHEMA,
       simulation_ready: simulation?.ready ?? false,
