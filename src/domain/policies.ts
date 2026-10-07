@@ -11,7 +11,7 @@ export const SERVICE_TOWNS =
 export const OUTSIDE =
   `אנחנו פועלים רק ב${SERVICE_TOWNS}. לא נוכל לסייע בהובלה הזו.`;
 export const PHOTO_THANKS = "תודה, התמונה התקבלה.";
-/** Legacy fixed line — prefer SOFT_PHOTO_ASK + summarizeRecorded for new replies. */
+/** Legacy fixed line — prefer SOFT_PHOTO_ASK + summarizeTurnChanges for new replies. */
 export const PHOTO_FIRST = "בשמחה. כדי להמשיך, נא לשלוח תמונה של הפריט.";
 /** Soft photo nudge: optional, never blocks the next missing detail. */
 export const SOFT_PHOTO_ASK =
@@ -68,27 +68,93 @@ export function displayPhone(phone: string): string {
     return `0${local.slice(0, 2)}-${local.slice(2)}`;
   return phone;
 }
-/** Short “what we already recorded” line for every customer reply. */
-export function summarizeRecorded(r: Request, phone: string): string | null {
-  const items = r.items
-    .map((i) => i.description?.trim())
-    .filter((x): x is string => Boolean(x));
-  const itemText = items.join(" ו");
-  const receiver = r.parties.find((p) => p.role === "receiver");
-  const donor = r.parties.find((p) => p.role === "donor");
-  const ownIsDonor = donor?.phone === phone;
-  if (ownIsDonor || r.origin === "direct" || r.origin === "donation") {
-    if (itemText && receiver?.name && receiver.phone)
-      return `רשמתי מסירה של ${itemText} ל${receiver.name} (${displayPhone(receiver.phone)})`;
-    if (itemText && receiver?.name) return `רשמתי מסירה של ${itemText} ל${receiver.name}`;
-    if (itemText && receiver?.phone)
-      return `רשמתי מסירה של ${itemText} למספר ${displayPhone(receiver.phone)}`;
+/**
+ * Ack only fields that were written this turn (from before→after).
+ * Values come from `after` (DB state after the write) — never invented.
+ * Returns null when nothing new was persisted.
+ */
+export function summarizeTurnChanges(
+  before: Request | null | undefined,
+  after: Request | null | undefined,
+): string | null {
+  if (!after) return null;
+  const beforeItems = before?.items ?? [];
+  const afterItems = after.items ?? [];
+  const itemsNew =
+    afterItems.length > 0 &&
+    (beforeItems.length === 0 ||
+      afterItems.some(
+        (item, i) =>
+          item.description && item.description !== beforeItems[i]?.description,
+      ));
+  const itemText = itemsNew
+    ? afterItems
+        .map((i) => i.description?.trim())
+        .filter((x): x is string => Boolean(x))
+        .join(" ו")
+    : "";
+
+  const beforeReceiver = before?.parties?.find((p) => p.role === "receiver");
+  const afterReceiver = after.parties.find((p) => p.role === "receiver");
+  const receiverNew = Boolean(afterReceiver && !beforeReceiver);
+  const receiverNameNew =
+    receiverNew ||
+    Boolean(
+      afterReceiver?.name && afterReceiver.name !== (beforeReceiver?.name ?? null),
+    );
+  const receiverPhoneNew =
+    receiverNew ||
+    Boolean(
+      afterReceiver?.phone &&
+        afterReceiver.phone !== (beforeReceiver?.phone ?? null),
+    );
+  const beforeOwn = before?.parties?.find((p) => p.phone === after.parties.find((x) => x.role === "donor")?.phone);
+  const afterDonor = after.parties.find((p) => p.role === "donor");
+  const beforeDonor = before?.parties?.find((p) => p.role === "donor");
+  const settlementNew = Boolean(
+    afterDonor?.settlement &&
+      afterDonor.settlement !== (beforeDonor?.settlement ?? null),
+  );
+  const addressNew = Boolean(
+    afterDonor?.address && afterDonor.address !== (beforeDonor?.address ?? null),
+  );
+  const nameNew = Boolean(
+    afterDonor?.name && afterDonor.name !== (beforeDonor?.name ?? null),
+  );
+
+  // Nothing newly written this turn.
+  if (
+    !itemText &&
+    !receiverNameNew &&
+    !receiverPhoneNew &&
+    !settlementNew &&
+    !addressNew &&
+    !nameNew
+  )
+    return null;
+
+  // Fresh handoff write: item and/or receiver captured together.
+  if (itemText || receiverNameNew || receiverPhoneNew) {
+    const name = receiverNameNew ? afterReceiver?.name : null;
+    const phone = receiverPhoneNew ? afterReceiver?.phone : null;
+    if (itemText && name && phone)
+      return `רשמתי מסירה של ${itemText} ל${name} (${displayPhone(phone)})`;
+    if (itemText && name) return `רשמתי מסירה של ${itemText} ל${name}`;
+    if (itemText && phone)
+      return `רשמתי מסירה של ${itemText} למספר ${displayPhone(phone)}`;
     if (itemText) return `רשמתי מסירה של ${itemText}`;
-    if (receiver?.name && receiver.phone)
-      return `רשמתי מסירה ל${receiver.name} (${displayPhone(receiver.phone)})`;
-    if (receiver?.name) return `רשמתי מסירה ל${receiver.name}`;
+    if (name && phone)
+      return `רשמתי מסירה ל${name} (${displayPhone(phone)})`;
+    if (name) return `רשמתי מסירה ל${name}`;
   }
-  if (itemText) return `רשמתי פנייה לגבי ${itemText}`;
+
+  // Later turns: only the field that just changed.
+  if (settlementNew && afterDonor?.settlement)
+    return `סבבה, רשמתי ${afterDonor.settlement}`;
+  if (addressNew && afterDonor?.address)
+    return `סבבה, רשמתי את הכתובת`;
+  if (nameNew && afterDonor?.name) return `סבבה, רשמתי את השם ${afterDonor.name}`;
+  void beforeOwn;
   return null;
 }
 export function photoAskAlreadySent(
@@ -101,19 +167,32 @@ export function photoAskAlreadySent(
       /(?:שלח|לשלוח|אפשר לשלוח|נא לשלוח|אם יש)/u.test(entry.content),
   );
 }
-/** Summary + next ask (photo soft-nudge or the next missing field). */
+/** Next ask, optionally prefixed with this-turn DB ack only. */
+export function composeTurnReply(
+  ask: string,
+  before: Request | null | undefined,
+  after: Request | null | undefined,
+): string {
+  const ack = summarizeTurnChanges(before, after);
+  const next = ask.trim();
+  if (ack && next && !next.includes(ack)) return `${ack}\n${next}`;
+  return next || ack || "";
+}
+/** @deprecated use composeTurnReply — kept as alias for call sites mid-migration */
 export function composeRecordedReply(
   r: Request,
-  phone: string,
+  _phone: string,
   ask: string,
+  before: Request | null | undefined = null,
 ): string {
-  const summary = summarizeRecorded(r, phone);
-  const next = ask.trim();
-  if (summary && next && !next.includes(summary)) return `${summary}\n${next}`;
-  return next || summary || SOFT_PHOTO_ASK;
+  return composeTurnReply(ask, before, r);
 }
-export function openingPhotoReply(r: Request, phone: string): string {
-  return composeRecordedReply(r, phone, SOFT_PHOTO_ASK);
+export function openingPhotoReply(
+  r: Request,
+  _phone?: string,
+  before: Request | null | undefined = null,
+): string {
+  return composeTurnReply(SOFT_PHOTO_ASK, before, r);
 }
 export const CONDITION_QUESTION = "האם הפריט תקין ושמיש ב־100%?";
 export const DEFAULT_TRANSPORT_CAPACITY = 10;

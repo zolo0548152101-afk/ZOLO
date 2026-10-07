@@ -25,7 +25,7 @@ import {
   nextQuestion,
   photoGate,
   openingPhotoReply,
-  composeRecordedReply,
+  composeTurnReply,
   photoAskAlreadySent,
   photoDeclined,
   readyToAskContactCounterparty,
@@ -346,13 +346,10 @@ export class Commands {
         ctx.conversation.pending_counterparty_name = pending.counterparty_name;
       }
       await this.clearPendingExtra(c, ctx);
-      // Soft photo nudge once; otherwise summarize and ask the next missing field.
+      // Soft photo nudge once; ack only fields written in this create.
       if (photoGate(r) && !photoAskAlreadySent(ctx.history))
-        return output(openingPhotoReply(r, phone), r);
-      return output(
-        composeRecordedReply(r, phone, nextQuestion(r, phone).text),
-        r,
-      );
+        return output(openingPhotoReply(r, phone, null), r);
+      return output(composeTurnReply(nextQuestion(r, phone).text, null, r), r);
     }
     if (cmd.type === "status") return output(statusText(ctx.requests));
     if (cmd.type === "seek") {
@@ -727,17 +724,14 @@ export class Commands {
             phone: p.phone,
             text: `נפתחה פנייה ${r.number} לגבי ${r.items.map((i) => i.description).join(", ")}. נא לאשר את חלקך ב${p.role === "donor" ? "מסירה" : "קבלה"}. ההובלות בימי שלישי 16:00–20:00, ובדרך כלל עד ${DEFAULT_TRANSPORT_CAPACITY} הובלות בכל יום שלישי. מעבר לכך נבקש תחילה אישור מנהל. נעדכן.`,
           });
-      // Soft optional photo ask once; never a hard PHOTO_FIRST lock.
+      // Soft optional photo ask once; ack only this turn’s writes.
       if (
         photoGate(r) &&
         !photoAskAlreadySent(ctx.history) &&
         !photoDeclined(ctx.message.transcript ?? ctx.message.text)
       )
-        return output(openingPhotoReply(r, phone), r);
-      return output(
-        composeRecordedReply(r, phone, nextQuestion(r, phone).text),
-        r,
-      );
+        return output(openingPhotoReply(r, phone, null), r);
+      return output(composeTurnReply(nextQuestion(r, phone).text, null, r), r);
     }
     if (cmd.type === "interest") {
       const candidate = ctx.candidates.find(

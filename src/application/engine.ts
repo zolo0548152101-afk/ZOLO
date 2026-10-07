@@ -44,9 +44,9 @@ import {
   photoDeclined,
   photoAskAlreadySent,
   customerIntentClear,
-  composeRecordedReply,
+  composeTurnReply,
   openingPhotoReply,
-  summarizeRecorded,
+  summarizeTurnChanges,
 } from "../domain/policies.js";
 import {
   CLARIFY_REPLY,
@@ -995,8 +995,9 @@ export class Engine {
         ctx,
         request
           ? continuePast
-            ? composeRecordedReply(request, phone, nextQuestion(request, phone).text)
-            : openingPhotoReply(request, phone)
+            ? // No new write this turn — ask next field only, no full-chat summary.
+              nextQuestion(request, phone).text
+            : openingPhotoReply(request, phone, null)
           : SOFT_PHOTO_ASK,
       );
       await this.s.outbound(
@@ -1035,7 +1036,7 @@ export class Engine {
       const reply = this.voiced(
         ctx,
         request
-          ? composeRecordedReply(request, phone, nextQuestion(request, phone).text)
+          ? nextQuestion(request, phone).text
           : "מה הפרט הבא שתרצה להשלים?",
       );
       await this.s.outbound(
@@ -1686,25 +1687,24 @@ export class Engine {
             ) {
               void handoffTransitionPlanned;
               if (!declinedPhoto && !photoAsked) {
-                // Keep any useful command reply; otherwise soft-ask with summary.
-                const soft = openingPhotoReply(request, phone);
+                // Soft photo once, ack only fields written this turn (before→after).
+                const soft = openingPhotoReply(request, phone, beforeRequest);
                 if (
                   !reply ||
                   reply === PHOTO_FIRST ||
                   reply === SOFT_PHOTO_ASK ||
-                  reply.includes(PHOTO_FIRST)
+                  reply.includes(PHOTO_FIRST) ||
+                  /^רשמתי מסירה/.test(reply)
                 )
                   reply = soft;
-                else if (!/תמונה/.test(reply))
-                  reply = `${reply}\n${SOFT_PHOTO_ASK}`;
+                else if (!/תמונה/.test(reply)) {
+                  const ack = summarizeTurnChanges(beforeRequest, request);
+                  reply = ack ? `${ack}\n${reply}\n${SOFT_PHOTO_ASK}` : `${reply}\n${SOFT_PHOTO_ASK}`;
+                }
                 intent = "ask_photo";
               } else {
-                // Already asked or declined — advance to the next missing field.
-                reply = composeRecordedReply(
-                  request,
-                  phone,
-                  nextQuestion(request, phone).text,
-                );
+                // Already asked or declined — next missing field, no repeated summary.
+                reply = nextQuestion(request, phone).text;
                 intent = "ask_details";
               }
             }
@@ -1854,6 +1854,28 @@ export class Engine {
         beforeSearch,
         afterSearch: afterCtx.active_search ?? null,
       });
+      // Rebuild ack from DB writes this turn only — never invent, never repeat
+      // the full conversation summary when nothing new was persisted.
+      if (
+        request &&
+        !reason &&
+        (intent === "ask_photo" ||
+          intent === "ask_details" ||
+          intent === "acknowledge" ||
+          /^רשמתי מסירה/.test(reply ?? ""))
+      ) {
+        const declinedPhoto = photoDeclined(text);
+        const photoAsked = photoAskAlreadySent(ctx.history);
+        const ask =
+          intent === "ask_photo" &&
+          photoGate(request) &&
+          !declinedPhoto &&
+          !photoAsked
+            ? SOFT_PHOTO_ASK
+            : nextQuestion(request, phone).text;
+        const rebuilt = composeTurnReply(ask, beforeRequest, request);
+        if (rebuilt.trim()) reply = rebuilt;
+      }
       // protectedReply still marks operational replies that must not be
       // replaced by free model text; claim-guard handles phrasing instead.
       void protectedReply;
@@ -2033,22 +2055,14 @@ export class Engine {
           ? fromTemplate
           : localizeCustomer(text, lang);
       text = stripRepeatedSelfIntro(text, ctx.history, suppressIntro);
-      // If the model dropped a required soft photo ask, restore it once.
+      // If the model dropped a required soft photo ask, restore canonical (DB-backed).
       if (
         committed.operation?.action_results?.intent === "ask_photo" &&
         /תמונה/.test(canonical) &&
         !/תמונה/.test(text)
       )
         text = stripRepeatedSelfIntro(canonical, ctx.history, suppressIntro);
-      // Ensure a recorded summary stays visible when the canonical had one.
-      const summary = committed.requestId
-        ? (() => {
-            const match = ctx.requests.find((r) => r.id === committed.requestId);
-            return match ? summarizeRecorded(match, ctx.conversation.phone) : null;
-          })()
-        : null;
-      if (summary && text && !text.includes(summary.split("(")[0]!.trim()))
-        text = `${summary}\n${text}`;
+      // Do not re-attach a full-chat “רשמתי מסירה…” — ack is only for this turn’s writes.
       auditedReply = text;
       await this.s.transaction(async (c) => {
         const stillNewer = await c.query<{ id: string }>(
