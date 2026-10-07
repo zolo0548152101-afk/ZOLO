@@ -902,7 +902,7 @@ test("השם שלי extracts only the personal name", () => {
       processed_at: null,
       ai_plan: null,
     },
-    history: [{ role: "assistant", content: "תודה. חסר רק השם." }],
+    history: [{ role: "assistant", content: "תודה. חסר השם." }],
   } as Context;
   const command = rulePlan(context)?.commands[0];
   assert.equal(command?.type, "details");
@@ -1089,7 +1089,7 @@ test("Beit Shean does not remind someone to provide a floor already stored", () 
   p.address = "רחוב העלייה 7";
   p.floor = 2;
   const q = nextQuestion(r, p.phone);
-  assert.equal(q.text, "תודה. חסר רק השם.");
+  assert.equal(q.text, "תודה. חסר השם.");
   assert.equal(q.floorNote, false);
 });
 test("when a Beit Shean donor supplied a name, ask only for the missing address", () => {
@@ -1428,7 +1428,7 @@ test("contact-counterparty ask waits until own details and item rules are ready"
   assert.match(nextQuestion(r, donor.phone).text, /יישוב/);
   assert.doesNotMatch(nextQuestion(r, donor.phone).text, /נפנה למקבל/);
   donor.settlement = "בית שאן";
-  assert.match(nextQuestion(r, donor.phone).text, /שם וכתובת|חסר רק השם/);
+  assert.match(nextQuestion(r, donor.phone).text, /שם וכתובת|חסר השם/);
   assert.doesNotMatch(nextQuestion(r, donor.phone).text, /נפנה למקבל/);
   donor.name = "ישראל";
   donor.address = "רחוב אילת 4";

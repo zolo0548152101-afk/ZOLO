@@ -559,9 +559,14 @@ export class Commands {
             existing.human_reason = null;
           }
         }
+        const beforeMerge: Request = {
+          ...existing,
+          parties: existing.parties.map((p) => ({ ...p })),
+          items: existing.items.map((i) => ({ ...i })),
+        };
         mutable(existing);
-        const beforeOrigin = existing.origin;
-        const beforeReceiver = existing.parties.find((entry) => entry.role === "receiver");
+        const beforeOrigin = beforeMerge.origin;
+        const beforeReceiver = beforeMerge.parties.find((entry) => entry.role === "receiver");
         const beforePendingName = ctx.conversation.pending_counterparty_name;
         existing.items = items.map((item, index) => ({
           ...(existing.items[index] ?? asItem(item)),
@@ -646,7 +651,7 @@ export class Commands {
             `הפרטים האלה כבר רשומים אצלנו. ${q.text}`.trim(),
             existing,
           );
-        return output(q.text, existing);
+        return output(composeTurnReply(q.text, beforeMerge, existing), existing);
       }
       const r = await this.s.create(
         c,
@@ -1230,6 +1235,11 @@ export class Commands {
         r.human_reason = null;
       }
     }
+    const beforeForAck: Request = {
+      ...r,
+      parties: r.parties.map((p) => ({ ...p })),
+      items: r.items.map((i) => ({ ...i })),
+    };
     mutable(r);
     let distanceReviewThisTurn = false;
     if (cmd.type === "details") {
@@ -1483,7 +1493,10 @@ export class Commands {
     let q = nextQuestion(r, phone);
     if (q.floorNote) ownParty(r, phone).floor_note_shown = true;
     if (distanceReviewThisTurn)
-      return output(`${DISTANCE_REVIEW_REPLY}\n${q.text}`, r);
-    return output(q.text, r);
+      return output(
+        composeTurnReply(`${DISTANCE_REVIEW_REPLY}\n${q.text}`, beforeForAck, r),
+        r,
+      );
+    return output(composeTurnReply(q.text, beforeForAck, r), r);
   }
 }

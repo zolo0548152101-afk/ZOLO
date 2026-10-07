@@ -189,7 +189,8 @@ export function summarizeTurnChanges(
     return afterDonor.floor === 0
       ? "מעולה, רשמתי קומת קרקע"
       : `מעולה, רשמתי קומה ${afterDonor.floor}`;
-  if (nameNew && afterDonor?.name) return `מעולה, רשמתי את השם ${afterDonor.name}`;
+  if (nameNew && afterDonor?.name)
+    return `נעים מאוד ${afterDonor.name}, רשמתי`;
   void beforeOwn;
   return null;
 }
@@ -876,12 +877,12 @@ export function nextQuestion(
         p.settlement === "בית שאן"
           ? !p.name
             ? p.address
-              ? "תודה. חסר רק השם."
+              ? "תודה. חסר השם."
               : "נא לציין שם וכתובת."
-            : "תודה. חסרה רק הכתובת המדויקת."
+            : "תודה. חסרה הכתובת המדויקת."
           : !p.name
             ? "נא לציין שם ותיאור כללי של המקום ביישוב, למשל ״בכניסה״ או ״ליד המזכירות״."
-            : "תודה. חסר רק תיאור כללי של המקום ביישוב, למשל ״בכניסה״ או ״ליד המזכירות״.",
+            : "תודה. חסר תיאור כללי של המקום ביישוב, למשל ״בכניסה״ או ״ליד המזכירות״.",
       floorNote: false,
       missing: missingOf(r, !p.name ? "name" : "address", p.role),
     };

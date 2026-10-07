@@ -2168,6 +2168,16 @@ export class Engine {
         !/תמונה/.test(text)
       )
         text = stripRepeatedSelfIntro(canonical, ctx.history, suppressIntro);
+      // Keep this-turn save ack (name/address/…) when the model jumped to the next ask.
+      const turnAck = canonical.match(
+        /^(?:נעים מאוד[^\n]+|מעולה, רשמתי[^\n]+)/u,
+      )?.[0];
+      if (
+        turnAck &&
+        (committed.changedFields?.length ?? 0) > 0 &&
+        !text.includes(turnAck.slice(0, Math.min(12, turnAck.length)))
+      )
+        text = `${turnAck}\n${text}`.trim();
       // Do not re-attach a full-chat “רשמתי מסירה…” — ack is only for this turn’s writes.
       auditedReply = text;
       await this.s.transaction(async (c) => {
