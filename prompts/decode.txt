@@ -13,7 +13,8 @@ understood=false רק כשאי אפשר להבין את הכוונה. אז comma
   מסירה ישירה בשם בלבד («להעביר לטל מיטה») = donate עם direct=true, counterparty_name, counterparty_phone=null.
   מסירה ישירה עם מספר = donate עם direct=true ו־counterparty_phone.
   העברה לעצמי/אליי = donate עם counterparty_phone של השולח ו־direct=true.
-  אל תפתח donate כפול לאותו פריט פתוח — עדכן או next. שולחן+כיסאות = פריט אחד.
+  אל תפתח donate כפול לאותו פריט פתוח — הוספת מקבל = counterparty על request_number הקיים. שולחן+כיסאות = פריט אחד.
+  מקום עמום (מאילת/אילת/טירת צבי בלי רחוב או בית שאן) = next לבירור, לא details עם settlement מחוץ לתחום.
 - seek: חיפוש לקבל פריט («אני מחפש/מבקש/צריך לקבל»). kind בלבד. לא donate ולא תמונה.
 - details: request_number, role donor|receiver, name, settlement, address, floor.
   איסוף = donor. מסירה = receiver. «השם שלי» = name של השולח.

@@ -48,6 +48,7 @@ import {
   photoStatusSkipsGate,
   customerIntentClear,
   openingPhotoReply,
+  summarizeTurnChanges,
 } from "../domain/policies.js";
 import {
   CLARIFY_REPLY,
@@ -1785,14 +1786,27 @@ export class Engine {
             ) {
               void handoffTransitionPlanned;
               if (!declinedPhoto && !photoAsked) {
-                // Soft gate: mark ASKED once, but do not overwrite an existing
-                // AI/command reply with PHOTO_FIRST / soft-ask templates.
+                // Soft photo ask once for open donations. Never mark «בוקשה»
+                // unless the outbound reply actually asks for a photo.
+                const mentionsPhoto = /תמונה/.test(reply ?? "");
                 if (!reply?.trim()) {
                   reply = openingPhotoReply(request, phone, beforeRequest);
                   intent = "ask_photo";
+                } else if (
+                  !mentionsPhoto &&
+                  request.origin === "donation" &&
+                  !request.parties.some((p) => p.role === "receiver")
+                ) {
+                  const ack = summarizeTurnChanges(beforeRequest, request);
+                  reply = ack
+                    ? `${ack}\n${reply}\n${SOFT_PHOTO_ASK}`
+                    : `${reply}\n${SOFT_PHOTO_ASK}`;
+                  intent = "ask_photo";
                 }
-                request.photo_status = PHOTO_STATUS.ASKED;
-                await this.s.save(c, request);
+                if (intent === "ask_photo" || /תמונה/.test(reply ?? "")) {
+                  request.photo_status = PHOTO_STATUS.ASKED;
+                  await this.s.save(c, request);
+                }
               } else if (declinedPhoto) {
                 request.photo_status = PHOTO_STATUS.NO_PHOTO;
                 await this.s.save(c, request);

@@ -19,6 +19,7 @@ import {
   canonicalPhone,
   donationIntent,
   ambiguousStreetCity,
+  streetPhrase,
   itemError,
   ownParty,
   mutable,
@@ -378,35 +379,57 @@ export class Commands {
         receiver.name = cmd.counterparty_name;
         parties.push(receiver);
       }
-      // Keep an explicit condition from the opening message for open
-      // donations too.  Soft photo ask is prompt/reply-manager owned.
-      // Only recover a recent outside-area rejection — general duplicate
-      // merge of open requests by item kind is prompt-only.
-      const rejectedOutside = await c.query<{ id: string }>(
-        `SELECT r.id FROM requests r
-         JOIN request_parties p ON p.request_id=r.id
-         JOIN contacts co ON co.id=p.contact_id
-         JOIN request_items i ON i.request_id=r.id
-         WHERE co.phone=$1 AND p.role='donor'
-           AND r.status='rejected'
-           AND EXISTS (
-             SELECT 1 FROM request_events e
-             WHERE e.request_id=r.id AND e.event_type='outside_area_rejected'
-           )
-           AND (
-             (i.kind = ANY($2::text[]) AND i.kind <> 'other')
-             OR (i.kind = 'other' AND i.description = ANY($3::text[]))
-           )
-         ORDER BY r.number DESC LIMIT 1`,
-        [
-          phone,
-          items.map((item) => item.kind),
-          items.filter((item) => item.kind === "other").map((item) => item.description),
-        ],
-      );
-      const sameOpenRequest = rejectedOutside.rows[0]
-        ? await this.s.request(rejectedOutside.rows[0].id, c)
-        : undefined;
+      // Soft photo ask is prompt/reply-manager owned.
+      // Infra: a continuing donate for the same open item (handoff/details)
+      // must UPDATE that request — never open a twin row. Also recover a
+      // recent outside-area rejection for the same item.
+      const sameItemShape = (existing: Request) =>
+        existing.parties.some((p) => p.role === "donor" && p.phone === phone) &&
+        existing.items.length === items.length &&
+        existing.items.every((item, index) => {
+          const next = items[index];
+          if (!next || item.kind !== next.kind) return false;
+          if (item.kind !== "other") return true;
+          const a = item.description.replace(/\s+/g, "");
+          const b = next.description.replace(/\s+/g, "");
+          return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+        });
+      let sameOpenRequest =
+        ctx.requests.find(
+          (existing) =>
+            !["coordinated", "closed", "cancelled", "rejected", "cancel_pending"].includes(
+              existing.status,
+            ) && sameItemShape(existing),
+        ) ??
+        ctx.requests.find(
+          (existing) => existing.status === "rejected" && sameItemShape(existing),
+        );
+      if (!sameOpenRequest) {
+        const rejectedOutside = await c.query<{ id: string }>(
+          `SELECT r.id FROM requests r
+           JOIN request_parties p ON p.request_id=r.id
+           JOIN contacts co ON co.id=p.contact_id
+           JOIN request_items i ON i.request_id=r.id
+           WHERE co.phone=$1 AND p.role='donor'
+             AND r.status='rejected'
+             AND EXISTS (
+               SELECT 1 FROM request_events e
+               WHERE e.request_id=r.id AND e.event_type='outside_area_rejected'
+             )
+             AND (
+               (i.kind = ANY($2::text[]) AND i.kind <> 'other')
+               OR (i.kind = 'other' AND i.description = ANY($3::text[]))
+             )
+           ORDER BY r.number DESC LIMIT 1`,
+          [
+            phone,
+            items.map((item) => item.kind),
+            items.filter((item) => item.kind === "other").map((item) => item.description),
+          ],
+        );
+        if (rejectedOutside.rows[0])
+          sameOpenRequest = await this.s.request(rejectedOutside.rows[0].id, c);
+      }
       if (sameOpenRequest) {
         // Reopen outside-area rejection and persist fields the action manager sent.
         const existing = await this.s.request(sameOpenRequest.id, c, true);
@@ -1120,6 +1143,14 @@ export class Commands {
       if (cmd.settlement && !settlementIsTheStreet) {
         const reg = await this.s.region(c, cmd.settlement);
         if (reg.decision === "outside") {
+          // Ambiguous street/city (e.g. אילת): ask before applying the
+          // radius boundary — do not reject or persist the outside town yet.
+          if (ambiguousStreetCity(text) && !streetPhrase(text)) {
+            return output(
+              "האם הכוונה לרחוב אילת בבית שאן, או ליישוב אילת שמחוץ לאזור הפעילות?",
+              r,
+            );
+          }
           r.status = "rejected";
           return output(OUTSIDE, r);
         }
