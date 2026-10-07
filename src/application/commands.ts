@@ -90,7 +90,7 @@ function replaceOrAddQuestion(existingDesc: string, nextDesc: string): string {
 }
 
 function sameOrOtherQuestion(nextDesc: string): string {
-  return `האם ${nextDesc} מיועדת לאותו מקבל, או לאדם אחר? כתוב "אותו מקבל" או "מקבל אחר".`;
+  return `האם ${nextDesc} מיועד/ת לאותו מקבל, או לאדם אחר? כתוב "אותו מקבל" או "מקבל אחר".`;
 }
 const party = (
   role: Party["role"],
