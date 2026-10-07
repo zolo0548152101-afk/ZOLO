@@ -415,10 +415,22 @@ def run_add_other():
             and "fridge" in (s["items"] or "")
             and "תמונה" in r
             and "תקין" not in r
-            and "שמיש" not in r,
-            "other recipient: two requests; new donation must ask photo first, not condition",
+            and "שמיש" not in r
+            and "סוכן האוטומטי" not in r
+            and "בהרצה ניסיונית" not in r,
+            "other recipient: two requests; photo first; no re-intro on second request",
         ),
     )
+    intro_hits = sum(
+        1
+        for row in flow["transcript"]
+        if row["who"] == "bot"
+        and ("סוכן האוטומטי" in row["text"] or "בהרצה ניסיונית" in row["text"])
+    )
+    if intro_hits != 1:
+        print_transcript(flow["transcript"])
+        print_db(db_snapshot())
+        raise SystemExit(f"STOP: self-intro appeared {intro_hits} times, expected 1")
     finish_flow(flow)
 
 

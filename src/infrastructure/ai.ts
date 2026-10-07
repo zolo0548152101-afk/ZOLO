@@ -530,6 +530,11 @@ export class OpenAIPlanner implements Planner {
           operation_result: input.operation,
           fallback_reply: input.fallback,
           canonical: input.fallback,
+          already_introduced: ctx.history.some(
+            (entry) =>
+              entry.role === "assistant" &&
+              /סוכן האוטומטי|בהרצה ניסיונית/.test(entry.content),
+          ),
         }),
       }],
       reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },

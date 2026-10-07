@@ -117,6 +117,44 @@ function inventsPhotoGate(canonical: string, phrased: string): boolean {
   return PHOTO_ASK.phrased.test(phrased) && !PHOTO_ASK.canonical.test(canonical);
 }
 
+const SELF_INTRO =
+  /סוכן האוטומטי|בהרצה ניסיונית/;
+
+/** True when a prior assistant turn already introduced the bot. */
+export function conversationAlreadyIntroduced(
+  history: { role: string; content: string }[],
+): boolean {
+  return history.some(
+    (entry) => entry.role === "assistant" && SELF_INTRO.test(entry.content),
+  );
+}
+
+/**
+ * Drop a repeated self-intro when the conversation already had one.
+ * Keeps the substantive ask (photo / details / etc.).
+ */
+export function stripRepeatedSelfIntro(
+  text: string,
+  history: { role: string; content: string }[],
+): string {
+  const raw = text.trim();
+  if (!raw || !SELF_INTRO.test(raw) || !conversationAlreadyIntroduced(history))
+    return raw;
+  const paragraphs = raw.split(/\n\s*\n/);
+  if (paragraphs.length > 1 && SELF_INTRO.test(paragraphs[0] ?? "")) {
+    const rest = paragraphs.slice(1).join("\n\n").trim();
+    if (rest) return rest;
+  }
+  const stripped = raw
+    .replace(
+      /^(?:שלום[!.,]?\s*|היי[,!]?\s*)?(?:אני\s+)?הסוכן האוטומטי[\s\S]*?בהרצה ניסיונית[^.!?\n]*[.!?…]?\s*(?:[🙂😊]\s*)?/u,
+      "",
+    )
+    .replace(/^[\s\S]*?בהרצה ניסיונית[^\n]*\n+/u, "")
+    .trim();
+  return stripped || raw;
+}
+
 /**
  * Prefer the phrased reply only when it does not invent a save/send/approval
  * and does not drop a required line from the rule reply.

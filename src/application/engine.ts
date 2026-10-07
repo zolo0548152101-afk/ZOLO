@@ -45,6 +45,7 @@ import {
   CLARIFY_REPLY,
   FAULT_REPLY,
   probeReply,
+  stripRepeatedSelfIntro,
 } from "../domain/ai-guards.js";
 import { diffChangedFields, type ChangedField } from "../domain/field-map.js";
 import {
@@ -1653,12 +1654,15 @@ export class Engine {
           stage: "customer_phrase",
         });
       }
+      // Opening a second request in the same chat must not re-introduce the bot.
+      text = stripRepeatedSelfIntro(text, ctx.history);
       const lang = conversationLanguage(ctx);
       const fromTemplate = localizeCustomer(committed.canonicalReply, lang);
       // A fixed template in the customer's language wins over a Hebrew paraphrase.
       text = fromTemplate !== committed.canonicalReply
         ? fromTemplate
         : localizeCustomer(text, lang);
+      text = stripRepeatedSelfIntro(text, ctx.history);
       await this.s.transaction(async (c) => {
         const stillNewer = await c.query<{ id: string }>(
           `SELECT m.id FROM messages m

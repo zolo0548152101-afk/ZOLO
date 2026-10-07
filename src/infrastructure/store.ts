@@ -278,16 +278,20 @@ export class Store {
       }
     }
     // History for the open business conversation only. A finished/coordinated
-    // handoff is out of scope. Prefer the selected open request, else the
-    // earliest still-open request for this phone.
+    // handoff is out of scope. Always start from the earliest still-open
+    // request for this phone — not the newly selected one — so opening a
+    // second concurrent request does not wipe prior turns (and the one-time
+    // self-intro) from the reply manager's history.
     const open = requests.filter(
       (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
     );
-    const selectedOpen =
-      open.find((r) => r.id === conv.rows[0]!.selected_request_id) ??
+    const earliestOpen =
       [...open].sort((a, b) => a.created_at.localeCompare(b.created_at))[0] ??
       null;
-    const historySince = selectedOpen?.created_at ?? resetAt;
+    const selectedOpen =
+      open.find((r) => r.id === conv.rows[0]!.selected_request_id) ??
+      earliestOpen;
+    const historySince = earliestOpen?.created_at ?? resetAt;
     const h = await c.query<{
       text: string;
       transcript: string | null;
