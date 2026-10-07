@@ -75,10 +75,13 @@ function target(ctx: Context, number: number | null): Request {
   const open = ctx.requests.filter(
     (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
   );
+  const selected =
+    ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+    undefined;
   const r = explicit ?? (byItem.length === 1 ? byItem[0] : undefined) ??
     (open.length === 1 ? open[0] : undefined) ??
-    (ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-      (ctx.requests.length === 1 ? ctx.requests[0] : undefined));
+    selected ??
+    (ctx.requests.length === 1 ? ctx.requests[0] : undefined);
   if (!r)
     throw new AppError(
       "choose_request",
@@ -197,21 +200,28 @@ export class Commands {
       // Keep an explicit condition from the opening message for open
       // donations too.  The photo gate may still request a picture, but it
       // must not discard a fact the donor already supplied and ask it again.
+      const sameItemShape = (existing: Request) =>
+        existing.parties.some((p) => p.role === "donor" && p.phone === phone) &&
+        existing.items.length === items.length &&
+        existing.items.every((item, index) => {
+          const next = items[index];
+          if (!next || item.kind !== next.kind) return false;
+          if (item.kind !== "other") return true;
+          const a = item.description.replace(/\s+/g, "");
+          const b = next.description.replace(/\s+/g, "");
+          return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+        });
       let sameOpenRequest = ctx.requests.find(
         (existing) =>
           existing.status !== "coordinated" &&
           !["closed", "cancelled", "rejected", "cancel_pending"].includes(existing.status) &&
-          existing.parties.some((p) => p.role === "donor" && p.phone === phone) &&
-          existing.items.length === items.length &&
-          existing.items.every((item, index) => {
-            const next = items[index];
-            if (!next || item.kind !== next.kind) return false;
-            if (item.kind !== "other") return true;
-            const a = item.description.replace(/\s+/g, "");
-            const b = next.description.replace(/\s+/g, "");
-            return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
-          }),
+          sameItemShape(existing),
       );
+      // Prefer continuing a recent outside-area rejection over opening a twin.
+      if (!sameOpenRequest)
+        sameOpenRequest = ctx.requests.find(
+          (existing) => existing.status === "rejected" && sameItemShape(existing),
+        );
       if (!sameOpenRequest) {
         const duplicate = await c.query<{ id: string }>(
           `SELECT r.id FROM requests r
@@ -233,11 +243,49 @@ export class Commands {
         );
         if (duplicate.rows[0]) sameOpenRequest = await this.s.request(duplicate.rows[0].id, c);
       }
+      if (!sameOpenRequest) {
+        const rejectedOutside = await c.query<{ id: string }>(
+          `SELECT r.id FROM requests r
+           JOIN request_parties p ON p.request_id=r.id
+           JOIN contacts co ON co.id=p.contact_id
+           JOIN request_items i ON i.request_id=r.id
+           WHERE co.phone=$1 AND p.role='donor'
+             AND r.status='rejected'
+             AND EXISTS (
+               SELECT 1 FROM request_events e
+               WHERE e.request_id=r.id AND e.event_type='outside_area_rejected'
+             )
+             AND (
+               (i.kind = ANY($2::text[]) AND i.kind <> 'other')
+               OR (i.kind = 'other' AND i.description = ANY($3::text[]))
+             )
+           ORDER BY r.number DESC LIMIT 1`,
+          [
+            phone,
+            items.map((item) => item.kind),
+            items.filter((item) => item.kind === "other").map((item) => item.description),
+          ],
+        );
+        if (rejectedOutside.rows[0])
+          sameOpenRequest = await this.s.request(rejectedOutside.rows[0].id, c);
+      }
       if (sameOpenRequest) {
         // Persist every field the action manager sent. Refreshing the same
         // open item must never drop direct/name/phone — that freezes the chat
         // on photo while the AI already named a recipient.
         const existing = await this.s.request(sameOpenRequest.id, c, true);
+        if (existing.status === "rejected") {
+          const outside = await c.query(
+            `SELECT 1 FROM request_events
+              WHERE request_id=$1 AND event_type='outside_area_rejected'
+              LIMIT 1`,
+            [existing.id],
+          );
+          if (outside.rowCount) {
+            existing.status = "collecting";
+            existing.human_reason = null;
+          }
+        }
         mutable(existing);
         const beforeOrigin = existing.origin;
         const beforeReceiver = existing.parties.find((entry) => entry.role === "receiver");
@@ -698,7 +746,6 @@ export class Commands {
       cmd.type === "details" &&
       r.status === "rejected" &&
       cmd.settlement &&
-      /(?:טעיתי|תיקון|בעצם|התכוונתי)/.test(text) &&
       r.parties.some((candidate) => candidate.phone === phone)
     ) {
       const outsideRejection = await c.query(
@@ -708,6 +755,7 @@ export class Commands {
         [r.id],
       );
       const correctedRegion = await this.s.region(c, cmd.settlement);
+      // Reopen on a corrected allowed town without requiring "טעיתי" wording.
       if (outsideRejection.rowCount && correctedRegion.decision === "allowed") {
         r.status = "collecting";
         r.human_reason = null;

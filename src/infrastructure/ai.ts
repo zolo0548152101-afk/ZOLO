@@ -199,10 +199,22 @@ function snapshotForDecode(ctx: Context) {
     (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
   );
   const selected =
-    open.find((r) => r.id === ctx.conversation.selected_request_id) ?? open[0] ?? null;
-  const missing = selected
-    ? nextQuestion(selected, ctx.conversation.phone).missing
-    : null;
+    open.find((r) => r.id === ctx.conversation.selected_request_id) ??
+    ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+    open[0] ??
+    ctx.requests[0] ??
+    null;
+  const missing =
+    selected && selected.status !== "rejected"
+      ? nextQuestion(selected, ctx.conversation.phone).missing
+      : selected?.status === "rejected"
+        ? {
+            field: "settlement",
+            role: selected.parties.find((p) => p.phone === ctx.conversation.phone)
+              ?.role ?? null,
+            request_number: selected.number,
+          }
+        : null;
   return {
     conversation: ctx.conversation,
     selected_request: selected
@@ -224,6 +236,14 @@ function snapshotForDecode(ctx: Context) {
       status: r.status,
       origin: r.origin,
     })),
+    recoverable_requests: ctx.requests
+      .filter((r) => r.status === "rejected")
+      .map((r) => ({
+        number: r.number,
+        status: r.status,
+        origin: r.origin,
+        reason: "outside_area_or_rules",
+      })),
     missing_required: missing,
     active_search: ctx.active_search ?? null,
     history: ctx.history,

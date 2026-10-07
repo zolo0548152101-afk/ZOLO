@@ -253,6 +253,30 @@ export class Store {
     const requests = (await this.active(message.phone, c)).filter(
       (r) => !resetAt || r.created_at > resetAt,
     );
+    // Keep a selected outside-area rejection visible so the AI updates the
+    // same request when the customer corrects the settlement, instead of
+    // opening a brand-new donation.
+    const selectedId = conv.rows[0]!.selected_request_id;
+    if (selectedId && !requests.some((r) => r.id === selectedId)) {
+      try {
+        const selected = await this.request(selectedId, c);
+        if (
+          selected.status === "rejected" &&
+          (!resetAt || selected.created_at > resetAt) &&
+          selected.parties.some((p) => p.phone === message.phone)
+        ) {
+          const outside = await c.query(
+            `SELECT 1 FROM request_events
+              WHERE request_id=$1 AND event_type='outside_area_rejected'
+              LIMIT 1`,
+            [selectedId],
+          );
+          if (outside.rowCount) requests.push(selected);
+        }
+      } catch {
+        /* selected row may have been cleared */
+      }
+    }
     // History for the open business conversation only. A finished/coordinated
     // handoff is out of scope. Prefer the selected open request, else the
     // earliest still-open request for this phone.
@@ -327,8 +351,10 @@ export class Store {
         role: "assistant",
         content: latest.rows[0].text.slice(0, 2000),
       });
-    const messageText = (message.transcript ?? message.text).trim();
-    if (/(?:טעיתי|תיקון|בעצם|התכוונתי)/.test(messageText)) {
+    // Also surface a recent outside-area rejection when nothing else is open,
+    // even without explicit "טעיתי" wording — customers often just resend the
+    // correct town.
+    if (!requests.some((r) => r.status !== "rejected")) {
       const correction = await c.query<{ id: string }>(
         `SELECT DISTINCT r.id,r.number
          FROM requests r
@@ -343,7 +369,7 @@ export class Store {
          ORDER BY r.number DESC LIMIT 2`,
         [message.phone, resetAt],
       );
-      if (correction.rows.length === 1)
+      if (correction.rows.length === 1 && !requests.some((r) => r.id === correction.rows[0]!.id))
         requests.push(await this.request(correction.rows[0]!.id, c));
     }
     const candidates = (await this.candidates(message.phone, c)).filter(
