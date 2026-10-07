@@ -412,8 +412,11 @@ def run_add_other():
         lambda r, s: (
             s["request_count"] == "2"
             and "bed" in (s["items"] or "")
-            and "fridge" in (s["items"] or ""),
-            "other recipient: two requests, one item each",
+            and "fridge" in (s["items"] or "")
+            and "תמונה" in r
+            and "תקין" not in r
+            and "שמיש" not in r,
+            "other recipient: two requests; new donation must ask photo first, not condition",
         ),
     )
     finish_flow(flow)
