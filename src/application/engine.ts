@@ -2001,17 +2001,23 @@ export class Engine {
         if (rebuilt.trim()) reply = rebuilt;
       }
       // No-progress: nothing new in DB → never resend the identical previous ask.
+      // Keep command clarifications that are already distinct from the bare next
+      // ask (e.g. explicit third-party contact confirmation after a bare «כן»).
       if (request && !reason && changedFields.length === 0 && intent !== "ask_photo") {
         const previousBot =
           [...ctx.history]
             .reverse()
             .find((entry) => entry.role === "assistant")?.content ?? "";
         const next = nextQuestion(request, phone).text;
-        const sameAsk =
-          Boolean(reply && previousBot && previousBot.includes((reply ?? "").slice(0, 24))) ||
-          Boolean(next && previousBot && previousBot.includes(next.slice(0, 24))) ||
-          reply === next;
-        if (sameAsk || !reply?.trim())
+        const slice = (s: string) => s.slice(0, Math.min(24, s.length));
+        const replyDistinctFromAsk =
+          Boolean(reply?.trim()) &&
+          reply !== next &&
+          !(next && reply!.includes(slice(next)));
+        const replyRepeatsPrevious = Boolean(
+          reply && previousBot && previousBot.includes(slice(reply)),
+        );
+        if (!replyDistinctFromAsk || replyRepeatsPrevious || !reply?.trim())
           reply = noProgressReply(request, phone, text, previousBot);
       }
       // protectedReply still marks operational replies that must not be

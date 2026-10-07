@@ -142,6 +142,11 @@ export function summarizeTurnChanges(
   const nameNew = Boolean(
     afterDonor?.name && afterDonor.name !== (beforeDonor?.name ?? null),
   );
+  const floorNew = Boolean(
+    afterDonor &&
+      afterDonor.floor !== null &&
+      afterDonor.floor !== (beforeDonor?.floor ?? null),
+  );
 
   // Nothing newly written this turn.
   if (
@@ -150,15 +155,10 @@ export function summarizeTurnChanges(
     !receiverPhoneNew &&
     !settlementNew &&
     !addressNew &&
-    !nameNew
+    !nameNew &&
+    !floorNew
   )
     return null;
-
-  const floorNew = Boolean(
-    afterDonor &&
-      afterDonor.floor !== null &&
-      afterDonor.floor !== (beforeDonor?.floor ?? null),
-  );
 
   // Fresh handoff write: item and/or receiver captured together.
   if (itemText || receiverNameNew || receiverPhoneNew) {
@@ -186,7 +186,9 @@ export function summarizeTurnChanges(
     return `מעולה, רשמתי ${place}`;
   }
   if (floorNew && afterDonor && afterDonor.floor !== null)
-    return `מעולה, רשמתי קומה ${afterDonor.floor}`;
+    return afterDonor.floor === 0
+      ? "מעולה, רשמתי קומת קרקע"
+      : `מעולה, רשמתי קומה ${afterDonor.floor}`;
   if (nameNew && afterDonor?.name) return `מעולה, רשמתי את השם ${afterDonor.name}`;
   void beforeOwn;
   return null;
@@ -222,6 +224,18 @@ export function noProgressReply(
           : field === "name"
             ? "את השם"
             : "את הפרט החסר";
+  // Contact consent: never loop the same yes/no — demand an explicit phrase.
+  if (field === "contact_counterparty" || /אימות הפרטים/.test(q.text)) {
+    const other = r.parties.find((x) => x.phone !== phone);
+    const who =
+      other?.name ?? (p.role === "donor" ? "המקבל" : "המוסר");
+    if (
+      previousBot.includes("לאשר במפורש") ||
+      previousBot.includes("תפנה אליו")
+    )
+      return `עדיין צריך אישור מפורש לפני שפונים ל${who} — למשל «כן, תפנה אליו» או «לא».`;
+    return `כדי לוודא — לאשר במפורש שנשלח הודעה ל${who}? למשל «כן, תפנה אליו».`;
+  }
   let ask = q.text;
   // Soft variant when the previous bot line already asked the same thing.
   if (previousBot && ask && previousBot.includes(ask.slice(0, Math.min(24, ask.length)))) {
