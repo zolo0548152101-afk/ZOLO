@@ -1791,7 +1791,8 @@ test("contact card accepts WhatsApp grouped TEL fields", () => {
     "HAIM_YAHAD",
   );
   assert.equal(m?.kind, "contact");
-  assert.equal(m?.text, "[כרטיס איש קשר]");
+  assert.match(m?.text ?? "", /כרטיס איש קשר: שם=אא טל; טלפון=536662043/);
+  assert.ok(m?.contacts?.some((c) => c.phone === "536662043" && c.name === "אא טל"));
   assert.deepEqual(m?.contacts, [
     { phone: "536662043", name: "אא טל" },
   ]);
