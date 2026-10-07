@@ -11,12 +11,109 @@ export const SERVICE_TOWNS =
 export const OUTSIDE =
   `אנחנו פועלים רק ב${SERVICE_TOWNS}. לא נוכל לסייע בהובלה הזו.`;
 export const PHOTO_THANKS = "תודה, התמונה התקבלה.";
+/** Legacy fixed line — prefer SOFT_PHOTO_ASK + summarizeRecorded for new replies. */
 export const PHOTO_FIRST = "בשמחה. כדי להמשיך, נא לשלוח תמונה של הפריט.";
+/** Soft photo nudge: optional, never blocks the next missing detail. */
+export const SOFT_PHOTO_ASK =
+  "אם יש תמונה של הפריט — אפשר לשלוח עכשיו; אם אין, נמשיך בפרטים.";
 /** Same-day pickup is not a promise. Deliveries stay on the Tuesday window. */
 export const SAME_DAY_WINDOW =
   "אי אפשר לאסוף היום. ההובלות רק ביום שלישי בין 16:00 ל־20:00.";
 export function sameDayDemand(text: string): boolean {
   return /(?:^|[^א-ת])היום(?=$|[^א-ת])/u.test(norm(text));
+}
+/** Customer declined or deferred a photo — continue to the next missing field. */
+export function photoDeclined(text: string): boolean {
+  const t = norm(text);
+  return (
+    /אין(?:\s+לי)?\s+תמונה|בלי\s+תמונה|לא\s+(?:אשלח|שולח|יש)\s+תמונה|תמונה\s+אין|כרגע\s+אין(?:\s+לי)?(?:\s+תמונה)?|אין\s+כרגע/.test(
+      t,
+    ) || /no\s+photo|don'?t\s+have\s+(?:a\s+)?photo/i.test(text)
+  );
+}
+/**
+ * True when the customer already understands the product path
+ * (donate / receive / item / contact) — no self-intro needed.
+ */
+export function customerIntentClear(text: string): boolean {
+  const t = norm(text).replace(/\s+/gu, " ").trim();
+  if (!t) return false;
+  if (
+    /^(?:שלום|היי|הי|בוקר טוב|ערב טוב|צחרים טובים|צהריים טובים)[.!?]*$/u.test(t)
+  )
+    return false;
+  if (
+    /(?:למסור|לתרום|להעביר|לקבל|מבקש|צריך|מסירה|תרומה|מוסר|מקבל)/u.test(t)
+  )
+    return true;
+  if (
+    /מיטה|(?:^|[^\u05D0-\u05EA])מטה(?=[^\u05D0-\u05EA]|$)|ספה|שידה|מנורה|שולחן|כיסא|מקרר|מכונת|תנור|ארון|פריט|רהיט/u.test(
+      t,
+    )
+  )
+    return true;
+  if (/כרטיס איש קשר|BEGIN:VCARD/i.test(text)) return true;
+  if (/\d{8,10}/.test(t) && /(?:ל|עבור|אל)/u.test(t)) return true;
+  return false;
+}
+export function displayPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, "");
+  const local =
+    digits.length === 12 && digits.startsWith("972")
+      ? digits.slice(3)
+      : digits.length === 10 && digits.startsWith("0")
+        ? digits.slice(1)
+        : digits;
+  if (local.length === 9 && local.startsWith("5"))
+    return `0${local.slice(0, 2)}-${local.slice(2)}`;
+  return phone;
+}
+/** Short “what we already recorded” line for every customer reply. */
+export function summarizeRecorded(r: Request, phone: string): string | null {
+  const items = r.items
+    .map((i) => i.description?.trim())
+    .filter((x): x is string => Boolean(x));
+  const itemText = items.join(" ו");
+  const receiver = r.parties.find((p) => p.role === "receiver");
+  const donor = r.parties.find((p) => p.role === "donor");
+  const ownIsDonor = donor?.phone === phone;
+  if (ownIsDonor || r.origin === "direct" || r.origin === "donation") {
+    if (itemText && receiver?.name && receiver.phone)
+      return `רשמתי מסירה של ${itemText} ל${receiver.name} (${displayPhone(receiver.phone)})`;
+    if (itemText && receiver?.name) return `רשמתי מסירה של ${itemText} ל${receiver.name}`;
+    if (itemText && receiver?.phone)
+      return `רשמתי מסירה של ${itemText} למספר ${displayPhone(receiver.phone)}`;
+    if (itemText) return `רשמתי מסירה של ${itemText}`;
+    if (receiver?.name && receiver.phone)
+      return `רשמתי מסירה ל${receiver.name} (${displayPhone(receiver.phone)})`;
+    if (receiver?.name) return `רשמתי מסירה ל${receiver.name}`;
+  }
+  if (itemText) return `רשמתי פנייה לגבי ${itemText}`;
+  return null;
+}
+export function photoAskAlreadySent(
+  history: { role: string; content: string }[],
+): boolean {
+  return history.some(
+    (entry) =>
+      entry.role === "assistant" &&
+      /תמונה/.test(entry.content) &&
+      /(?:שלח|לשלוח|אפשר לשלוח|נא לשלוח|אם יש)/u.test(entry.content),
+  );
+}
+/** Summary + next ask (photo soft-nudge or the next missing field). */
+export function composeRecordedReply(
+  r: Request,
+  phone: string,
+  ask: string,
+): string {
+  const summary = summarizeRecorded(r, phone);
+  const next = ask.trim();
+  if (summary && next && !next.includes(summary)) return `${summary}\n${next}`;
+  return next || summary || SOFT_PHOTO_ASK;
+}
+export function openingPhotoReply(r: Request, phone: string): string {
+  return composeRecordedReply(r, phone, SOFT_PHOTO_ASK);
 }
 export const CONDITION_QUESTION = "האם הפריט תקין ושמיש ב־100%?";
 export const DEFAULT_TRANSPORT_CAPACITY = 10;
@@ -371,9 +468,8 @@ export function grounded(plan: Plan, text: string): boolean {
   );
 }
 export function photoGate(r: Request): boolean {
-  // Open donations and direct handoffs both need a photo before details.
-  // Direct still skips the open-donation matching loop; it just asks for a
-  // picture of the item first (same customer-facing PHOTO_FIRST line).
+  // Donations and direct handoffs may soft-ask for a photo while none is stored.
+  // Direct never blocks on the photo — the ask is optional and non-sticky.
   return (
     (r.origin === "donation" || r.origin === "direct") &&
     r.parties.some((p) => p.role === "donor") &&

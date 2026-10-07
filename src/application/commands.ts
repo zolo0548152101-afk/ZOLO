@@ -15,7 +15,6 @@ import {
   HUMAN_REPLY,
   DEFAULT_TRANSPORT_CAPACITY,
   OUTSIDE,
-  PHOTO_FIRST,
   canonicalPhone,
   donationIntent,
   ambiguousStreetCity,
@@ -25,6 +24,10 @@ import {
   appliance,
   nextQuestion,
   photoGate,
+  openingPhotoReply,
+  composeRecordedReply,
+  photoAskAlreadySent,
+  photoDeclined,
   readyToAskContactCounterparty,
   statusText,
   nextTuesday,
@@ -343,9 +346,13 @@ export class Commands {
         ctx.conversation.pending_counterparty_name = pending.counterparty_name;
       }
       await this.clearPendingExtra(c, ctx);
-      // Same opening order as a first donation: photo before condition/details.
-      if (photoGate(r)) return output(PHOTO_FIRST, r);
-      return output(nextQuestion(r, phone).text, r);
+      // Soft photo nudge once; otherwise summarize and ask the next missing field.
+      if (photoGate(r) && !photoAskAlreadySent(ctx.history))
+        return output(openingPhotoReply(r, phone), r);
+      return output(
+        composeRecordedReply(r, phone, nextQuestion(r, phone).text),
+        r,
+      );
     }
     if (cmd.type === "status") return output(statusText(ctx.requests));
     if (cmd.type === "seek") {
@@ -720,9 +727,17 @@ export class Commands {
             phone: p.phone,
             text: `נפתחה פנייה ${r.number} לגבי ${r.items.map((i) => i.description).join(", ")}. נא לאשר את חלקך ב${p.role === "donor" ? "מסירה" : "קבלה"}. ההובלות בימי שלישי 16:00–20:00, ובדרך כלל עד ${DEFAULT_TRANSPORT_CAPACITY} הובלות בכל יום שלישי. מעבר לכך נבקש תחילה אישור מנהל. נעדכן.`,
           });
-      // Opening order: photo first (open donation or direct handoff).
-      if (photoGate(r)) return output(PHOTO_FIRST, r);
-      return output(nextQuestion(r, phone).text, r);
+      // Soft optional photo ask once; never a hard PHOTO_FIRST lock.
+      if (
+        photoGate(r) &&
+        !photoAskAlreadySent(ctx.history) &&
+        !photoDeclined(ctx.message.transcript ?? ctx.message.text)
+      )
+        return output(openingPhotoReply(r, phone), r);
+      return output(
+        composeRecordedReply(r, phone, nextQuestion(r, phone).text),
+        r,
+      );
     }
     if (cmd.type === "interest") {
       const candidate = ctx.candidates.find(

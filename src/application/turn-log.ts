@@ -2,6 +2,7 @@ import type pg from "pg";
 import type { Context, Plan, Request } from "../domain/types.js";
 import {
   PHOTO_FIRST,
+  SOFT_PHOTO_ASK,
   photoGate,
 } from "../domain/policies.js";
 import { isSelfIntroText, CLARIFY_REPLY } from "../domain/ai-guards.js";
@@ -125,14 +126,17 @@ export function observePolicies(
 
   const photoFirst =
     reply.includes(PHOTO_FIRST) ||
+    reply.includes(SOFT_PHOTO_ASK) ||
     opts.intent === "ask_photo" ||
     Boolean(opts.photoHold);
   policies.PHOTO_FIRST = {
     fired: photoFirst,
     why: photoFirst
       ? opts.photoHold
-        ? "holdingForPhoto: open request still missing photo"
-        : "reply locked to PHOTO_FIRST after photoGate"
+        ? "holdingForPhoto soft nudge (non-sticky)"
+        : reply.includes(SOFT_PHOTO_ASK)
+          ? "soft optional photo ask with summary"
+          : "photo ask present in reply"
       : "not applied this turn",
   };
 

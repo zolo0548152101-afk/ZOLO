@@ -511,6 +511,11 @@ export class OpenAIPlanner implements Planner {
       return { text: input.fallback, metadata: { provider: "fallback", ai_enabled: false } };
     const started = Date.now();
     const source = replyPromptSource(this.c, input.fallback);
+    const clearPath =
+      ctx.requests.length > 0 ||
+      /(?:למסור|לתרום|להעביר|לקבל|מסירה|מיטה|ספה|שולחן|כרטיס איש קשר)/u.test(
+        (ctx.message.transcript ?? ctx.message.text ?? "").trim(),
+      );
     const replyInput = {
       sender_phone: ctx.conversation.phone,
       current_message: ctx.message.transcript ?? ctx.message.text,
@@ -521,7 +526,10 @@ export class OpenAIPlanner implements Planner {
       operation_result: input.operation,
       fallback_reply: input.fallback,
       canonical: input.fallback,
-      already_introduced: conversationAlreadyIntroduced(ctx.history),
+      // Intro only when the path is still unclear — never on a clear donate/receive turn.
+      already_introduced:
+        conversationAlreadyIntroduced(ctx.history) || clearPath,
+      intent_clear: clearPath,
     };
     const response = await this.client.responses.create({
       model: this.c.OPENAI_MODEL,

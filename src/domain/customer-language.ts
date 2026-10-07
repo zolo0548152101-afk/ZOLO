@@ -5,6 +5,7 @@ import {
   OUTSIDE,
   PHOTO_FIRST,
   PHOTO_THANKS,
+  SOFT_PHOTO_ASK,
   norm,
 } from "./policies.js";
 import { CLARIFY_REPLY, FAULT_REPLY } from "./ai-guards.js";
@@ -20,6 +21,11 @@ const LINES: Record<string, Record<Exclude<CustomerLang, "he">, string>> = {
     en: "Happy to help. To continue, please send a photo of the item.",
     ar: "بكل سرور. للمتابعة، أرسل صورة الغرض.",
     ru: "Хорошо. Чтобы продолжить, пришлите фото предмета.",
+  },
+  [SOFT_PHOTO_ASK]: {
+    en: "If you have a photo of the item, you can send it now; if not, we'll continue with the details.",
+    ar: "إذا كانت لديك صورة للغرض يمكنك إرسالها الآن؛ وإن لم تكن، نكمل التفاصيل.",
+    ru: "Если есть фото предмета — можно прислать сейчас; если нет — продолжим с деталями.",
   },
   [PHOTO_THANKS]: {
     en: "Thanks, the photo was received.",

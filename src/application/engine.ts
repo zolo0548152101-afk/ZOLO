@@ -29,6 +29,7 @@ import {
   statusText,
   PHOTO_THANKS,
   PHOTO_FIRST,
+  SOFT_PHOTO_ASK,
   SAME_DAY_WINDOW,
   sameDayDemand,
   HUMAN_REPLY,
@@ -40,6 +41,12 @@ import {
   nextQuestion,
   nextTuesday,
   readyToProposeSchedule,
+  photoDeclined,
+  photoAskAlreadySent,
+  customerIntentClear,
+  composeRecordedReply,
+  openingPhotoReply,
+  summarizeRecorded,
 } from "../domain/policies.js";
 import {
   CLARIFY_REPLY,
@@ -533,6 +540,9 @@ export class Engine {
               }),
             ],
           );
+        } else if (this.softContinuePastPhoto(ctx, text)) {
+          await this.finishNextDetail(id);
+          return;
         } else if (this.holdingForPhoto(ctx, text)) {
           await this.finishPhotoHold(id);
           return;
@@ -896,21 +906,24 @@ export class Engine {
     });
   }
 
-  /** Open donation still missing its required photo, and this text is not a new request. */
+  /** Open donation still missing photo — never sticky for direct; never repeats. */
   private holdingForPhoto(ctx: Context, text: string): boolean {
     if (!text.trim() || customerCancelIntent(text)) return false;
-    // A named/direct handoff must leave the photo hold so the recipient can
-    // be recorded — photo is not required for that path.
+    if (photoDeclined(text)) return false;
+    if (photoAskAlreadySent(ctx.history)) return false;
+    // Direct handoff: photo is optional; never park the turn on it.
     if (
       directHandoffIntent(text) ||
       ctx.conversation.pending_counterparty_name ||
       ctx.conversation.pending_counterparty_phone ||
-      ctx.conversation.pending_extra_item
+      ctx.conversation.pending_extra_item ||
+      ctx.requests.some((r) => r.origin === "direct" && photoGate(r))
     )
       return false;
     const waiting = ctx.requests.some(
       (request) =>
         photoGate(request) &&
+        request.origin === "donation" &&
         ![
           "coordinated",
           "closed",
@@ -936,10 +949,34 @@ export class Engine {
     return true;
   }
 
+  /** After a soft photo ask: decline or other text → summarize + next missing field. */
+  private softContinuePastPhoto(ctx: Context, text: string): boolean {
+    if (!text.trim() || customerCancelIntent(text)) return false;
+    const waiting = ctx.requests.some(
+      (request) =>
+        photoGate(request) &&
+        ![
+          "coordinated",
+          "closed",
+          "cancelled",
+          "rejected",
+          "human",
+          "cancel_pending",
+        ].includes(request.status),
+    );
+    if (!waiting) return false;
+    return (
+      photoDeclined(text) ||
+      photoAskAlreadySent(ctx.history) ||
+      ctx.requests.some((r) => r.origin === "direct" && photoGate(r))
+    );
+  }
+
   private async finishPhotoHold(id: string): Promise<void> {
     await this.s.transaction(async (c) => {
       const ctx = await this.s.context(id, c, true);
       if (ctx.message.processed_at) return;
+      const phone = ctx.conversation.phone;
       const request =
         ctx.requests.find(
           (candidate) =>
@@ -948,11 +985,24 @@ export class Engine {
         ) ??
         ctx.requests.find((candidate) => photoGate(candidate)) ??
         null;
-      const photoReply = this.voiced(ctx, PHOTO_FIRST);
+      const text = ctx.message.transcript ?? ctx.message.text;
+      const continuePast =
+        !request ||
+        photoDeclined(text) ||
+        photoAskAlreadySent(ctx.history) ||
+        request.origin === "direct";
+      const photoReply = this.voiced(
+        ctx,
+        request
+          ? continuePast
+            ? composeRecordedReply(request, phone, nextQuestion(request, phone).text)
+            : openingPhotoReply(request, phone)
+          : SOFT_PHOTO_ASK,
+      );
       await this.s.outbound(
         c,
         ctx.message,
-        { phone: ctx.conversation.phone, text: photoReply },
+        { phone, text: photoReply },
         `reply:${id}`,
         request?.id ?? null,
       );
@@ -966,6 +1016,44 @@ export class Engine {
       fate_detail: { path: "finishPhotoHold" },
       intent: "ask_photo",
       photoHold: true,
+    });
+  }
+
+  private async finishNextDetail(id: string): Promise<void> {
+    await this.s.transaction(async (c) => {
+      const ctx = await this.s.context(id, c, true);
+      if (ctx.message.processed_at) return;
+      const phone = ctx.conversation.phone;
+      const request =
+        ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+        ctx.requests.find((r) => photoGate(r)) ??
+        ctx.requests.find(
+          (r) =>
+            !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
+        ) ??
+        null;
+      const reply = this.voiced(
+        ctx,
+        request
+          ? composeRecordedReply(request, phone, nextQuestion(request, phone).text)
+          : "מה הפרט הבא שתרצה להשלים?",
+      );
+      await this.s.outbound(
+        c,
+        ctx.message,
+        { phone, text: reply },
+        `reply:${id}`,
+        request?.id ?? null,
+      );
+      await c.query(
+        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
+        [id, reply],
+      );
+    });
+    await this.auditTurn(id, {
+      fate: "completed",
+      fate_detail: { path: "finishNextDetail" },
+      intent: "ask_details",
     });
   }
 
@@ -1578,13 +1666,14 @@ export class Engine {
                 else if (!reply) reply = PHOTO_THANKS;
               }
             }
-            // After every command has been written, photo-first shapes the
-            // opening reply for donations and direct handoffs that still have
-            // no photo. Soft-gate questions (במקום/בנוסף) stay untouched.
+            // Soft optional photo ask once. Never replace a rich reply with the
+            // fixed PHOTO_FIRST line, and never stick when the user declines.
             const explicitClarification =
               /כבר קיימת פנייה|הפרטים האלה כבר רשומים|כתוב "במקום" או "בנוסף"|כתוב "אותו מקבל" או "מקבל אחר"|עד שני רהיטים לכל מוסר|רשמתי שמדובר במסירה|מה הפריט שברצונך למסור/.test(
                 reply ?? "",
               );
+            const photoAsked = photoAskAlreadySent(ctx.history);
+            const declinedPhoto = photoDeclined(text);
             if (
               request &&
               !reason &&
@@ -1595,14 +1684,37 @@ export class Engine {
                 request.status,
               )
             ) {
-              // Direct/named handoff still needs a photo of the item first.
-              // Soft-gate clarifications above stay untouched.
               void handoffTransitionPlanned;
-              reply = PHOTO_FIRST;
-              intent = "ask_photo";
+              if (!declinedPhoto && !photoAsked) {
+                // Keep any useful command reply; otherwise soft-ask with summary.
+                const soft = openingPhotoReply(request, phone);
+                if (
+                  !reply ||
+                  reply === PHOTO_FIRST ||
+                  reply === SOFT_PHOTO_ASK ||
+                  reply.includes(PHOTO_FIRST)
+                )
+                  reply = soft;
+                else if (!/תמונה/.test(reply))
+                  reply = `${reply}\n${SOFT_PHOTO_ASK}`;
+                intent = "ask_photo";
+              } else {
+                // Already asked or declined — advance to the next missing field.
+                reply = composeRecordedReply(
+                  request,
+                  phone,
+                  nextQuestion(request, phone).text,
+                );
+                intent = "ask_details";
+              }
             }
-            if (reply === PHOTO_FIRST && sameDayDemand(text))
-              reply = `${SAME_DAY_WINDOW}\n${PHOTO_FIRST}`;
+            if (
+              reply &&
+              sameDayDemand(text) &&
+              (reply.includes(SOFT_PHOTO_ASK) || reply.includes(PHOTO_FIRST)) &&
+              !reply.includes(SAME_DAY_WINDOW)
+            )
+              reply = `${SAME_DAY_WINDOW}\n${reply}`;
             if (
               request &&
               !reason &&
@@ -1905,25 +2017,38 @@ export class Engine {
           (entry) => entry.role === "assistant" && isSelfIntroText(entry.content),
         );
       auditedIntroduced = introduced;
-      // Photo-first and other fixed templates must not be replaced by a free
-      // paraphrase that drops the required ask or invents a second intro.
+      // Intro only when intent is unclear. Clear donate/receive paths skip it.
+      const clearIntent =
+        customerIntentClear(ctx.message.transcript ?? ctx.message.text) ||
+        ctx.requests.length > 0;
+      const suppressIntro = introduced || clearIntent;
       const canonical = committed.canonicalReply;
-      const lockPhoto =
-        canonical === PHOTO_FIRST ||
-        canonical.includes(PHOTO_FIRST) ||
-        committed.operation?.action_results?.intent === "ask_photo";
-      if (lockPhoto) {
-        text = stripRepeatedSelfIntro(canonical, ctx.history, introduced);
-      } else {
-        text = stripRepeatedSelfIntro(text, ctx.history, introduced);
-        const lang = conversationLanguage(ctx);
-        const fromTemplate = localizeCustomer(canonical, lang);
-        text =
-          fromTemplate !== canonical
-            ? fromTemplate
-            : localizeCustomer(text, lang);
-        text = stripRepeatedSelfIntro(text, ctx.history, introduced);
-      }
+      // Never lock the whole reply to the fixed PHOTO_FIRST line — allow natural
+      // phrasing, but keep a photo ask if the canonical soft-ask included one.
+      text = stripRepeatedSelfIntro(text, ctx.history, suppressIntro);
+      const lang = conversationLanguage(ctx);
+      const fromTemplate = localizeCustomer(canonical, lang);
+      text =
+        fromTemplate !== canonical
+          ? fromTemplate
+          : localizeCustomer(text, lang);
+      text = stripRepeatedSelfIntro(text, ctx.history, suppressIntro);
+      // If the model dropped a required soft photo ask, restore it once.
+      if (
+        committed.operation?.action_results?.intent === "ask_photo" &&
+        /תמונה/.test(canonical) &&
+        !/תמונה/.test(text)
+      )
+        text = stripRepeatedSelfIntro(canonical, ctx.history, suppressIntro);
+      // Ensure a recorded summary stays visible when the canonical had one.
+      const summary = committed.requestId
+        ? (() => {
+            const match = ctx.requests.find((r) => r.id === committed.requestId);
+            return match ? summarizeRecorded(match, ctx.conversation.phone) : null;
+          })()
+        : null;
+      if (summary && text && !text.includes(summary.split("(")[0]!.trim()))
+        text = `${summary}\n${text}`;
       auditedReply = text;
       await this.s.transaction(async (c) => {
         const stillNewer = await c.query<{ id: string }>(
