@@ -86,20 +86,22 @@ const envSchema = z.object({
   LIVE_ALLOWLIST: z.string().default(""),
   LIVE_DEPENDENCIES_VERIFIED: flag.default(false),
   MEDIA_VOLUME_CONFIRMED: flag.default(false),
-  // Quiet window: wait for this much silence after the newest inbound
-  // message before merging a burst into one reply.
+  // Rolling quiet window: every new inbound from the same phone resets the
+  // countdown; reply only after this much silence after the newest message.
   MESSAGE_COALESCE_QUIET_MS: z.coerce
     .number()
     .int()
     .min(50)
     .max(15000)
-    .default(2800),
+    .default(5000),
+  // Cap so a never-ending burst cannot hold a worker forever; must stay well
+  // above QUIET so each new message can still fully reset the 5s countdown.
   MESSAGE_COALESCE_MAX_MS: z.coerce
     .number()
     .int()
     .min(100)
-    .max(30000)
-    .default(10000),
+    .max(60000)
+    .default(30000),
 });
 export type Config = z.infer<typeof envSchema>;
 export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {

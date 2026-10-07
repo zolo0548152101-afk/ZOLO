@@ -205,14 +205,13 @@ export class Engine {
   async processNext(triggerId: string, lastAiAttempt = false): Promise<void> {
     const trigger = await this.s.message(triggerId);
     if (!trigger.phone) return;
-    // WhatsApp users often split one thought across several bubbles. Wait for
-    // a real quiet window after the newest message before merging the burst.
+    // Rolling coalesce window: every new inbound from this phone resets the
+    // countdown. Reply only after quietMs with no newer unprocessed message,
+    // then merge the whole pending burst into one turn.
     const quietMs = this.s.config.MESSAGE_COALESCE_QUIET_MS;
     const maxMs = this.s.config.MESSAGE_COALESCE_MAX_MS;
     const started = Date.now();
     while (Date.now() - started < maxMs) {
-      const remaining = maxMs - (Date.now() - started);
-      await delay(Math.min(quietMs, remaining));
       const newest = await this.s.pool.query<{ age_ms: number }>(
         `SELECT GREATEST(0, (extract(epoch FROM clock_timestamp()-m.received_at)*1000))::int AS age_ms
            FROM messages m JOIN contacts c ON c.id=m.contact_id
@@ -222,6 +221,8 @@ export class Engine {
       );
       if (!newest.rows[0]) return;
       if (newest.rows[0].age_ms >= quietMs) break;
+      // Newest message is still inside the quiet window — wait out the
+      // remainder (a later arrival will show a younger age and reset again).
       const waitMore = quietMs - newest.rows[0].age_ms;
       const cap = maxMs - (Date.now() - started);
       if (cap <= 0) break;
