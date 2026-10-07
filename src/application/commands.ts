@@ -591,8 +591,13 @@ export class Commands {
       r.origin = "direct";
       for (const item of r.items)
         if (item.working === null) item.working = true;
+      // Linking the recipient is not consent to message them and not proof
+      // that own-party details/rules are ready — nextQuestion decides.
       const q = nextQuestion(r, phone);
-      return output(`מעולה, קישרתי את ${candidateName ?? candidatePhone} כמקבל/ת.\n${q.text}`, r);
+      return output(
+        `מעולה, קישרתי את ${candidateName ?? candidatePhone} כמקבל/ת.\n${q.text}`,
+        r,
+      );
     }
     if (cmd.type === "contact_counterparty") {
       const other = r.parties.find((p) => p.phone !== phone);
@@ -889,7 +894,10 @@ export class Commands {
         if (role !== "receiver" || !cmd.name)
           throw new AppError("phone_not_supplied", 403, "נא לשלוח את מספר הצד השני או כרטיס איש קשר.");
         await c.query("UPDATE conversations SET pending_counterparty_name=$2,version=version+1 WHERE id=$1", [ctx.conversation.id, cmd.name]);
-        return output(`רשמתי שהמקבל הוא ${cmd.name}. כדי שנוכל לתאם איתו ב־WhatsApp, נא לשלוח את מספר הטלפון שלו או כרטיס איש קשר. אם אין לך את המספר, כתוב "אין לי מספר" ונמשיך לחיפוש מקבל מתאים.`, r);
+        return output(
+          `רשמתי שהמקבל הוא ${cmd.name}. נא לשלוח את מספר הטלפון שלו או כרטיס איש קשר. אם אין לך את המספר, כתוב "אין לי מספר" ונמשיך לחיפוש מקבל מתאים.`,
+          r,
+        );
       }
       const targetPhone = suppliedPhone(ctx, cmd.phone);
       if (other) {
