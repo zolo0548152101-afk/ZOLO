@@ -872,20 +872,8 @@ export class Commands {
         )
       )
         return output("הפנייה לצד השני כבר בוצעה.", r);
-      // Bare «כן» is not enough to message a third party — need an explicit OK.
-      const explicitContact =
-        /מאשר(?:ת)?\s+(?:ליצור(?:\s+אית(?:ה|ו))?\s+קשר|לפנות)/u.test(norm(text)) ||
-        /(?:^|[\s,])(?:כן[,.]?\s*)?(?:תפנה|לפנות|תיצרו\s+קשר|ליצור\s+קשר|שלח(?:ו)?\s+(?:לו|לה|למקבל|למוסר))/u.test(
-          norm(text),
-        );
-      if (cmd.contact && !explicitContact) {
-        return output(
-          `כדי לוודא — לאשר במפורש שנשלח הודעה ל${other.name ?? (other.role === "receiver" ? "מקבל" : "מוסר")}? למשל «כן, תפנה אליו».`,
-          r,
-        );
-      }
-      // Consent to contact only after own details + transport rules hold.
-      // Decline can be recorded anytime; early "yes" is deferred via nextQuestion.
+      // AI owns consent wording (bare «כן» is enough). Execute contact=true
+      // when own details/rules are ready; otherwise keep asking missing fields.
       if (cmd.contact && !readyToAskContactCounterparty(r, phone)) {
         const q = nextQuestion(r, phone);
         return output(q.text, r);
