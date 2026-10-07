@@ -186,7 +186,8 @@ export interface Item extends ItemInput {
 }
 export interface Party {
   role: Role;
-  phone: string;
+  /** Null when the AI stored a named counterparty before a phone was known. */
+  phone: string | null;
   name: string | null;
   settlement: string | null;
   address: string | null;

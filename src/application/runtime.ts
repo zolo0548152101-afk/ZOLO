@@ -589,6 +589,7 @@ export class Runtime {
           const trace_id = randomUUID();
           await store.event(c, { trace_id }, "system", "schedule_proposed_after_capacity_approval", { date: proposed }, r.id);
           for (const p of r.parties) {
+            if (!p.phone) continue;
             const permission = await c.query<{ state: string }>(
               "SELECT state FROM request_verifications WHERE request_id=$1 AND role=$2",
               [r.id, p.role],
@@ -618,7 +619,8 @@ export class Runtime {
             { date: r.run_date },
             r.id,
           );
-          for (const p of r.parties)
+          for (const p of r.parties) {
+            if (!p.phone) continue;
             await store.outbound(
               c,
               { trace_id, mode: this.config.BOT_MODE },
@@ -626,6 +628,7 @@ export class Runtime {
               `coordination:${r.id}:${r.run_date}:${p.phone}`,
               r.id,
             );
+          }
         }
       });
     await this.pool.query(

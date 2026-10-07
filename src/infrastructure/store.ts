@@ -154,7 +154,7 @@ export class Store {
     );
     if (!base.rows[0]) throw new AppError("request_not_found", 404);
     const parties = await c.query<Party>(
-      `SELECT p.role,co.phone,p.name,p.settlement,p.address,p.floor,p.floor_note_shown,p.approved_at::text,ap.phone AS approved_by,(p.schedule_approved_date::date=COALESCE(r.proposed_run_date,r.run_date)::date AND p.schedule_approved_date IS NOT NULL) AS schedule_approved,p.schedule_approved_date::text,p.schedule_approved_at::text FROM request_parties p JOIN requests r ON r.id=p.request_id JOIN contacts co ON co.id=p.contact_id LEFT JOIN contacts ap ON ap.id=p.approved_by WHERE p.request_id=$1 ORDER BY role`,
+      `SELECT p.role,co.phone,p.name,p.settlement,p.address,p.floor,p.floor_note_shown,p.approved_at::text,ap.phone AS approved_by,(p.schedule_approved_date::date=COALESCE(r.proposed_run_date,r.run_date)::date AND p.schedule_approved_date IS NOT NULL) AS schedule_approved,p.schedule_approved_date::text,p.schedule_approved_at::text FROM request_parties p JOIN requests r ON r.id=p.request_id LEFT JOIN contacts co ON co.id=p.contact_id LEFT JOIN contacts ap ON ap.id=p.approved_by WHERE p.request_id=$1 ORDER BY role`,
       [id],
     );
     const items = await c.query<Item>(
@@ -515,7 +515,8 @@ export class Store {
     if (result.rowCount !== 1) throw new AppError("version_conflict", 409);
     r.version++;
     for (const p of r.parties) {
-      const id = await this.contact(c, p.phone);
+      // Name-only receiver (AI decided a counterparty before a phone arrived).
+      const id = p.phone ? await this.contact(c, p.phone) : null;
       await c.query(
         `INSERT INTO request_parties(request_id,role,contact_id,name,settlement,address,floor,floor_note_shown,approved_at,approved_by,schedule_approved,schedule_approved_date,schedule_approved_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         ON CONFLICT(request_id,role) DO UPDATE SET contact_id=EXCLUDED.contact_id,name=EXCLUDED.name,settlement=EXCLUDED.settlement,address=EXCLUDED.address,floor=EXCLUDED.floor,approved_at=EXCLUDED.approved_at,approved_by=EXCLUDED.approved_by,schedule_approved=EXCLUDED.schedule_approved,schedule_approved_date=EXCLUDED.schedule_approved_date,schedule_approved_at=EXCLUDED.schedule_approved_at`,
@@ -529,7 +530,7 @@ export class Store {
           p.floor,
           p.floor_note_shown,
           p.approved_at,
-          p.approved_by ? id : null,
+          p.approved_by && id ? id : null,
           Boolean(
             (r.proposed_run_date ?? r.run_date) &&
               p.schedule_approved_date &&
@@ -868,8 +869,8 @@ export class Store {
         r.id,
       );
     if (!photo) {
-      const donor = r.parties.find((p) => p.role === "donor");
-      if (donor)
+      const donor = r.parties.find((p) => p.role === "donor" && p.phone);
+      if (donor?.phone)
         await this.outbound(
           c,
           ctx,

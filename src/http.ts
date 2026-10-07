@@ -1259,7 +1259,8 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             adminAuditRecord(req, "coordinate_request", `request:${r.id}`, "success", { date: r.run_date, reason: b.reason }),
             r.id,
           );
-          for (const party of r.parties)
+          for (const party of r.parties) {
+            if (!party.phone) continue;
             await s.outbound(
               client,
               { trace_id: req.id, mode: c.BOT_MODE },
@@ -1267,6 +1268,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
               `coordination:${r.id}:${r.run_date}:${party.phone}`,
               r.id,
             );
+          }
           return { ok: true, request: r };
         });
       });

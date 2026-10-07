@@ -709,10 +709,10 @@ export function ownParty(
   return p;
 }
 export function itemError(items: Item[], hasPhoto: boolean): string | null {
+  // Furniture count / grouping is prompt-only (AI decides). Code does not
+  // enforce a numeric item ceiling here — only program disqualifiers below.
   if (items.some((i) => i.kind === "piano" || i.kind === "house_move"))
     return "לא ניתן לסייע בהובלת פסנתרים או בהובלות דירה.";
-  if (items.reduce((n, i) => n + i.quantity, 0) > 2)
-    return "ניתן לסייע בהובלת עד שני פריטים. שולחן וכיסאות נחשבים פריט אחד.";
   if (items.some((i) => i.free === false))
     return "התוכנית מסייעת במסירה בחינם בלבד.";
   if (items.some((i) => i.working === false))

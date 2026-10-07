@@ -528,14 +528,15 @@ export function rulePlan(ctx: Context): Plan | null {
   const pendingExtra = ctx.conversation.pending_extra_item ?? null;
   if (pendingExtra?.stage === "replace_or_add") {
     const choice = replaceExtraChoice(text);
+    // Compat: still resolve במקום/בנוסף when pending_extra exists.
+    // Unclear answers defer to AI — do not force sticky {type:next}.
     if (choice) return plan(text, [{ type: "resolve_extra_item", choice }]);
-    // Keep the soft-gate sticky until answered; do not open a twin request.
-    return plan(text, [{ type: "next" }]);
+    return null;
   }
   if (pendingExtra?.stage === "same_or_other_recipient") {
     const choice = recipientExtraChoice(text);
     if (choice) return plan(text, [{ type: "resolve_extra_recipient", choice }]);
-    return plan(text, [{ type: "next" }]);
+    return null;
   }
   if (customerCancelIntent(text)) {
     const requests = ctx.requests ?? [];

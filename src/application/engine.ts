@@ -47,10 +47,7 @@ import {
   photoAskAlreadySent,
   photoStatusSkipsGate,
   customerIntentClear,
-  composeTurnReply,
   openingPhotoReply,
-  summarizeTurnChanges,
-  noProgressReply,
 } from "../domain/policies.js";
 import {
   CLARIFY_REPLY,
@@ -1026,9 +1023,12 @@ export class Engine {
         request.origin === "direct" ||
         photoStatusSkipsGate(request.photo_status);
       if (request && continuePast) {
+        // Only mark «אין תמונה» on an explicit decline — continuing past
+        // photo without declining leaves בוקשה / לא בוקשה as-is.
         if (
-          request.photo_status === PHOTO_STATUS.NOT_ASKED ||
-          request.photo_status === PHOTO_STATUS.ASKED
+          photoDeclined(text) &&
+          (request.photo_status === PHOTO_STATUS.NOT_ASKED ||
+            request.photo_status === PHOTO_STATUS.ASKED)
         ) {
           request.photo_status = PHOTO_STATUS.NO_PHOTO;
           await this.s.save(c, request);
@@ -1079,8 +1079,10 @@ export class Engine {
             !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
         ) ??
         null;
+      const detailText = ctx.message.transcript ?? ctx.message.text;
       if (
         request &&
+        photoDeclined(detailText) &&
         (request.photo_status === PHOTO_STATUS.ASKED ||
           (request.photo_status === PHOTO_STATUS.NOT_ASKED &&
             photoAskAlreadySent(ctx.history)))
@@ -1724,7 +1726,6 @@ export class Engine {
               request!.photo_status === PHOTO_STATUS.ASKED &&
               (beforeRequest?.photo_status ?? PHOTO_STATUS.NOT_ASKED) ===
                 PHOTO_STATUS.NOT_ASKED;
-            let attachedPhotoThisTurn = false;
             if (request) {
               const attached = await c.query<{
                 id: string;
@@ -1754,7 +1755,6 @@ export class Engine {
                 }
               }
               if (attached.rows.length && request.photo_ids.length) {
-                attachedPhotoThisTurn = true;
                 if (request.parties.length === 1 && request.origin === "donation")
                   request.status = "available";
                 request.photo_status = PHOTO_STATUS.RECEIVED;
@@ -1771,18 +1771,8 @@ export class Engine {
               );
             const photoAsked = photoAskAlreadySent(ctx.history);
             const declinedPhoto = photoDeclined(text);
-            // Entered turn already «בוקשה»: any non-photo answer → «אין תמונה».
-            // Do not flip on the same turn we just asked (before was still לא בוקשה).
-            if (
-              request &&
-              !reason &&
-              beforeRequest?.photo_status === PHOTO_STATUS.ASKED &&
-              ctx.message.kind !== "image" &&
-              !attachedPhotoThisTurn
-            ) {
-              request.photo_status = PHOTO_STATUS.NO_PHOTO;
-              await this.s.save(c, request);
-            }
+            // Never auto-flip ASKED→NO_PHOTO on a non-image answer — only
+            // photoDeclined() marks «אין תמונה».
             if (
               request &&
               !reason &&
@@ -1795,41 +1785,23 @@ export class Engine {
             ) {
               void handoffTransitionPlanned;
               if (!declinedPhoto && !photoAsked) {
-                // Soft photo once, ack only fields written this turn (before→after).
-                const soft = openingPhotoReply(request, phone, beforeRequest);
-                if (
-                  !reply ||
-                  reply === PHOTO_FIRST ||
-                  reply === SOFT_PHOTO_ASK ||
-                  reply.includes(PHOTO_FIRST) ||
-                  /^רשמתי מסירה/.test(reply)
-                )
-                  reply = soft;
-                else if (!/תמונה/.test(reply)) {
-                  const ack = summarizeTurnChanges(beforeRequest, request);
-                  reply = ack ? `${ack}\n${reply}\n${SOFT_PHOTO_ASK}` : `${reply}\n${SOFT_PHOTO_ASK}`;
+                // Soft gate: mark ASKED once, but do not overwrite an existing
+                // AI/command reply with PHOTO_FIRST / soft-ask templates.
+                if (!reply?.trim()) {
+                  reply = openingPhotoReply(request, phone, beforeRequest);
+                  intent = "ask_photo";
                 }
-                intent = "ask_photo";
                 request.photo_status = PHOTO_STATUS.ASKED;
                 await this.s.save(c, request);
-              } else {
-                // Declined before ask persisted — mark no photo and continue.
+              } else if (declinedPhoto) {
                 request.photo_status = PHOTO_STATUS.NO_PHOTO;
                 await this.s.save(c, request);
-                reply = nextQuestion(request, phone).text;
-                intent = "ask_details";
+                if (!reply?.trim()) {
+                  reply = nextQuestion(request, phone).text;
+                  intent = "ask_details";
+                }
               }
-            } else if (
-              request &&
-              !reason &&
-              !explicitClarification &&
-              photoAskedThisTurn &&
-              !declinedPhoto &&
-              !(reply?.includes(SOFT_PHOTO_ASK) || reply?.includes(PHOTO_FIRST))
-            ) {
-              // Commands already set «בוקשה» but a later command dropped the ask.
-              reply = openingPhotoReply(request, phone, beforeRequest);
-              intent = "ask_photo";
+              // photoAsked && !declined: leave status as בוקשה — do not flip.
             } else if (
               request &&
               !reason &&
@@ -1882,7 +1854,7 @@ export class Engine {
                 reply = nextQuestion(request, phone).text;
                 intent = "ask_schedule_approval";
                 for (const p of request.parties) {
-                  if (p.phone === phone || request.represents_both_parties) continue;
+                  if (!p.phone || p.phone === phone || request.represents_both_parties) continue;
                   const permission = await c.query<{ state: string }>(
                     "SELECT state FROM request_verifications WHERE request_id=$1 AND role=$2",
                     [request.id, p.role],
@@ -1942,7 +1914,7 @@ export class Engine {
                   request.id,
                 );
                 for (const p of request.parties)
-                  if (p.phone !== phone)
+                  if (p.phone && p.phone !== phone)
                     {
                     const notice = { phone: p.phone, text: reply };
                     const outboxId = await this.s.outbound(
@@ -1987,42 +1959,9 @@ export class Engine {
         beforeSearch,
         afterSearch: afterCtx.active_search ?? null,
       });
-      // Rebuild ack from DB writes this turn only — never invent, never repeat
-      // the full conversation summary when nothing new was persisted.
-      if (
-        request &&
-        !reason &&
-        (intent === "ask_photo" ||
-          intent === "ask_details" ||
-          intent === "acknowledge" ||
-          /^(?:מעולה, )?רשמתי/.test(reply ?? ""))
-      ) {
-        // Keep this-turn soft ask when intent is ask_photo; never re-open gate.
-        const ask =
-          intent === "ask_photo" ? SOFT_PHOTO_ASK : nextQuestion(request, phone).text;
-        const rebuilt = composeTurnReply(ask, beforeRequest, request);
-        if (rebuilt.trim()) reply = rebuilt;
-      }
-      // No-progress: nothing new in DB → never resend the identical previous ask.
-      // Keep command clarifications that are already distinct from the bare next
-      // ask (e.g. explicit third-party contact confirmation after a bare «כן»).
-      if (request && !reason && changedFields.length === 0 && intent !== "ask_photo") {
-        const previousBot =
-          [...ctx.history]
-            .reverse()
-            .find((entry) => entry.role === "assistant")?.content ?? "";
-        const next = nextQuestion(request, phone).text;
-        const slice = (s: string) => s.slice(0, Math.min(24, s.length));
-        const replyDistinctFromAsk =
-          Boolean(reply?.trim()) &&
-          reply !== next &&
-          !(next && reply!.includes(slice(next)));
-        const replyRepeatsPrevious = Boolean(
-          reply && previousBot && previousBot.includes(slice(reply)),
-        );
-        if (!replyDistinctFromAsk || replyRepeatsPrevious || !reply?.trim())
-          reply = noProgressReply(request, phone, text, previousBot);
-      }
+      // Keep AI/command replies — do not rebuild via composeTurnReply or
+      // overwrite with noProgressReply. Capacity/schedule/coordination
+      // boundary replies are applied earlier and remain authoritative.
       // protectedReply still marks operational replies that must not be
       // replaced by free model text; claim-guard handles phrasing instead.
       void protectedReply;

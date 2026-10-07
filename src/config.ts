@@ -93,9 +93,9 @@ const envSchema = z.object({
     .int()
     .min(50)
     .max(15000)
-    .default(5000),
+    .default(2800),
   // Cap so a never-ending burst cannot hold a worker forever; must stay well
-  // above QUIET so each new message can still fully reset the 5s countdown.
+  // above QUIET so each new message can still fully reset the countdown.
   MESSAGE_COALESCE_MAX_MS: z.coerce
     .number()
     .int()
