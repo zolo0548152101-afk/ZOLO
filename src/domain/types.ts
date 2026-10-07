@@ -231,6 +231,10 @@ export interface Request {
   represents_both_parties?: boolean;
   closed_at?: string | null;
   human_reason: string | null;
+  /** Team should verify distance; conversation continues collecting. */
+  needs_distance_check?: boolean;
+  /** Parked questions / review notes for the team (not a human handoff). */
+  team_notes?: string | null;
   created_at: string;
 }
 export interface Search {

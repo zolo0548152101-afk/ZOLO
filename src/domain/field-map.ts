@@ -126,6 +126,8 @@ export const FIELD_MAP: FieldMapEntry[] = [
   { table: "requests", column: "closed_at", hebrew: "מועד סגירה", writer: "cancel", claimable: false },
   { table: "requests", column: "proposed_run_date", hebrew: "מועד הובלה מוצע", writer: "system", claimable: true, claim: "הוצע מועד הובלה", missing: "עדיין אין מועד מוצע" },
   { table: "requests", column: "photo_status", hebrew: "סטטוס תמונה", writer: "engine", claimable: true, claim: "סטטוס התמונה במסד הוא הערך שנקרא", missing: "לא בוקשה" },
+  { table: "requests", column: "needs_distance_check", hebrew: "דורש בדיקת מרחק", writer: "engine", claimable: false },
+  { table: "requests", column: "team_notes", hebrew: "הערות לצוות", writer: "engine", claimable: false },
 
   { table: "request_parties", column: "role", hebrew: "תפקיד (מוסר/מקבל)", writer: "donate", commandField: "type", claimable: false },
   { table: "request_parties", column: "name", hebrew: "שם", writer: "details", commandField: "name", claimable: true, claim: "נשמר השם", missing: "חסר שם" },

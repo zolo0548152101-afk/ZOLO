@@ -8,9 +8,14 @@ import {
   type Role,
 } from "./types.js";
 export const SERVICE_TOWNS =
-  "בית שאן, מסילות, ירדנה, בית אלפא, טירת צבי, כפר רופין ומחולה";
+  "בית שאן, מסילות, ירדנה, בית אלפא, טירת צבי, שדה אליהו, כפר רופין ומחולה";
 export const OUTSIDE =
   `אנחנו פועלים רק ב${SERVICE_TOWNS}. לא נוכל לסייע בהובלה הזו.`;
+/** Uncertain / borderline settlement: keep collecting; team checks distance. */
+export const DISTANCE_REVIEW_REPLY =
+  "נברר אם המרחק מתאים ונחזור אליך.";
+/** Bot cannot answer a question: park for team, keep collecting. */
+export const CHECK_LATER_REPLY = "אבדוק ואחזור אליך עם תשובה.";
 export const PHOTO_THANKS = "תודה, התמונה התקבלה.";
 /** Legacy fixed line — prefer SOFT_PHOTO_ASK + summarizeTurnChanges for new replies. */
 export const PHOTO_FIRST = "בשמחה. כדי להמשיך, נא לשלוח תמונה של הפריט.";
@@ -355,7 +360,6 @@ const OUTSIDE_PLACES: { name: string; pattern: RegExp }[] = [
   { name: "ניר דוד", pattern: /ניר\s+דוד/u },
   { name: "בית השיטה", pattern: /בית\s+השיטה/u },
   { name: "חמדיה", pattern: /חמדיה/u },
-  { name: "שדה אליהו", pattern: /שדה\s+אליהו/u },
   { name: "עין הנציב", pattern: /עין\s+הנציב/u },
   { name: "מנחמיה", pattern: /מנחמיה/u },
   { name: "בית יוסף", pattern: /בית\s+יוסף/u },
@@ -399,9 +403,31 @@ const ALLOWED_PLACES: { name: string; pattern: RegExp }[] = [
   { name: "ירדנה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?ירדנה(?=$|[^א-ת])/u },
   { name: "בית אלפא", pattern: /בית\s*[-־]?\s*אלפא/u },
   { name: "טירת צבי", pattern: /(?:קיבוץ\s+)?טירת\s+צבי/u },
+  { name: "שדה אליהו", pattern: /(?:קיבוץ\s+)?שדה\s+אליהו/u },
   { name: "כפר רופין", pattern: /כפר\s+רופין/u },
   { name: "מחולה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?מחולה(?=$|[^א-ת])/u },
 ];
+
+/** Customer keeps pushing after a clear denial (outside area / policy). */
+export function customerInsistsAfterDenial(text: string): boolean {
+  const t = norm(text);
+  return (
+    /בכל\s*זאת|עדיין\s+(?:רוצה|מבקש)|אני\s+מתעקש|תעשו\s+(?:לי|בכל)|חייבים|אין\s+ברירה|למה\s+לא|אני\s+צריך\s+ש|תמצאו\s+דרך/.test(
+      t,
+    ) || /insist|anyway|still\s+want/i.test(text)
+  );
+}
+
+export function appendTeamNote(
+  existing: string | null | undefined,
+  note: string,
+): string {
+  const clean = note.trim();
+  if (!clean) return (existing ?? "").trim();
+  if (!existing?.trim()) return clean;
+  if (existing.includes(clean)) return existing.trim();
+  return `${existing.trim()}\n${clean}`;
+}
 
 /** An allowed town named as the place itself, not merely "near Beit She'an". */
 export function mentionedAllowedSettlement(text: string): string | null {

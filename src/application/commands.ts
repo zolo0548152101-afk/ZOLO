@@ -15,6 +15,8 @@ import {
   HUMAN_REPLY,
   DEFAULT_TRANSPORT_CAPACITY,
   OUTSIDE,
+  DISTANCE_REVIEW_REPLY,
+  CHECK_LATER_REPLY,
   canonicalPhone,
   donationIntent,
   ambiguousStreetCity,
@@ -34,6 +36,8 @@ import {
   nextTuesday,
   norm,
   mentionedAllowedSettlement,
+  appendTeamNote,
+  customerInsistsAfterDenial,
 } from "../domain/policies.js";
 export interface Outcome {
   reply: string | null;
@@ -362,9 +366,9 @@ export class Commands {
       if (settlement) {
         const reg = await this.s.region(c, settlement);
         if (reg.decision === "outside") return output(OUTSIDE);
-        if (reg.decision === "review")
-          return { ...output(HUMAN_REPLY), humanReason: "borderline_area" };
-        settlement = reg.name;
+        if (reg.decision === "review") {
+          settlement = await this.s.ensureLocation(c, reg.name, "review");
+        } else settlement = reg.name;
       }
       const floor = cmd.floor ?? null;
       const address = cmd.address ?? null;
@@ -781,16 +785,33 @@ export class Commands {
       return output(nextQuestion(r, phone).text, r);
     }
     if (cmd.type === "escalate" && !ctx.requests.length) {
-      if (cmd.reason !== "borderline_area")
-        return { ...output(HUMAN_REPLY), humanReason: cmd.reason };
+      // Borderline / unknown questions: open a request, park for team, keep talking.
       const r = await this.s.create(c, [], [party("donor", phone)], "donation");
-      r.status = "human";
-      r.human_reason = "borderline_area";
       await c.query(
         "UPDATE conversations SET selected_request_id=$2 WHERE id=$1",
         [ctx.conversation.id, r.id],
       );
-      return { ...output(HUMAN_REPLY, r), humanReason: "borderline_area" };
+      if (cmd.reason === "borderline_area") {
+        r.needs_distance_check = true;
+        r.team_notes = appendTeamNote(
+          r.team_notes,
+          `בדיקת מרחק (לפני פרטי יישוב): ${text.slice(0, 200)}`,
+        );
+        await this.s.save(c, r);
+        return output(
+          `${DISTANCE_REVIEW_REPLY}\n${nextQuestion(r, phone).text}`,
+          r,
+        );
+      }
+      r.team_notes = appendTeamNote(
+        r.team_notes,
+        `שאלה לצוות (${cmd.reason}): ${text.slice(0, 400)}`,
+      );
+      await this.s.save(c, r);
+      return output(
+        `${CHECK_LATER_REPLY}\n${nextQuestion(r, phone).text}`,
+        r,
+      );
     }
     if (cmd.type === "next" && !ctx.requests.length) {
       const town = mentionedAllowedSettlement(text);
@@ -801,7 +822,7 @@ export class Commands {
         /בית\s*שאן|beit\s+she'?an/i.test(text)
       )
         return output(
-          "באיזה יישוב בדיוק? אנחנו פועלים בבית שאן, מסילות, ירדנה, בית אלפא, טירת צבי, כפר רופין ומחולה.",
+          "באיזה יישוב בדיוק? אנחנו פועלים בבית שאן, מסילות, ירדנה, בית אלפא, טירת צבי, שדה אליהו, כפר רופין ומחולה.",
         );
       const pendingName = ctx.conversation.pending_counterparty_name;
       const handoffName = (() => {
@@ -1082,11 +1103,51 @@ export class Commands {
       );
     }
     if (cmd.type === "escalate") {
-      if (r.status !== "coordinated") {
-        r.status = "human";
-        r.human_reason = cmd.reason;
+      // Human handoff only when the customer insists after a clear denial.
+      if (customerInsistsAfterDenial(text)) {
+        if (r.status !== "coordinated") {
+          r.status = "human";
+          r.human_reason = "customer_insisted";
+        }
+        return { ...output(HUMAN_REPLY, r), humanReason: "customer_insisted" };
       }
-      return { ...output(HUMAN_REPLY, r), humanReason: cmd.reason };
+      if (cmd.reason === "borderline_area") {
+        r.needs_distance_check = true;
+        r.team_notes = appendTeamNote(
+          r.team_notes,
+          `בדיקת מרחק: ${text.slice(0, 200)}`,
+        );
+        if (r.status === "human") r.status = "collecting";
+        r.human_reason = null;
+        return output(
+          composeTurnReply(
+            `${DISTANCE_REVIEW_REPLY}\n${nextQuestion(r, phone).text}`,
+            null,
+            r,
+          ),
+          r,
+        );
+      }
+      if (cmd.reason === "evacuation") {
+        if (r.status !== "coordinated") {
+          r.status = "human";
+          r.human_reason = cmd.reason;
+        }
+        return { ...output(HUMAN_REPLY, r), humanReason: cmd.reason };
+      }
+      // Unknown / unclear questions: park for team, keep collecting.
+      r.team_notes = appendTeamNote(
+        r.team_notes,
+        `שאלה לצוות (${cmd.reason}): ${text.slice(0, 400)}`,
+      );
+      if (r.status === "human" && r.human_reason !== "customer_insisted") {
+        r.status = "collecting";
+        r.human_reason = null;
+      }
+      return output(
+        `${CHECK_LATER_REPLY}\n${nextQuestion(r, phone).text}`,
+        r,
+      );
     }
     if (cmd.type === "cancel") {
       if (cmd.choice === "ask") {
@@ -1208,6 +1269,7 @@ export class Commands {
       }
     }
     mutable(r);
+    let distanceReviewThisTurn = false;
     if (cmd.type === "details") {
       if (cmd.name || cmd.settlement || cmd.address || cmd.floor !== null)
         invalidateProposal(r);
@@ -1254,11 +1316,21 @@ export class Commands {
           return output(OUTSIDE, r);
         }
         if (reg.decision === "review") {
-          r.status = "human";
-          r.human_reason = "borderline_area";
-          return { ...output(HUMAN_REPLY, r), humanReason: "borderline_area" };
+          // Save the settlement, mark distance review, keep collecting.
+          p.settlement = await this.s.ensureLocation(c, reg.name, "review");
+          r.needs_distance_check = true;
+          distanceReviewThisTurn = true;
+          r.team_notes = appendTeamNote(
+            r.team_notes,
+            `בדיקת מרחק ליישוב: ${p.settlement}`,
+          );
+          if (r.status === "human") {
+            r.status = "collecting";
+            r.human_reason = null;
+          }
+        } else {
+          p.settlement = reg.name;
         }
-        p.settlement = reg.name;
       }
       if (cmd.name) {
         p.name = cmd.name;
@@ -1445,6 +1517,8 @@ export class Commands {
       r.verification_contacted = asked;
     }
     if (q.floorNote) ownParty(r, phone).floor_note_shown = true;
+    if (distanceReviewThisTurn)
+      return output(`${DISTANCE_REVIEW_REPLY}\n${q.text}`, r);
     return output(q.text, r);
   }
 }

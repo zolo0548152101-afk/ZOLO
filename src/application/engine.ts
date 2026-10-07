@@ -37,6 +37,7 @@ import {
   OUTSIDE,
   isOperationsAlert,
   customerCancelIntent,
+  customerInsistsAfterDenial,
   directHandoffIntent,
   mutable,
   nextQuestion,
@@ -56,6 +57,7 @@ import {
   probeReply,
   isSelfIntroText,
   stripRepeatedSelfIntro,
+  applyClaimGuard,
 } from "../domain/ai-guards.js";
 import { diffChangedFields, type ChangedField } from "../domain/field-map.js";
 import {
@@ -594,6 +596,25 @@ export class Engine {
       request ??
       ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
       (ctx.requests.length === 1 ? ctx.requests[0] : null);
+    // One ops alert per request (or per phone when no request yet).
+    const dedupe = r?.id
+      ? `human-alert:${r.id}`
+      : `human-alert-phone:${ctx.conversation.phone}`;
+    const already = await c.query(
+      "SELECT 1 FROM outbox WHERE dedupe_key=$1 LIMIT 1",
+      [dedupe],
+    );
+    if (already.rowCount) {
+      await this.s.event(
+        c,
+        ctx.message,
+        "system",
+        "human_escalation_suppressed",
+        { reason, dedupe },
+        r?.id ?? null,
+      );
+      return;
+    }
     const d = r?.parties.find((p) => p.role === "donor"),
       v = r?.parties.find((p) => p.role === "receiver");
     await this.s.outbound(
@@ -603,7 +624,7 @@ export class Engine {
         phone: this.s.config.ADMIN_PHONE,
         text: `נדרש טיפול אנושי\nמספר פנייה: ${r?.number ?? "טרם נפתחה"}\nטלפון: ${ctx.conversation.phone}\nפריט: ${r?.items.map((i) => i.description).join(", ") ?? "לא ידוע"}\nמסלול: ${d?.settlement ?? "לא ידוע"} → ${v?.settlement ?? "לא ידוע"}\nסיבה: ${reason}\nהודעת הלקוח האחרונה: ${(ctx.message.transcript ?? ctx.message.text).slice(0, 1500)}\nתשובת הבוט: ${reply ?? "לא נשלחה תגובה אוטומטית"}\nנא לחזור ללקוח.`,
       },
-      `human:${ctx.message.id}`,
+      dedupe,
       r?.id ?? null,
     );
     await this.s.event(
@@ -1419,8 +1440,36 @@ export class Engine {
             await this.s.outbound(c, ctx.message, { phone, text: `תמונה שמורה מפנייה ${current.number}`, media_id: mediaId }, `admin-status-media:${id}:${current.id}:${mediaId}`, current.id);
       } else if (isStatus(text)) { reply = statusText(ctx.requests); intent = "other"; }
       else if (ctx.conversation.mode === "human") {
+        // Already handed off — no repeat ops alerts. Keep collecting silently
+        // only if the customer insists again is already covered by mode=human.
         intent = "human_escalation";
-        await this.alert(c, ctx, "human_followup", null, null);
+        const open =
+          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+          (ctx.requests.length === 1 ? ctx.requests[0] : null);
+        reply = open
+          ? `הפנייה בטיפול אנושי. ${nextQuestion(open, phone).text}`
+          : "הפנייה בטיפול אנושי. נחזור אליך.";
+      } else if (
+        customerInsistsAfterDenial(text) &&
+        ctx.history.some(
+          (entry) =>
+            entry.role === "assistant" &&
+            (entry.content.includes(OUTSIDE) ||
+              /לא נוכל לסייע|מחוץ לאזור|לא במדיניות|אי אפשר/.test(entry.content)),
+        )
+      ) {
+        intent = "human_escalation";
+        const open =
+          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+          (ctx.requests.length === 1 ? ctx.requests[0] : null);
+        if (open && open.status !== "coordinated") {
+          open.status = "human";
+          open.human_reason = "customer_insisted";
+          await this.s.save(c, open);
+          request = open;
+        }
+        reply = HUMAN_REPLY;
+        reason = "customer_insisted";
       } else if (technicalReason || ctx.message.media_state === "failed") {
         intent = technicalReason ? "clarification" : "human_escalation";
         const selected =
@@ -2079,8 +2128,14 @@ export class Engine {
         // Reply manager owns customer wording. Do not replace it with the
         // canonical template when the model produced text.
         const phrased = (generated.text ?? "").trim();
-        text = phrased || committed.canonicalReply;
-        rejected = false;
+        const guarded = applyClaimGuard(
+          committed.canonicalReply,
+          phrased || committed.canonicalReply,
+          Boolean(committed.provenOperational),
+          committed.changedFields ?? [],
+        );
+        text = guarded.text;
+        rejected = guarded.rejected;
       } catch (e) {
         this.log.error({
           code: errorCode(e),
