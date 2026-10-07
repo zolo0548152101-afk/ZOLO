@@ -185,6 +185,22 @@ export function summarizeTurnChanges(
       .join(" ");
     return `מעולה, רשמתי ${place}`;
   }
+  const afterRecvSettlementNew = Boolean(
+    afterReceiver?.settlement &&
+      afterReceiver.settlement !== (beforeReceiver?.settlement ?? null),
+  );
+  const afterRecvAddressNew = Boolean(
+    afterReceiver?.address &&
+      afterReceiver.address !== (beforeReceiver?.address ?? null),
+  );
+  if (afterRecvAddressNew && afterReceiver?.address) {
+    const place = [afterReceiver.address, afterReceiver.settlement]
+      .filter(Boolean)
+      .join(" ");
+    return `מעולה, רשמתי יעד ${place}`;
+  }
+  if (afterRecvSettlementNew && afterReceiver?.settlement)
+    return `מעולה, רשמתי יעד ${afterReceiver.settlement}`;
   if (floorNew && afterDonor && afterDonor.floor !== null)
     return afterDonor.floor === 0
       ? "מעולה, רשמתי קומת קרקע"

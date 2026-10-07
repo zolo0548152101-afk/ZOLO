@@ -49,6 +49,7 @@ import {
   customerIntentClear,
   openingPhotoReply,
   summarizeTurnChanges,
+  composeTurnReply,
 } from "../domain/policies.js";
 import {
   CLARIFY_REPLY,
@@ -1985,6 +1986,17 @@ export class Engine {
         reply = request
           ? nextQuestion(request, phone).text || CLARIFY_REPLY
           : CLARIFY_REPLY;
+      // Safety net: always prefix this-turn DB ack (name/address/…) when
+      // commands forgot composeTurnReply or a later step overwrote it.
+      if (request && beforeRequest && reply?.trim()) {
+        const withAck = composeTurnReply(reply, beforeRequest, request);
+        if (withAck && withAck !== reply) reply = withAck;
+      }
+      // Never ship the old «חסר רק…» wording (canonical or model paraphrase).
+      if (reply)
+        reply = reply
+          .replace(/חסרה רק /gu, "חסרה ")
+          .replace(/חסר רק /gu, "חסר ");
       let customerOutboxId: string | null = null;
       customerOutboxId = await this.s.outbound(
         c,

@@ -995,6 +995,34 @@ export function rulePlan(ctx: Context): Plan | null {
     }
   }
 
+  // Bare personal name after we asked for the name (e.g. «שלי»).
+  if (!party.name) {
+    const prior = ctx.history.at(-1)?.content ?? "";
+    const askedName =
+      /חסר(?:ה)?(?:\s+רק)?\s+השם|מה שמך|נא לציין שם|שואלים לשמך|שם מלא/u.test(
+        prior,
+      );
+    const bare = norm(text).trim();
+    if (
+      askedName &&
+      looksLikePersonName(bare) &&
+      !/(?:רחוב|שכונ|קומה|בית\s*שאן|תמונה|כן|לא)/u.test(bare)
+    ) {
+      return plan(text, [
+        {
+          type: "details",
+          request_number: current.number,
+          role: party.role,
+          name: bare,
+          settlement: null,
+          address: null,
+          floor: null,
+          preferred_time: null,
+        },
+      ]);
+    }
+  }
+
   // A direct handoff commonly arrives as two WhatsApp messages: first the
   // item/name, then a phone number or contact card. Persist that second
   // message deterministically before asking the AI to phrase anything.
