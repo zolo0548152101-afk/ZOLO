@@ -1677,15 +1677,17 @@ export class Engine {
               }
               reply = result.reply;
               reason = result.humanReason;
-              intent = command.type === "counterparty"
-                ? "ask_verification"
-                : command.type === "details"
-                  ? "ask_details"
-                  : command.type === "donate" &&
-                      (/תמונה/.test(result.reply ?? "") ||
-                        result.request?.origin !== "direct")
-                    ? "ask_photo"
-                    : "acknowledge";
+              intent =
+                command.type === "counterparty" ||
+                command.type === "contact_counterparty"
+                  ? "ask_verification"
+                  : command.type === "details"
+                    ? "ask_details"
+                    : command.type === "donate" &&
+                        (/תמונה/.test(result.reply ?? "") ||
+                          result.request?.origin !== "direct")
+                      ? "ask_photo"
+                      : "acknowledge";
               await this.s.event(
                 c,
                 ctx.message,

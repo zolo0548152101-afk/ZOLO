@@ -926,6 +926,19 @@ export function nextQuestion(
       floorNote: false,
       missing: missingOf(r, "counterparty", p.role),
     };
+  const other = r.parties.find((x) => x.phone !== p.phone);
+  // After consent to contact the other party — wait for their role approval.
+  if (
+    r.origin === "direct" &&
+    r.verification_contacted &&
+    other &&
+    !other.approved_at
+  )
+    return {
+      text: `ממתינים לאישור של ${other.name ?? (other.role === "receiver" ? "המקבל" : "המוסר")}. נעדכן כשיתקבל.`,
+      floorNote: false,
+      missing: missingOf(r, "approved_at", other.role),
+    };
   const proposal = r.proposed_run_date;
   if (proposal && p.schedule_approved_date !== proposal) {
     const [year, month, day] = proposal.split("-");
@@ -935,7 +948,6 @@ export function nextQuestion(
       missing: missingOf(r, "schedule_approved_date", p.role),
     };
   }
-  const other = r.parties.find((x) => x.phone !== p.phone);
   if (proposal && other && other.schedule_approved_date !== proposal)
     return {
       text: `אישרת את מועד ההובלה בפנייה ${r.number}. ממתינים לאישור המועד של הצד השני.`,
