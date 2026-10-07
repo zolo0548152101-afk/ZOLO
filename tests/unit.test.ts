@@ -1099,7 +1099,7 @@ test("when a Beit Shean donor supplied a name, ask only for the missing address"
   p.name = "ישראל";
   p.address = null;
   const q = nextQuestion(r, p.phone);
-  assert.match(q.text, /חסרה רק הכתובת/);
+  assert.match(q.text, /חסרה הכתובת/);
   assert.doesNotMatch(q.text, /שם וכתובת/);
 });
 test("address plus floor never becomes a receiver name or repeats the settlement", () => {

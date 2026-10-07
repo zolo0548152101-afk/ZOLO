@@ -2190,6 +2190,10 @@ export class Engine {
         !text.includes(turnAck.slice(0, Math.min(12, turnAck.length)))
       )
         text = `${turnAck}\n${text}`.trim();
+      // Reply manager may reintroduce «חסר רק…» — strip after phrasing too.
+      text = text
+        .replace(/חסרה רק /gu, "חסרה ")
+        .replace(/חסר רק /gu, "חסר ");
       // Do not re-attach a full-chat “רשמתי מסירה…” — ack is only for this turn’s writes.
       auditedReply = text;
       await this.s.transaction(async (c) => {
