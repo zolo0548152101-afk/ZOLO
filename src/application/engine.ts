@@ -1356,8 +1356,9 @@ export class Engine {
             // After every command has been written, photo-first may still shape
             // the customer reply for a true open donation. It must never skip
             // AI DB writes, and it must never override a continuing direct/
-            // named-handoff reply (pending counterparty or origin=direct).
-            const explicitClarification = /כבר קיימת פנייה|הפרטים האלה כבר רשומים/.test(
+            // named-handoff reply (pending counterparty or origin=direct),
+            // nor the sticky replace/add soft-gate for a second item.
+            const explicitClarification = /כבר קיימת פנייה|הפרטים האלה כבר רשומים|במקום|בנוסף|אותו מקבל|מקבל אחר|עד שני רהיטים/.test(
               reply ?? "",
             );
             if (
@@ -1369,6 +1370,7 @@ export class Engine {
               !handoffTransitionPlanned &&
               !ctx.conversation.pending_counterparty_name &&
               !ctx.conversation.pending_counterparty_phone &&
+              !ctx.conversation.pending_extra_item &&
               !["cancelled", "rejected", "human", "closed", "coordinated"].includes(
                 request.status,
               )
