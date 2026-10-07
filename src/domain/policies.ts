@@ -371,10 +371,12 @@ export function grounded(plan: Plan, text: string): boolean {
   );
 }
 export function photoGate(r: Request): boolean {
+  // Open donations and direct handoffs both need a photo before details.
+  // Direct still skips the open-donation matching loop; it just asks for a
+  // picture of the item first (same customer-facing PHOTO_FIRST line).
   return (
-    r.origin === "donation" &&
+    (r.origin === "donation" || r.origin === "direct") &&
     r.parties.some((p) => p.role === "donor") &&
-    !r.parties.some((p) => p.role === "receiver") &&
     r.photo_ids.length === 0
   );
 }

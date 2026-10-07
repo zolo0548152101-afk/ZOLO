@@ -398,21 +398,10 @@ def main():
         problems.append(f"intro repeated {report['intro_count']} times")
     if report["path_ask_count"] > 1:
         problems.append(f"path asked {report['path_ask_count']} times")
-    if report["path_ask_count"] >= 1 and any(
-        "רוצה למסור" in t["text"] for t in transcript if t["who"] == "me"
-    ):
-        # Path ask after explicit donate is wrong if it appears at all after the burst
-        # Allow zero; flag if any path ask when donate was stated before first reply
-        first_bot = next((t for t in transcript if t["who"] == "bot"), None)
-        if first_bot and "למסור פריט" in first_bot["text"] and "לקבל פריט" in first_bot["text"]:
-            problems.append("first reply re-asked path despite רוצה למסור")
-    outbox_sent = [
-        line
-        for line in (snap.get("outbox") or "").split("\n")
-        if line and "|sent|" in line.replace("sent", "sent")
-    ]
-    # crude: count sent rows
-    sent_n = len([l for l in (snap.get("outbox") or "").split("\n") if l and "|sent|" in f"|{l}|".replace("||", "|") or (l and l.split("|")[2:3] == ["sent"])])
+    first_bot = next((t for t in transcript if t["who"] == "bot"), None)
+    if first_bot and "למסור פריט" in first_bot["text"] and "לקבל פריט" in first_bot["text"]:
+        problems.append("first reply re-asked path despite רוצה למסור")
+
     sent_rows = []
     for line in (snap.get("outbox") or "").split("\n"):
         if not line:
@@ -424,11 +413,28 @@ def main():
     if len(sent_rows) > 3:
         problems.append(f"too many sent outbox replies: {len(sent_rows)}")
 
+    parties = snap.get("parties") or ""
+    if "donor|584152101|ישראל" not in parties.replace(" ", ""):
+        # tolerate spacing from db dump
+        if "ישראל" not in parties or "donor" not in parties:
+            problems.append("donor_name ישראל missing")
+    if "536662043" not in parties:
+        problems.append("receiver phone 536662043 missing")
+    if "טל" not in parties:
+        problems.append("receiver name טל missing")
+
+    last_bot = next((t for t in reversed(transcript) if t["who"] == "bot"), None)
+    if not last_bot or "תמונה" not in last_bot["text"]:
+        problems.append(f"expected photo ask next, got: {(last_bot or {}).get('text')}")
+
     report["problems"] = problems
     with open(OUT, "w") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
     print(f"REPORT {OUT}", flush=True)
-    print(f"intro_count={report['intro_count']} path_ask_count={report['path_ask_count']} problems={problems}", flush=True)
+    print(
+        f"intro_count={report['intro_count']} path_ask_count={report['path_ask_count']} problems={problems}",
+        flush=True,
+    )
     if problems:
         raise SystemExit("STOP: " + "; ".join(problems))
     print("OK burst retest passed", flush=True)

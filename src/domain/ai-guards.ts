@@ -129,17 +129,23 @@ export function conversationAlreadyIntroduced(
   );
 }
 
+export function isSelfIntroText(text: string): boolean {
+  return SELF_INTRO.test(text);
+}
+
 /**
  * Drop a repeated self-intro when the conversation already had one.
  * Keeps the substantive ask (photo / details / etc.).
+ * `alreadyIntroduced` may come from outbox (sent replies) when history still
+ * has no open request — the first intro happens before a request row exists.
  */
 export function stripRepeatedSelfIntro(
   text: string,
   history: { role: string; content: string }[],
+  alreadyIntroduced = conversationAlreadyIntroduced(history),
 ): string {
   const raw = text.trim();
-  if (!raw || !SELF_INTRO.test(raw) || !conversationAlreadyIntroduced(history))
-    return raw;
+  if (!raw || !SELF_INTRO.test(raw) || !alreadyIntroduced) return raw;
   const paragraphs = raw.split(/\n\s*\n/);
   if (paragraphs.length > 1 && SELF_INTRO.test(paragraphs[0] ?? "")) {
     const rest = paragraphs.slice(1).join("\n\n").trim();

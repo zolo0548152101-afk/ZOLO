@@ -45,6 +45,7 @@ import {
   CLARIFY_REPLY,
   FAULT_REPLY,
   probeReply,
+  isSelfIntroText,
   stripRepeatedSelfIntro,
 } from "../domain/ai-guards.js";
 import { diffChangedFields, type ChangedField } from "../domain/field-map.js";
@@ -1417,26 +1418,19 @@ export class Engine {
                 else if (!reply) reply = PHOTO_THANKS;
               }
             }
-            // After every command has been written, photo-first may still shape
-            // the customer reply for a true open donation. It must never skip
-            // AI DB writes, and it must never override a continuing direct/
-            // named-handoff reply (pending counterparty or origin=direct),
-            // nor the sticky replace/add soft-gate for a second item.
-            // Soft-gate questions only — do not match confirmations like
-            // "פתחתי פנייה … למקבל אחר" which must still get PHOTO_FIRST.
+            // After every command has been written, photo-first shapes the
+            // opening reply for donations and direct handoffs that still have
+            // no photo. Soft-gate questions (במקום/בנוסף) stay untouched.
             const explicitClarification =
-              /כבר קיימת פנייה|הפרטים האלה כבר רשומים|כתוב "במקום" או "בנוסף"|כתוב "אותו מקבל" או "מקבל אחר"|עד שני רהיטים לכל מוסר/.test(
+              /כבר קיימת פנייה|הפרטים האלה כבר רשומים|כתוב "במקום" או "בנוסף"|כתוב "אותו מקבל" או "מקבל אחר"|עד שני רהיטים לכל מוסר|רשמתי שמדובר במסירה|מה הפריט שברצונך למסור/.test(
                 reply ?? "",
               );
             if (
               request &&
               !reason &&
               !explicitClarification &&
-              request.origin === "donation" &&
               photoGate(request) &&
               !handoffTransitionPlanned &&
-              !ctx.conversation.pending_counterparty_name &&
-              !ctx.conversation.pending_counterparty_phone &&
               !ctx.conversation.pending_extra_item &&
               !["cancelled", "rejected", "human", "closed", "coordinated"].includes(
                 request.status,
@@ -1671,8 +1665,8 @@ export class Engine {
         `SELECT m.id FROM messages m
           WHERE m.conversation_id=(SELECT conversation_id FROM messages WHERE id=$1)
             AND m.seq>(SELECT seq FROM messages WHERE id=$1)
-            AND m.processed_at IS NULL AND m.kind='text'
-          ORDER BY m.seq LIMIT 1`,
+            AND m.processed_at IS NULL AND m.kind IN ('text','contact')
+            ORDER BY m.seq LIMIT 1`,
         [id],
       );
       if (newerText.rows[0]) {
@@ -1717,15 +1711,32 @@ export class Engine {
           stage: "customer_phrase",
         });
       }
-      // Opening a second request in the same chat must not re-introduce the bot.
-      text = stripRepeatedSelfIntro(text, ctx.history);
+      // Intro-once: check sent outbox for this phone, not only request history.
+      // The first self-intro is often sent before any request row exists.
+      const priorIntro = await this.s.pool.query<{ text: string }>(
+        `SELECT o.text FROM outbox o
+          JOIN messages current ON current.id=$2
+         WHERE o.phone=$1
+           AND o.id <> $3
+           AND o.state IN ('sent','shadow','simulation')
+           AND o.created_at <= current.received_at
+           AND (o.text LIKE '%סוכן האוטומטי%' OR o.text LIKE '%בהרצה ניסיונית%')
+         ORDER BY o.seq DESC LIMIT 1`,
+        [ctx.conversation.phone, id, committed.customerOutboxId],
+      );
+      const introduced =
+        priorIntro.rowCount > 0 ||
+        ctx.history.some(
+          (entry) => entry.role === "assistant" && isSelfIntroText(entry.content),
+        );
+      text = stripRepeatedSelfIntro(text, ctx.history, introduced);
       const lang = conversationLanguage(ctx);
       const fromTemplate = localizeCustomer(committed.canonicalReply, lang);
       // A fixed template in the customer's language wins over a Hebrew paraphrase.
       text = fromTemplate !== committed.canonicalReply
         ? fromTemplate
         : localizeCustomer(text, lang);
-      text = stripRepeatedSelfIntro(text, ctx.history);
+      text = stripRepeatedSelfIntro(text, ctx.history, introduced);
       await this.s.transaction(async (c) => {
         const stillNewer = await c.query<{ id: string }>(
           `SELECT m.id FROM messages m

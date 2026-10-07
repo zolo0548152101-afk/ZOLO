@@ -709,6 +709,8 @@ export class Commands {
             phone: p.phone,
             text: `נפתחה פנייה ${r.number} לגבי ${r.items.map((i) => i.description).join(", ")}. נא לאשר את חלקך ב${p.role === "donor" ? "מסירה" : "קבלה"}. ההובלות בימי שלישי 16:00–20:00, ובדרך כלל עד ${DEFAULT_TRANSPORT_CAPACITY} הובלות בכל יום שלישי. מעבר לכך נבקש תחילה אישור מנהל. נעדכן.`,
           });
+      // Opening order: photo first (open donation or direct handoff).
+      if (photoGate(r)) return output(PHOTO_FIRST, r);
       return output(nextQuestion(r, phone).text, r);
     }
     if (cmd.type === "interest") {

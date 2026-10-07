@@ -355,6 +355,31 @@ export class Store {
         role: "assistant",
         content: latest.rows[0].text.slice(0, 2000),
       });
+    // Self-intro is often the first sent outbox before any request exists.
+    // Mirror it into history from outbox so intro-once does not depend on a
+    // request-scoped message.reply window.
+    const introOutbox = await c.query<{ text: string }>(
+      `SELECT o.text FROM outbox o JOIN messages current ON current.id=$2
+       LEFT JOIN conversation_resets cr ON cr.conversation_id=current.conversation_id
+       WHERE o.phone=$1 AND o.state IN ('sent','shadow','simulation')
+         AND o.created_at<=current.received_at
+         AND (cr.reset_at IS NULL OR o.created_at>cr.reset_at)
+         AND (o.text LIKE '%סוכן האוטומטי%' OR o.text LIKE '%בהרצה ניסיונית%')
+       ORDER BY o.seq ASC LIMIT 3`,
+      [message.phone, id],
+    );
+    for (const row of introOutbox.rows) {
+      if (
+        !history.some(
+          (entry) =>
+            entry.role === "assistant" && entry.content.slice(0, 80) === row.text.slice(0, 80),
+        )
+      )
+        history.unshift({
+          role: "assistant",
+          content: row.text.slice(0, 2000),
+        });
+    }
     // Also surface a recent outside-area rejection when nothing else is open,
     // even without explicit "טעיתי" wording — customers often just resend the
     // correct town.
