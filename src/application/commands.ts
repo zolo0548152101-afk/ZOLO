@@ -26,6 +26,7 @@ import {
   photoGate,
   openingPhotoReply,
   composeTurnReply,
+  PHOTO_STATUS,
   photoAskAlreadySent,
   photoDeclined,
   readyToAskContactCounterparty,
@@ -346,9 +347,12 @@ export class Commands {
         ctx.conversation.pending_counterparty_name = pending.counterparty_name;
       }
       await this.clearPendingExtra(c, ctx);
-      // Soft photo nudge once; ack only fields written in this create.
-      if (photoGate(r) && !photoAskAlreadySent(ctx.history))
+      // Soft photo nudge once; persist «בוקשה» so photoGate never re-fires.
+      if (photoGate(r) && !photoAskAlreadySent(ctx.history)) {
+        r.photo_status = PHOTO_STATUS.ASKED;
+        await this.s.save(c, r);
         return output(openingPhotoReply(r, phone, null), r);
+      }
       return output(composeTurnReply(nextQuestion(r, phone).text, null, r), r);
     }
     if (cmd.type === "status") return output(statusText(ctx.requests));
@@ -724,13 +728,16 @@ export class Commands {
             phone: p.phone,
             text: `נפתחה פנייה ${r.number} לגבי ${r.items.map((i) => i.description).join(", ")}. נא לאשר את חלקך ב${p.role === "donor" ? "מסירה" : "קבלה"}. ההובלות בימי שלישי 16:00–20:00, ובדרך כלל עד ${DEFAULT_TRANSPORT_CAPACITY} הובלות בכל יום שלישי. מעבר לכך נבקש תחילה אישור מנהל. נעדכן.`,
           });
-      // Soft optional photo ask once; ack only this turn’s writes.
+      // Soft optional photo ask once; persist «בוקשה» so photoGate never re-fires.
       if (
         photoGate(r) &&
         !photoAskAlreadySent(ctx.history) &&
         !photoDeclined(ctx.message.transcript ?? ctx.message.text)
-      )
+      ) {
+        r.photo_status = PHOTO_STATUS.ASKED;
+        await this.s.save(c, r);
         return output(openingPhotoReply(r, phone, null), r);
+      }
       return output(composeTurnReply(nextQuestion(r, phone).text, null, r), r);
     }
     if (cmd.type === "interest") {

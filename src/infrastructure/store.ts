@@ -149,7 +149,7 @@ export class Store {
     const base = await c.query<
       Omit<Request, "parties" | "items" | "photo_ids">
     >(
-      `SELECT id,number::int,version,status,origin,verification_contacted,run_date::text,proposed_run_date::text,earliest_run_date::text,preferred_time,represents_both_parties,closed_at::text,human_reason,created_at::text FROM requests WHERE id=$1 ${lock ? "FOR UPDATE" : ""}`,
+      `SELECT id,number::int,version,status,origin,verification_contacted,run_date::text,proposed_run_date::text,earliest_run_date::text,preferred_time,represents_both_parties,closed_at::text,human_reason,photo_status,created_at::text FROM requests WHERE id=$1 ${lock ? "FOR UPDATE" : ""}`,
       [id],
     );
     if (!base.rows[0]) throw new AppError("request_not_found", 404);
@@ -463,6 +463,7 @@ export class Store {
       items,
       parties,
       photo_ids: [],
+      photo_status: "לא בוקשה",
       run_date: null,
       proposed_run_date: null,
       earliest_run_date: null,
@@ -490,7 +491,7 @@ export class Store {
     )
       r.represents_both_parties = true;
     const result = await c.query(
-      `UPDATE requests SET version=version+1,status=$2,origin=$3,run_date=$4,proposed_run_date=$12,human_reason=$5,preferred_time=$7,earliest_run_date=$8,verification_contacted=$9,represents_both_parties=$10,closed_at=$11,updated_at=clock_timestamp() WHERE id=$1 AND version=$6`,
+      `UPDATE requests SET version=version+1,status=$2,origin=$3,run_date=$4,proposed_run_date=$12,human_reason=$5,preferred_time=$7,earliest_run_date=$8,verification_contacted=$9,represents_both_parties=$10,closed_at=$11,photo_status=$13,updated_at=clock_timestamp() WHERE id=$1 AND version=$6`,
       [
         r.id,
         r.status,
@@ -504,6 +505,7 @@ export class Store {
         r.represents_both_parties ?? false,
         r.closed_at,
         r.proposed_run_date,
+        r.photo_status ?? "לא בוקשה",
       ],
     );
     if (result.rowCount !== 1) throw new AppError("version_conflict", 409);
@@ -800,6 +802,7 @@ export class Store {
       [r.id, m.media_id, m.phone],
     );
     if (!r.photo_ids.includes(m.media_id)) r.photo_ids.push(m.media_id);
+    r.photo_status = "התקבלה";
   }
   async matchPhoto(
     c: pg.PoolClient,

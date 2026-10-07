@@ -1,5 +1,6 @@
 import {
   AppError,
+  type PhotoStatus,
   type Request,
   type Item,
   type Party,
@@ -16,6 +17,13 @@ export const PHOTO_FIRST = "בשמחה. כדי להמשיך, נא לשלוח ת�
 /** Soft photo nudge: optional, never blocks the next missing detail. */
 export const SOFT_PHOTO_ASK =
   "אם יש תמונה של הפריט — אפשר לשלוח עכשיו; אם אין, נמשיך בפרטים.";
+/** Persisted request.photo_status values (Hebrew, match DB CHECK). */
+export const PHOTO_STATUS = {
+  NOT_ASKED: "לא בוקשה",
+  ASKED: "בוקשה",
+  NO_PHOTO: "אין תמונה",
+  RECEIVED: "התקבלה",
+} as const satisfies Record<string, PhotoStatus>;
 /** Same-day pickup is not a promise. Deliveries stay on the Tuesday window. */
 export const SAME_DAY_WINDOW =
   "אי אפשר לאסוף היום. ההובלות רק ביום שלישי בין 16:00 ל־20:00.";
@@ -29,6 +37,14 @@ export function photoDeclined(text: string): boolean {
     /אין(?:\s+לי)?\s+תמונה|בלי\s+תמונה|לא\s+(?:אשלח|שולח|יש)\s+תמונה|תמונה\s+אין|כרגע\s+אין(?:\s+לי)?(?:\s+תמונה)?|אין\s+כרגע/.test(
       t,
     ) || /no\s+photo|don'?t\s+have\s+(?:a\s+)?photo/i.test(text)
+  );
+}
+/** After a one-time ask, any non-photo reply closes the photo gate. */
+export function photoStatusSkipsGate(status: PhotoStatus | undefined): boolean {
+  return (
+    status === PHOTO_STATUS.ASKED ||
+    status === PHOTO_STATUS.NO_PHOTO ||
+    status === PHOTO_STATUS.RECEIVED
   );
 }
 /**
@@ -547,12 +563,13 @@ export function grounded(plan: Plan, text: string): boolean {
   );
 }
 export function photoGate(r: Request): boolean {
-  // Donations and direct handoffs may soft-ask for a photo while none is stored.
-  // Direct never blocks on the photo — the ask is optional and non-sticky.
+  // Ask at most once while photo_status is still «לא בוקשה».
+  // Once «בוקשה» / «אין תמונה» / «התקבלה», never fire again on this request.
   return (
     (r.origin === "donation" || r.origin === "direct") &&
     r.parties.some((p) => p.role === "donor") &&
-    r.photo_ids.length === 0
+    r.photo_ids.length === 0 &&
+    (r.photo_status ?? PHOTO_STATUS.NOT_ASKED) === PHOTO_STATUS.NOT_ASKED
   );
 }
 export function isClosed(r: Request): boolean {

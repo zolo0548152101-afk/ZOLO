@@ -208,6 +208,8 @@ export interface VerificationState {
   role: Role;
   state: string;
 }
+/** Photo ask lifecycle on a request (Hebrew values persisted in DB). */
+export type PhotoStatus = "לא בוקשה" | "בוקשה" | "אין תמונה" | "התקבלה";
 export interface Request {
   id: string;
   number: number;
@@ -218,6 +220,8 @@ export interface Request {
   items: Item[];
   parties: Party[];
   photo_ids: string[];
+  /** לא בוקשה → בוקשה → אין תמונה | התקבלה */
+  photo_status: PhotoStatus;
   locations?: RequestLocation[];
   verification_states?: VerificationState[];
   run_date: string | null;

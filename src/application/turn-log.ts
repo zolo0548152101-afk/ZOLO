@@ -2,8 +2,10 @@ import type pg from "pg";
 import type { Context, Plan, Request } from "../domain/types.js";
 import {
   PHOTO_FIRST,
+  PHOTO_STATUS,
   SOFT_PHOTO_ASK,
   photoGate,
+  photoStatusSkipsGate,
 } from "../domain/policies.js";
 import { isSelfIntroText, CLARIFY_REPLY } from "../domain/ai-guards.js";
 
@@ -43,6 +45,7 @@ function partySnap(r: Request | null | undefined) {
     status: r.status,
     origin: r.origin,
     photo_ids: r.photo_ids,
+    photo_status: r.photo_status,
     items: r.items.map((i) => ({
       kind: i.kind,
       description: i.description,
@@ -109,35 +112,48 @@ export function observePolicies(
     null;
   const policies: Record<string, unknown> = {};
 
-  if (selected && photoGate(selected)) {
+  const askedThisTurn =
+    opts.intent === "ask_photo" ||
+    Boolean(opts.photoHold) ||
+    reply.includes(PHOTO_FIRST) ||
+    reply.includes(SOFT_PHOTO_ASK);
+  if (askedThisTurn || (selected && photoGate(selected))) {
     policies.photoGate = {
       fired: true,
-      why: `origin=${selected.origin}; photo_ids=${selected.photo_ids.length}; status=${selected.status}`,
-      shaped_reply: reply.includes(PHOTO_FIRST) || opts.intent === "ask_photo",
+      why: selected
+        ? `origin=${selected.origin}; photo_status=${selected.photo_status}; photo_ids=${selected.photo_ids.length}; status=${selected.status}`
+        : "photo ask this turn",
+      shaped_reply: askedThisTurn,
     };
   } else {
+    const status = selected?.photo_status ?? PHOTO_STATUS.NOT_ASKED;
+    const skipReason = photoStatusSkipsGate(status)
+      ? status === PHOTO_STATUS.ASKED
+        ? "photo already asked once (בוקשה)"
+        : status === PHOTO_STATUS.NO_PHOTO
+          ? "customer has no photo (אין תמונה)"
+          : "photo already received (התקבלה)"
+      : selected
+        ? `origin=${selected.origin}; photo_status=${status}; photo_ids=${selected.photo_ids.length}`
+        : "no open donation/direct awaiting first photo ask";
     policies.photoGate = {
       fired: false,
-      why: selected
-        ? `origin=${selected.origin}; photo_ids=${selected.photo_ids.length}`
-        : "no open donation/direct without photo",
+      why: skipReason,
     };
   }
 
-  const photoFirst =
-    reply.includes(PHOTO_FIRST) ||
-    reply.includes(SOFT_PHOTO_ASK) ||
-    opts.intent === "ask_photo" ||
-    Boolean(opts.photoHold);
+  const photoFirst = askedThisTurn;
   policies.PHOTO_FIRST = {
     fired: photoFirst,
     why: photoFirst
       ? opts.photoHold
         ? "holdingForPhoto soft nudge (non-sticky)"
         : reply.includes(SOFT_PHOTO_ASK)
-          ? "soft optional photo ask with summary"
+          ? "soft optional photo ask once"
           : "photo ask present in reply"
-      : "not applied this turn",
+      : selected && photoStatusSkipsGate(selected.photo_status)
+        ? `skipped: photo_status=${selected.photo_status}`
+        : "not applied this turn",
   };
 
   const introInReply = isSelfIntroText(reply);

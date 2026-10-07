@@ -29,6 +29,7 @@ import {
   statusText,
   PHOTO_THANKS,
   PHOTO_FIRST,
+  PHOTO_STATUS,
   SOFT_PHOTO_ASK,
   SAME_DAY_WINDOW,
   sameDayDemand,
@@ -43,6 +44,7 @@ import {
   readyToProposeSchedule,
   photoDeclined,
   photoAskAlreadySent,
+  photoStatusSkipsGate,
   customerIntentClear,
   composeTurnReply,
   openingPhotoReply,
@@ -949,20 +951,28 @@ export class Engine {
     return true;
   }
 
-  /** After a soft photo ask: decline or other text → summarize + next missing field. */
+  /** After a soft photo ask: decline or other text → next missing field (no re-ask). */
   private softContinuePastPhoto(ctx: Context, text: string): boolean {
     if (!text.trim() || customerCancelIntent(text)) return false;
+    const open = (request: Request) =>
+      ![
+        "coordinated",
+        "closed",
+        "cancelled",
+        "rejected",
+        "human",
+        "cancel_pending",
+      ].includes(request.status);
+    // Already asked once — any follow-up text continues past photo.
+    if (
+      ctx.requests.some(
+        (request) =>
+          open(request) && request.photo_status === PHOTO_STATUS.ASKED,
+      )
+    )
+      return true;
     const waiting = ctx.requests.some(
-      (request) =>
-        photoGate(request) &&
-        ![
-          "coordinated",
-          "closed",
-          "cancelled",
-          "rejected",
-          "human",
-          "cancel_pending",
-        ].includes(request.status),
+      (request) => photoGate(request) && open(request),
     );
     if (!waiting) return false;
     return (
@@ -990,7 +1000,20 @@ export class Engine {
         !request ||
         photoDeclined(text) ||
         photoAskAlreadySent(ctx.history) ||
-        request.origin === "direct";
+        request.origin === "direct" ||
+        photoStatusSkipsGate(request.photo_status);
+      if (request && continuePast) {
+        if (
+          request.photo_status === PHOTO_STATUS.NOT_ASKED ||
+          request.photo_status === PHOTO_STATUS.ASKED
+        ) {
+          request.photo_status = PHOTO_STATUS.NO_PHOTO;
+          await this.s.save(c, request);
+        }
+      } else if (request && photoGate(request)) {
+        request.photo_status = PHOTO_STATUS.ASKED;
+        await this.s.save(c, request);
+      }
       const photoReply = this.voiced(
         ctx,
         request
@@ -1033,6 +1056,15 @@ export class Engine {
             !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
         ) ??
         null;
+      if (
+        request &&
+        (request.photo_status === PHOTO_STATUS.ASKED ||
+          (request.photo_status === PHOTO_STATUS.NOT_ASKED &&
+            photoAskAlreadySent(ctx.history)))
+      ) {
+        request.photo_status = PHOTO_STATUS.NO_PHOTO;
+        await this.s.save(c, request);
+      }
       const reply = this.voiced(
         ctx,
         request
@@ -1599,7 +1631,9 @@ export class Engine {
                 ? "ask_verification"
                 : command.type === "details"
                   ? "ask_details"
-                  : command.type === "donate" && result.request?.origin !== "direct"
+                  : command.type === "donate" &&
+                      (/תמונה/.test(result.reply ?? "") ||
+                        result.request?.origin !== "direct")
                     ? "ask_photo"
                     : "acknowledge";
               await this.s.event(
@@ -1630,6 +1664,7 @@ export class Engine {
               index++;
               if (reason || request?.status === "rejected") break;
             }
+            let attachedPhotoThisTurn = false;
             if (request) {
               const attached = await c.query<{
                 id: string;
@@ -1659,22 +1694,35 @@ export class Engine {
                 }
               }
               if (attached.rows.length && request.photo_ids.length) {
+                attachedPhotoThisTurn = true;
                 if (request.parties.length === 1 && request.origin === "donation")
                   request.status = "available";
+                request.photo_status = PHOTO_STATUS.RECEIVED;
                 await this.s.save(c, request);
                 if (reply && !reply.includes(PHOTO_THANKS))
                   reply = `${PHOTO_THANKS}\n${reply}`;
                 else if (!reply) reply = PHOTO_THANKS;
               }
             }
-            // Soft optional photo ask once. Never replace a rich reply with the
-            // fixed PHOTO_FIRST line, and never stick when the user declines.
+            // Soft optional photo ask once. Persist «בוקשה»; never re-ask after that.
             const explicitClarification =
               /כבר קיימת פנייה|הפרטים האלה כבר רשומים|כתוב "במקום" או "בנוסף"|כתוב "אותו מקבל" או "מקבל אחר"|עד שני רהיטים לכל מוסר|רשמתי שמדובר במסירה|מה הפריט שברצונך למסור/.test(
                 reply ?? "",
               );
             const photoAsked = photoAskAlreadySent(ctx.history);
             const declinedPhoto = photoDeclined(text);
+            // Entered turn already «בוקשה»: any non-photo answer → «אין תמונה».
+            // Do not flip on the same turn we just asked (before was still לא בוקשה).
+            if (
+              request &&
+              !reason &&
+              beforeRequest?.photo_status === PHOTO_STATUS.ASKED &&
+              ctx.message.kind !== "image" &&
+              !attachedPhotoThisTurn
+            ) {
+              request.photo_status = PHOTO_STATUS.NO_PHOTO;
+              await this.s.save(c, request);
+            }
             if (
               request &&
               !reason &&
@@ -1702,11 +1750,24 @@ export class Engine {
                   reply = ack ? `${ack}\n${reply}\n${SOFT_PHOTO_ASK}` : `${reply}\n${SOFT_PHOTO_ASK}`;
                 }
                 intent = "ask_photo";
+                request.photo_status = PHOTO_STATUS.ASKED;
+                await this.s.save(c, request);
               } else {
-                // Already asked or declined — next missing field, no repeated summary.
+                // Declined before ask persisted — mark no photo and continue.
+                request.photo_status = PHOTO_STATUS.NO_PHOTO;
+                await this.s.save(c, request);
                 reply = nextQuestion(request, phone).text;
                 intent = "ask_details";
               }
+            } else if (
+              request &&
+              !reason &&
+              photoStatusSkipsGate(request.photo_status) &&
+              (reply?.includes(PHOTO_FIRST) || reply?.includes(SOFT_PHOTO_ASK))
+            ) {
+              // Never re-surface a photo ask after the gate closed.
+              reply = nextQuestion(request, phone).text;
+              if (intent === "ask_photo") intent = "ask_details";
             }
             if (
               reply &&
@@ -1864,15 +1925,9 @@ export class Engine {
           intent === "acknowledge" ||
           /^רשמתי מסירה/.test(reply ?? ""))
       ) {
-        const declinedPhoto = photoDeclined(text);
-        const photoAsked = photoAskAlreadySent(ctx.history);
+        // Keep this-turn soft ask when intent is ask_photo; never re-open gate.
         const ask =
-          intent === "ask_photo" &&
-          photoGate(request) &&
-          !declinedPhoto &&
-          !photoAsked
-            ? SOFT_PHOTO_ASK
-            : nextQuestion(request, phone).text;
+          intent === "ask_photo" ? SOFT_PHOTO_ASK : nextQuestion(request, phone).text;
         const rebuilt = composeTurnReply(ask, beforeRequest, request);
         if (rebuilt.trim()) reply = rebuilt;
       }

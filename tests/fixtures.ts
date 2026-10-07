@@ -205,6 +205,7 @@ export function sampleRequest(): Request {
     ],
     parties: [p("donor", "501111111"), p("receiver", "502222222")],
     photo_ids: [randomUUID()],
+    photo_status: "התקבלה",
     run_date: null,
     proposed_run_date: "2026-09-15",
     earliest_run_date: null,
