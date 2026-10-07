@@ -639,14 +639,23 @@ export function rulePlan(ctx: Context): Plan | null {
     // as direct and never enters the open-donation photo gate.
     const other = selfMove
       ? ctx.conversation.phone
-      : namedRecipientPhone(text) ?? standalonePhone(text);
+      : namedRecipientPhone(text) ??
+        standalonePhone(text) ??
+        ctx.message.contacts[0]?.phone ??
+        null;
     const commands: Command[] = [
       {
         type: "donate",
         items: [{ ...item, quantity: 1 }],
         counterparty_phone: other,
-        counterparty_name: namedRecipientName(text),
-        direct: Boolean(other) || directHandoffIntent(text),
+        counterparty_name:
+          namedRecipientName(text) ??
+          ctx.message.contacts[0]?.name?.replace(/^אא\s+/u, "").trim() ??
+          null,
+        direct:
+          Boolean(other) ||
+          directHandoffIntent(text) ||
+          Boolean(ctx.message.contacts[0]?.phone),
         free: true,
         working:
           /שבור|מקולקל|לא\s+(?:תקין|שמיש|עובד)/.test(text)
