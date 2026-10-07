@@ -75,6 +75,16 @@ import {
   type TurnFate,
 } from "./turn-log.js";
 
+/** Drop the misleading «רק» from missing-detail wording (canonical or model). */
+export function stripRakOnlyClaims(text: string): string {
+  return text
+    .replaceAll("רק השם", "השם")
+    .replaceAll("רק הכתובת", "הכתובת")
+    .replaceAll("רק תיאור", "תיאור")
+    .replace(/חסרה\s+רק\s+/gu, "חסרה ")
+    .replace(/חסר\s+רק\s+/gu, "חסר ");
+}
+
 export class Engine {
   private readonly commands: Commands;
   constructor(
@@ -1993,10 +2003,7 @@ export class Engine {
         if (withAck && withAck !== reply) reply = withAck;
       }
       // Never ship the old «חסר רק…» wording (canonical or model paraphrase).
-      if (reply)
-        reply = reply
-          .replace(/חסרה רק /gu, "חסרה ")
-          .replace(/חסר רק /gu, "חסר ");
+      if (reply) reply = stripRakOnlyClaims(reply);
       let customerOutboxId: string | null = null;
       customerOutboxId = await this.s.outbound(
         c,
@@ -2191,9 +2198,7 @@ export class Engine {
       )
         text = `${turnAck}\n${text}`.trim();
       // Reply manager may reintroduce «חסר רק…» — strip after phrasing too.
-      text = text
-        .replace(/חסרה רק /gu, "חסרה ")
-        .replace(/חסר רק /gu, "חסר ");
+      text = stripRakOnlyClaims(text);
       // Do not re-attach a full-chat “רשמתי מסירה…” — ack is only for this turn’s writes.
       auditedReply = text;
       await this.s.transaction(async (c) => {
@@ -2218,7 +2223,8 @@ export class Engine {
           return;
         }
         await c.query(
-          "UPDATE outbox SET text=$2,format_state='ready' WHERE id=$1 AND format_state='pending'",
+          // Update text even if a race flipped format_state to ready already.
+          "UPDATE outbox SET text=$2,format_state='ready' WHERE id=$1 AND state='pending'",
           [committed.customerOutboxId, text],
         );
         await c.query(
