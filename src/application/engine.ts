@@ -1725,7 +1725,7 @@ export class Engine {
         [ctx.conversation.phone, id, committed.customerOutboxId],
       );
       const introduced =
-        priorIntro.rowCount > 0 ||
+        (priorIntro.rowCount ?? 0) > 0 ||
         ctx.history.some(
           (entry) => entry.role === "assistant" && isSelfIntroText(entry.content),
         );
