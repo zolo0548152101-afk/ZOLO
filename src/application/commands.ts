@@ -15,6 +15,7 @@ import {
   HUMAN_REPLY,
   DEFAULT_TRANSPORT_CAPACITY,
   OUTSIDE,
+  PHOTO_FIRST,
   canonicalPhone,
   donationIntent,
   ambiguousStreetCity,
@@ -23,6 +24,7 @@ import {
   mutable,
   appliance,
   nextQuestion,
+  photoGate,
   readyToAskContactCounterparty,
   statusText,
   nextTuesday,
@@ -318,11 +320,9 @@ export class Commands {
         ctx.conversation.pending_counterparty_name = pending.counterparty_name;
       }
       await this.clearPendingExtra(c, ctx);
-      const q = nextQuestion(r, phone);
-      return output(
-        `פתחתי פנייה נפרדת (${r.number}) עבור ${describeItems(r.items)} למקבל אחר. ${q.text}`.trim(),
-        r,
-      );
+      // Same opening order as a first donation: photo before condition/details.
+      if (photoGate(r)) return output(PHOTO_FIRST, r);
+      return output(nextQuestion(r, phone).text, r);
     }
     if (cmd.type === "status") return output(statusText(ctx.requests));
     if (cmd.type === "seek") {

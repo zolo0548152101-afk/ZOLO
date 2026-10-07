@@ -1358,9 +1358,12 @@ export class Engine {
             // AI DB writes, and it must never override a continuing direct/
             // named-handoff reply (pending counterparty or origin=direct),
             // nor the sticky replace/add soft-gate for a second item.
-            const explicitClarification = /כבר קיימת פנייה|הפרטים האלה כבר רשומים|במקום|בנוסף|אותו מקבל|מקבל אחר|עד שני רהיטים/.test(
-              reply ?? "",
-            );
+            // Soft-gate questions only — do not match confirmations like
+            // "פתחתי פנייה … למקבל אחר" which must still get PHOTO_FIRST.
+            const explicitClarification =
+              /כבר קיימת פנייה|הפרטים האלה כבר רשומים|כתוב "במקום" או "בנוסף"|כתוב "אותו מקבל" או "מקבל אחר"|עד שני רהיטים לכל מוסר/.test(
+                reply ?? "",
+              );
             if (
               request &&
               !reason &&
