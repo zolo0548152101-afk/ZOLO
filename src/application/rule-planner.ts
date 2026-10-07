@@ -498,9 +498,43 @@ function hasPartialNamedHandoff(ctx: Context): boolean {
  * Handles the predictable parts of the conversation without an external model.
  * Returning null intentionally delegates only genuinely free-form language to AI.
  */
+function replaceExtraChoice(text: string): "replace" | "add" | null {
+  const t = norm(text);
+  if (/^(?:במקום|להחליף|החלף|תחת)(?:\s|$)/u.test(t) || /(?:^|[\s,])במקום(?:[\s,]|$)/u.test(t))
+    return "replace";
+  if (
+    /^(?:בנוסף|גם|ועוד)(?:\s|$)/u.test(t) ||
+    /(?:^|[\s,])בנוסף(?:[\s,]|$)/u.test(t) ||
+    /פריט\s+נוסף|עוד\s+פריט/.test(t)
+  )
+    return "add";
+  return null;
+}
+
+function recipientExtraChoice(text: string): "same" | "other" | null {
+  const t = norm(text);
+  if (/אותו\s+מקבל|לאותו\s+מקבל|לאותו\s+אדם|לאותה|אותו/.test(t) && !/אחר/.test(t))
+    return "same";
+  if (/מקבל\s+אחר|לאדם\s+אחר|אדם\s+אחר|מישהו\s+אחר|אחר/.test(t))
+    return "other";
+  return null;
+}
+
 export function rulePlan(ctx: Context): Plan | null {
   const text = (ctx.message.transcript ?? ctx.message.text).trim();
   if (!text) return null;
+  const pendingExtra = ctx.conversation.pending_extra_item ?? null;
+  if (pendingExtra?.stage === "replace_or_add") {
+    const choice = replaceExtraChoice(text);
+    if (choice) return plan(text, [{ type: "resolve_extra_item", choice }]);
+    // Keep the soft-gate sticky until answered; do not open a twin request.
+    return plan(text, [{ type: "next" }]);
+  }
+  if (pendingExtra?.stage === "same_or_other_recipient") {
+    const choice = recipientExtraChoice(text);
+    if (choice) return plan(text, [{ type: "resolve_extra_recipient", choice }]);
+    return plan(text, [{ type: "next" }]);
+  }
   if (customerCancelIntent(text)) {
     const requests = ctx.requests ?? [];
     const selected = requests.find(

@@ -5,8 +5,10 @@ import {
   type Command,
   type Request,
   type Item,
+  type ItemInput,
   type Party,
   type Notice,
+  type PendingExtraItem,
 } from "../domain/types.js";
 import { Store } from "../infrastructure/store.js";
 import {
@@ -32,6 +34,63 @@ export interface Outcome {
   request: Request | null;
   notices: Notice[];
   humanReason?: string;
+}
+
+const OPEN_STATUSES = new Set([
+  "collecting",
+  "available",
+  "awaiting_approval",
+  "waiting_capacity",
+  "human",
+  "cancel_pending",
+]);
+
+function donorOpenRequests(ctx: Context, phone: string): Request[] {
+  return ctx.requests.filter(
+    (r) =>
+      OPEN_STATUSES.has(r.status) &&
+      r.parties.some((p) => p.role === "donor" && p.phone === phone),
+  );
+}
+
+function furnitureCount(requests: Request[]): number {
+  return requests.reduce(
+    (n, r) => n + r.items.reduce((m, i) => m + i.quantity, 0),
+    0,
+  );
+}
+
+function itemFingerprint(items: Array<Pick<Item, "kind" | "description">>): string {
+  return items
+    .map((i) =>
+      i.kind === "other"
+        ? `other:${i.description.replace(/\s+/g, "")}`
+        : i.kind,
+    )
+    .sort()
+    .join("|");
+}
+
+function sameItemSet(
+  existing: Array<Pick<Item, "kind" | "description">>,
+  next: Array<Pick<Item, "kind" | "description">>,
+): boolean {
+  return itemFingerprint(existing) === itemFingerprint(next);
+}
+
+function describeItems(items: Array<Pick<Item, "description">>): string {
+  return items.map((i) => i.description).join(", ");
+}
+
+const THIRD_ITEM_REPLY =
+  "ניתן לסייע בהובלת עד שני רהיטים לכל מוסר. כבר רשומים אצלך שני פריטים, לכן לא ניתן להוסיף פריט נוסף כרגע.";
+
+function replaceOrAddQuestion(existingDesc: string, nextDesc: string): string {
+  return `כבר רשומה אצלך מסירה של ${existingDesc}. האם ${nextDesc} במקום ${existingDesc}, או בנוסף אליה? כתוב "במקום" או "בנוסף".`;
+}
+
+function sameOrOtherQuestion(nextDesc: string): string {
+  return `האם ${nextDesc} מיועדת לאותו מקבל, או לאדם אחר? כתוב "אותו מקבל" או "מקבל אחר".`;
 }
 const party = (
   role: Party["role"],
@@ -101,6 +160,47 @@ export class Commands {
     private readonly s: Store,
     private readonly now: () => Date,
   ) {}
+
+  private pendingExtra(ctx: Context): PendingExtraItem | null {
+    return (ctx.conversation.pending_extra_item as PendingExtraItem | null) ?? null;
+  }
+
+  private async setPendingExtra(
+    c: pg.PoolClient,
+    ctx: Context,
+    pending: PendingExtraItem | null,
+  ): Promise<void> {
+    await c.query(
+      "UPDATE conversations SET pending_extra_item=$2,version=version+1 WHERE id=$1",
+      [ctx.conversation.id, pending ? JSON.stringify(pending) : null],
+    );
+    ctx.conversation.pending_extra_item = pending;
+  }
+
+  private async clearPendingExtra(c: pg.PoolClient, ctx: Context): Promise<void> {
+    await this.setPendingExtra(c, ctx, null);
+  }
+
+  private buildPendingFromDonate(
+    primary: Request,
+    items: ItemInput[],
+    cmd: Extract<Command, { type: "donate" }>,
+    stage: PendingExtraItem["stage"],
+  ): PendingExtraItem {
+    return {
+      stage,
+      request_id: primary.id,
+      request_number: primary.number,
+      existing_description: describeItems(primary.items),
+      items,
+      free: cmd.free ?? null,
+      working: cmd.working ?? null,
+      direct: Boolean(cmd.direct || cmd.counterparty_phone || cmd.counterparty_name),
+      counterparty_phone: cmd.counterparty_phone ?? null,
+      counterparty_name: cmd.counterparty_name ?? null,
+    };
+  }
+
   async apply(c: pg.PoolClient, ctx: Context, cmd: Command): Promise<Outcome> {
     const phone = ctx.conversation.phone,
       text = ctx.message.transcript ?? ctx.message.text,
@@ -117,6 +217,113 @@ export class Commands {
         party.schedule_approved_at = null;
       }
     };
+    if (cmd.type === "resolve_extra_item") {
+      const pending = this.pendingExtra(ctx);
+      if (!pending || pending.stage !== "replace_or_add")
+        return output("לא ממתין אצלנו לאישור פריט נוסף. אפשר לכתוב מה תרצה למסור.");
+      const existing = await this.s.request(pending.request_id, c, true);
+      ownParty(existing, phone, "donor");
+      if (cmd.choice === "replace") {
+        mutable(existing);
+        existing.items = pending.items.map((item) => {
+          const next = asItem(item);
+          next.free = pending.free === false ? false : true;
+          next.working =
+            pending.direct ? (pending.working ?? true) : pending.working;
+          return next;
+        });
+        if (pending.direct) existing.origin = "direct";
+        await this.s.save(c, existing);
+        await this.clearPendingExtra(c, ctx);
+        const q = nextQuestion(existing, phone);
+        return output(
+          `עדכנתי את הפריט ל${describeItems(existing.items)}. ${q.text}`.trim(),
+          existing,
+        );
+      }
+      // add → ask same/other recipient
+      pending.stage = "same_or_other_recipient";
+      await this.setPendingExtra(c, ctx, pending);
+      return output(sameOrOtherQuestion(describeItems(pending.items)), existing);
+    }
+    if (cmd.type === "resolve_extra_recipient") {
+      const pending = this.pendingExtra(ctx);
+      if (!pending || pending.stage !== "same_or_other_recipient")
+        return output("לא ממתין אצלנו לאישור מקבל לפריט נוסף.");
+      const open = donorOpenRequests(ctx, phone);
+      if (furnitureCount(open) >= 2)
+        return output(THIRD_ITEM_REPLY, await this.s.request(pending.request_id, c));
+      if (cmd.choice === "same") {
+        const existing = await this.s.request(pending.request_id, c, true);
+        ownParty(existing, phone, "donor");
+        const nextQty =
+          existing.items.reduce((n, i) => n + i.quantity, 0) +
+          pending.items.reduce((n, i) => n + i.quantity, 0);
+        if (nextQty > 2) {
+          await this.clearPendingExtra(c, ctx);
+          return output(THIRD_ITEM_REPLY, existing);
+        }
+        mutable(existing);
+        for (const item of pending.items) {
+          const next = asItem(item);
+          next.free = pending.free === false ? false : true;
+          next.working =
+            pending.direct ? (pending.working ?? true) : pending.working;
+          existing.items.push(next);
+        }
+        await this.s.save(c, existing);
+        await this.clearPendingExtra(c, ctx);
+        const q = nextQuestion(existing, phone);
+        return output(
+          `הוספתי את ${describeItems(pending.items)} לאותה פנייה. ${q.text}`.trim(),
+          existing,
+        );
+      }
+      // other recipient → second request, one item, same donor
+      if (open.length >= 2) {
+        await this.clearPendingExtra(c, ctx);
+        return output(THIRD_ITEM_REPLY, await this.s.request(pending.request_id, c));
+      }
+      const items = pending.items.map((item) => {
+        const next = asItem(item);
+        next.free = pending.free === false ? false : true;
+        next.working =
+          pending.direct ? (pending.working ?? true) : pending.working;
+        return next;
+      });
+      const parties = [party("donor", phone, true)];
+      if (pending.counterparty_phone) {
+        const receiverPhone = suppliedPhone(ctx, pending.counterparty_phone);
+        const receiver = party("receiver", receiverPhone, receiverPhone === phone);
+        if (pending.counterparty_name) receiver.name = pending.counterparty_name;
+        parties.push(receiver);
+      }
+      const r = await this.s.create(
+        c,
+        items,
+        parties,
+        pending.direct || pending.counterparty_phone || pending.counterparty_name
+          ? "direct"
+          : "donation",
+      );
+      await c.query(
+        "UPDATE conversations SET selected_request_id=$2 WHERE id=$1",
+        [ctx.conversation.id, r.id],
+      );
+      if (!pending.counterparty_phone && pending.counterparty_name) {
+        await c.query(
+          "UPDATE conversations SET pending_counterparty_name=$2,version=version+1 WHERE id=$1",
+          [ctx.conversation.id, pending.counterparty_name],
+        );
+        ctx.conversation.pending_counterparty_name = pending.counterparty_name;
+      }
+      await this.clearPendingExtra(c, ctx);
+      const q = nextQuestion(r, phone);
+      return output(
+        `פתחתי פנייה נפרדת (${r.number}) עבור ${describeItems(r.items)} למקבל אחר. ${q.text}`.trim(),
+        r,
+      );
+    }
     if (cmd.type === "status") return output(statusText(ctx.requests));
     if (cmd.type === "seek") {
       const id = await this.s.contact(c, phone);
@@ -185,6 +392,77 @@ export class Commands {
         }
       const error = itemError(items, false);
       if (error) return output(error);
+      // Soft-gate: a different second item for the same donor must ask
+      // replace-vs-add before mutating or opening another request.
+      if (cmd.type === "donate" && isDonor) {
+        const open = donorOpenRequests(ctx, phone);
+        const primary =
+          open.find((r) => r.id === ctx.conversation.selected_request_id) ??
+          (open.length === 1 ? open[0] : undefined);
+        const existingPending = this.pendingExtra(ctx);
+        if (primary && primary.items.length && !sameItemSet(primary.items, items)) {
+          const total = furnitureCount(open);
+          if (total >= 2 || open.length >= 2) {
+            await this.clearPendingExtra(c, ctx);
+            return output(THIRD_ITEM_REPLY, primary);
+          }
+          const explicitReplace = /(?:^|[\s,])במקום(?:[\s,]|$)/u.test(text);
+          const explicitAdd = /(?:^|[\s,])בנוסף(?:[\s,]|$)|גם\s+(?:ספה|מיטה|ארון|מקרר|כיסא|שולחן)/u.test(
+            text,
+          );
+          if (explicitReplace) {
+            await this.setPendingExtra(
+              c,
+              ctx,
+              this.buildPendingFromDonate(primary, items, cmd, "replace_or_add"),
+            );
+            return this.apply(c, ctx, { type: "resolve_extra_item", choice: "replace" });
+          }
+          if (explicitAdd) {
+            await this.setPendingExtra(
+              c,
+              ctx,
+              this.buildPendingFromDonate(
+                primary,
+                items,
+                cmd,
+                "same_or_other_recipient",
+              ),
+            );
+            return output(
+              sameOrOtherQuestion(describeItems(items)),
+              primary,
+            );
+          }
+          if (
+            existingPending &&
+            itemFingerprint(existingPending.items) === itemFingerprint(items)
+          ) {
+            const ask =
+              existingPending.stage === "same_or_other_recipient"
+                ? sameOrOtherQuestion(describeItems(items))
+                : replaceOrAddQuestion(
+                    existingPending.existing_description,
+                    describeItems(items),
+                  );
+            return output(ask, primary);
+          }
+          const pending = this.buildPendingFromDonate(
+            primary,
+            items,
+            cmd,
+            "replace_or_add",
+          );
+          await this.setPendingExtra(c, ctx, pending);
+          return output(
+            replaceOrAddQuestion(pending.existing_description, describeItems(items)),
+            primary,
+          );
+        }
+        if (furnitureCount(open) >= 2 && open.every((r) => !sameItemSet(r.items, items))) {
+          return output(THIRD_ITEM_REPLY, open[0] ?? null);
+        }
+      }
       const parties = [party(isDonor ? "donor" : "receiver", phone, isDonor)];
       if (other) {
         const p = suppliedPhone(ctx, other);
@@ -717,6 +995,17 @@ export class Commands {
       return output("הפנייה נשמרה. אבדוק מועד פנוי ליום שלישי; התאריך ייחשב רק כהצעה עד ששני הצדדים יאשרו אותו במפורש.", r);
     }
     if (cmd.type === "next") {
+      const pending = this.pendingExtra(ctx);
+      if (pending?.stage === "replace_or_add")
+        return output(
+          replaceOrAddQuestion(
+            pending.existing_description,
+            describeItems(pending.items),
+          ),
+          r,
+        );
+      if (pending?.stage === "same_or_other_recipient")
+        return output(sameOrOtherQuestion(describeItems(pending.items)), r);
       const previous = ctx.history.at(-1)?.content ?? "";
       const speaker = ownParty(r, phone);
       if (ambiguousStreetCity(text) && !speaker.address)
@@ -846,6 +1135,35 @@ export class Commands {
       invalidateProposal(r);
       ownParty(r, phone, "donor");
       const oldItems = structuredClone(r.items);
+      if (cmd.items && r.items.length && !sameItemSet(r.items, cmd.items)) {
+        // Different furniture kind is not a silent overwrite — ask replace/add.
+        const open = donorOpenRequests(ctx, phone);
+        if (furnitureCount(open) >= 2) return output(THIRD_ITEM_REPLY, r);
+        const explicitReplace = /(?:^|[\s,])במקום(?:[\s,]|$)/u.test(text);
+        const pending: PendingExtraItem = {
+          stage: explicitReplace ? "replace_or_add" : "replace_or_add",
+          request_id: r.id,
+          request_number: r.number,
+          existing_description: describeItems(r.items),
+          items: cmd.items,
+          free: cmd.free,
+          working: cmd.working,
+          direct: r.origin === "direct",
+          counterparty_phone:
+            r.parties.find((p) => p.role === "receiver")?.phone ?? null,
+          counterparty_name:
+            r.parties.find((p) => p.role === "receiver")?.name ?? null,
+        };
+        if (explicitReplace) {
+          await this.setPendingExtra(c, ctx, pending);
+          return this.apply(c, ctx, { type: "resolve_extra_item", choice: "replace" });
+        }
+        await this.setPendingExtra(c, ctx, pending);
+        return output(
+          replaceOrAddQuestion(pending.existing_description, describeItems(cmd.items)),
+          r,
+        );
+      }
       if (cmd.items)
         // Action manager owns the replacement item list. New kind/description
         // overwrite the previous row; keep prior free/working only when the

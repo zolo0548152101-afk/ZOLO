@@ -343,12 +343,23 @@ export function actionableAiPlan(
 /**
  * When the action manager understood the turn, its plan is authoritative.
  * rulePlan is only a fallback for unclear/empty AI output or AI disabled.
+ * Exception: sticky replace/add soft-gate owns the turn until answered.
  */
 export function selectDecodePlan(
   translated: { understood: boolean; plan: Plan },
   deterministic: Plan | null,
-  _ctx: Context,
+  ctx: Context,
 ): { plan: Plan; useAi: boolean; understood: boolean } {
+  if (
+    ctx.conversation.pending_extra_item &&
+    deterministic?.commands.some(
+      (command) =>
+        command.type === "resolve_extra_item" ||
+        command.type === "resolve_extra_recipient" ||
+        command.type === "next",
+    )
+  )
+    return { plan: deterministic, useAi: false, understood: true };
   if (translated.understood) {
     return { plan: translated.plan, useAi: true, understood: true };
   }

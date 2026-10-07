@@ -131,6 +131,14 @@ export const commandSchema = z.discriminatedUnion("type", [
     type: z.literal("clarify_duplicate"),
     request_number: z.number().int().positive(),
   }),
+  z.strictObject({
+    type: z.literal("resolve_extra_item"),
+    choice: z.enum(["replace", "add"]),
+  }),
+  z.strictObject({
+    type: z.literal("resolve_extra_recipient"),
+    choice: z.enum(["same", "other"]),
+  }),
 ]);
 export const planSchema = z
   .strictObject({
@@ -234,6 +242,18 @@ export interface Candidate {
   match_id: string | null;
   state: "waiting_photo" | "queued_photo" | "presented" | "interested" | null;
 }
+export interface PendingExtraItem {
+  stage: "replace_or_add" | "same_or_other_recipient";
+  request_id: string;
+  request_number: number;
+  existing_description: string;
+  items: ItemInput[];
+  free: boolean | null;
+  working: boolean | null;
+  direct: boolean;
+  counterparty_phone: string | null;
+  counterparty_name: string | null;
+}
 export interface Conversation {
   id: string;
   phone: string;
@@ -243,6 +263,7 @@ export interface Conversation {
   version: number;
   pending_counterparty_name: string | null;
   pending_counterparty_phone?: string | null;
+  pending_extra_item?: PendingExtraItem | null;
 }
 export interface Incoming {
   id: string;

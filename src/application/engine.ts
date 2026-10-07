@@ -845,7 +845,8 @@ export class Engine {
     if (
       directHandoffIntent(text) ||
       ctx.conversation.pending_counterparty_name ||
-      ctx.conversation.pending_counterparty_phone
+      ctx.conversation.pending_counterparty_phone ||
+      ctx.conversation.pending_extra_item
     )
       return false;
     const waiting = ctx.requests.some(

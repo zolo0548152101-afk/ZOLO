@@ -849,7 +849,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
               [conversation.id],
             );
             await client.query(
-              "UPDATE conversations SET mode='bot',selected_request_id=NULL,version=version+1 WHERE id=$1",
+              "UPDATE conversations SET mode='bot',selected_request_id=NULL,pending_counterparty_name=NULL,pending_counterparty_phone=NULL,pending_extra_item=NULL,version=version+1 WHERE id=$1",
               [conversation.id],
             );
           }
@@ -886,7 +886,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
               [conversation.id],
             );
           await client.query(
-            "UPDATE conversations SET mode='bot',selected_request_id=NULL,version=version+1",
+            "UPDATE conversations SET mode='bot',selected_request_id=NULL,pending_counterparty_name=NULL,pending_counterparty_phone=NULL,pending_extra_item=NULL,version=version+1",
           );
           await s.event(client, { trace_id: req.id }, "admin", "all_conversations_reset", adminAuditRecord(req, "reset_all_conversations", "all_conversations", "success", { conversations: result.rowCount }));
         });
