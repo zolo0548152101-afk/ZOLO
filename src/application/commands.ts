@@ -21,6 +21,7 @@ import {
   mutable,
   appliance,
   nextQuestion,
+  readyToAskContactCounterparty,
   statusText,
   nextTuesday,
   norm,
@@ -560,6 +561,12 @@ export class Commands {
         )
       )
         return output("הפנייה לצד השני כבר בוצעה.", r);
+      // Consent to contact only after own details + transport rules hold.
+      // Decline can be recorded anytime; early "yes" is deferred via nextQuestion.
+      if (cmd.contact && !readyToAskContactCounterparty(r, phone)) {
+        const q = nextQuestion(r, phone);
+        return output(q.text, r);
+      }
       r.verification_contacted = cmd.contact;
       await c.query(
         `INSERT INTO request_verifications(request_id,role,state,consented_at,updated_at,last_error)

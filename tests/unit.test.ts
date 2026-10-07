@@ -1393,7 +1393,7 @@ test("direct handoff assigns an address after the named recipient phone to the r
   assert.equal(details?.type === "details" ? details.address : null, "רחוב העלייה 7");
   assert.equal(details?.type === "details" ? details.floor : null, 2);
 });
-test("direct handoff without a phone skips condition checks and asks before contact", () => {
+test("direct handoff without a phone skips condition checks and asks for the number after own details", () => {
   const context: Context = {
     conversation: { id: "c", phone: "501111111", chat_id: "972501111111@c.us", mode: "bot", selected_request_id: null, version: 1, pending_counterparty_name: null },
     requests: [],
@@ -1408,8 +1408,31 @@ test("direct handoff without a phone skips condition checks and asks before cont
   r.parties = r.parties.slice(0, 1);
   r.origin = "direct";
   r.verification_contacted = false;
-  assert.match(nextQuestion(r, r.parties[0]!.phone).text, /נפנה למקבל לצורך אימות/);
-  assert.doesNotMatch(nextQuestion(r, r.parties[0]!.phone).text, /תקין ושמיש|תמונה/);
+  assert.match(nextQuestion(r, r.parties[0]!.phone).text, /מספר הטלפון|איש קשר/);
+  assert.doesNotMatch(nextQuestion(r, r.parties[0]!.phone).text, /תקין ושמיש|תמונה|נפנה למקבל/);
+});
+test("contact-counterparty ask waits until own details and item rules are ready", () => {
+  const r = sampleRequest();
+  r.origin = "direct";
+  r.verification_contacted = false;
+  r.proposed_run_date = null;
+  for (const party of r.parties) {
+    party.schedule_approved = false;
+    party.schedule_approved_date = null;
+    party.schedule_approved_at = null;
+  }
+  const donor = r.parties[0]!;
+  donor.name = null;
+  donor.settlement = null;
+  donor.address = null;
+  assert.match(nextQuestion(r, donor.phone).text, /יישוב/);
+  assert.doesNotMatch(nextQuestion(r, donor.phone).text, /נפנה למקבל/);
+  donor.settlement = "בית שאן";
+  assert.match(nextQuestion(r, donor.phone).text, /שם וכתובת|חסר רק השם/);
+  assert.doesNotMatch(nextQuestion(r, donor.phone).text, /נפנה למקבל/);
+  donor.name = "ישראל";
+  donor.address = "רחוב אילת 4";
+  assert.match(nextQuestion(r, donor.phone).text, /נפנה למקבל לצורך אימות/);
 });
 test("named recipient who wants the item bypasses the photo gate", () => {
   const context: Context = {

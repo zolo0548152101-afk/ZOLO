@@ -454,6 +454,62 @@ function missingOf(
   return { field, role, request_number: r.number };
 }
 
+/**
+ * Own-party identity/location must be complete and items must already pass
+ * program rules before we ask consent to contact the other party.
+ */
+export function itemsReadyForHandoff(r: Request): boolean {
+  if (itemError(r.items, r.photo_ids.length > 0)) return false;
+  return r.items.every(
+    (i) =>
+      i.free === true &&
+      i.working === true &&
+      (i.kind !== "wardrobe" || i.wardrobe_small_whole === true) &&
+      (r.origin === "direct" || i.kind !== "oven" || i.oven_type !== null) &&
+      (r.origin === "direct" ||
+        appliance(i) ||
+        i.kind === "wardrobe" ||
+        i.needs_disassembly !== null) &&
+      i.evacuation !== "different",
+  );
+}
+
+export function ownPartyDetailsComplete(r: Request, phone: string): boolean {
+  try {
+    const p = ownParty(r, phone);
+    return Boolean(
+      p.approved_at &&
+        p.approved_by === p.phone &&
+        p.name &&
+        p.settlement &&
+        p.address,
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Ask "contact the other party?" only after own details + transport rules. */
+export function readyToAskContactCounterparty(
+  r: Request,
+  phone: string,
+): boolean {
+  if (
+    r.origin !== "direct" ||
+    r.represents_both_parties ||
+    r.verification_contacted
+  )
+    return false;
+  let role: Role | null = null;
+  try {
+    role = ownParty(r, phone).role;
+  } catch {
+    return false;
+  }
+  if (!r.parties.some((x) => x.role !== role)) return false;
+  return ownPartyDetailsComplete(r, phone) && itemsReadyForHandoff(r);
+}
+
 export function nextQuestion(
   r: Request,
   phone: string,
@@ -466,23 +522,6 @@ export function nextQuestion(
     return { text: HUMAN_REPLY, floorNote: false, missing: null };
   const p = ownParty(r, phone);
   const donor = p.role === "donor";
-  if (
-    r.origin === "direct" &&
-    !r.represents_both_parties &&
-    !r.verification_contacted &&
-    r.parties.some((x) => x.role !== p.role)
-  )
-    return {
-      text: `האם תרצה שנפנה ל${donor ? "מקבל" : "מוסר"} לצורך אימות הפרטים?`,
-      floorNote: false,
-      missing: missingOf(r, "contact_counterparty", p.role),
-    };
-  if (r.origin === "direct" && !r.parties.some((x) => x.role !== p.role))
-    return {
-      text: `האם תרצה שנפנה ל${donor ? "מקבל" : "מוסר"} לצורך אימות הפרטים? אם כן, נא לשלוח מספר טלפון או כרטיס איש קשר.`,
-      floorNote: false,
-      missing: missingOf(r, "counterparty", p.role),
-    };
   if (
     donor &&
     r.items.some(
@@ -556,19 +595,34 @@ export function nextQuestion(
         p.settlement === "בית שאן" && !p.floor_note_shown && p.floor === null,
       missing: missingOf(r, !p.name ? "name" : "address", p.role),
     };
-  if (!r.parties.some((x) => x.role !== p.role))
-    return {
-      text: donor
-        ? "האם יש מקבל מסוים? אם כן, נא לשלוח את מספרו או כרטיס איש קשר."
-        : "נא לשלוח את מספר המוסר או כרטיס איש קשר.",
-      floorNote: false,
-      missing: missingOf(r, "counterparty", p.role),
-    };
   if (r.items.some((i) => i.free === null))
     return {
       text: "האם הפריט נמסר בחינם, בלי תשלום?",
       floorNote: false,
       missing: missingOf(r, "free", "donor"),
+    };
+  // Contact / counterparty only after own details + item rules above.
+  if (
+    r.origin === "direct" &&
+    !r.represents_both_parties &&
+    !r.verification_contacted &&
+    r.parties.some((x) => x.role !== p.role) &&
+    itemsReadyForHandoff(r)
+  )
+    return {
+      text: `האם תרצה שנפנה ל${donor ? "מקבל" : "מוסר"} לצורך אימות הפרטים?`,
+      floorNote: false,
+      missing: missingOf(r, "contact_counterparty", p.role),
+    };
+  if (!r.parties.some((x) => x.role !== p.role))
+    return {
+      text: donor
+        ? r.origin === "direct"
+          ? "כדי שנוכל לפנות למקבל, נא לשלוח את מספר הטלפון שלו או כרטיס איש קשר."
+          : "האם יש מקבל מסוים? אם כן, נא לשלוח את מספרו או כרטיס איש קשר."
+        : "נא לשלוח את מספר המוסר או כרטיס איש קשר.",
+      floorNote: false,
+      missing: missingOf(r, "counterparty", p.role),
     };
   const proposal = r.proposed_run_date;
   if (proposal && p.schedule_approved_date !== proposal) {
