@@ -260,6 +260,7 @@ export function diffChangedFields(input: {
     verification_contacted?: boolean;
     status?: string;
     proposed_run_date?: string | null;
+    photo_status?: string | null;
     parties?: {
       role: string;
       name: string | null;
@@ -286,6 +287,7 @@ export function diffChangedFields(input: {
     verification_contacted?: boolean;
     status?: string;
     proposed_run_date?: string | null;
+    photo_status?: string | null;
     parties?: {
       role: string;
       name: string | null;
@@ -330,6 +332,7 @@ export function diffChangedFields(input: {
     pushIfChanged(out, "requests", "verification_contacted", before?.verification_contacted ?? false, after.verification_contacted ?? false);
     pushIfChanged(out, "requests", "status", before?.status ?? null, after.status ?? null);
     pushIfChanged(out, "requests", "proposed_run_date", before?.proposed_run_date ?? null, after.proposed_run_date ?? null);
+    pushIfChanged(out, "requests", "photo_status", before?.photo_status ?? null, after.photo_status ?? null);
     if ((after.photo_ids?.length ?? 0) > (before?.photo_ids?.length ?? 0))
       out.push({ table: "request_media", column: "media_id" });
     for (const party of after.parties ?? []) {

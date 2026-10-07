@@ -216,14 +216,14 @@ export function noProgressReply(
     field === "floor";
   const needLabel =
     field === "settlement"
-      ? "את היישוב"
+      ? "היישוב"
       : field === "address"
-        ? "את הכתובת או תיאור המקום"
+        ? "הכתובת או תיאור המקום"
         : field === "floor"
-          ? "את הקומה"
+          ? "הקומה"
           : field === "name"
-            ? "את השם"
-            : "את הפרט החסר";
+            ? "השם"
+            : "הפרט החסר";
   // Contact consent: never loop the same yes/no — demand an explicit phrase.
   if (field === "contact_counterparty" || /אימות הפרטים/.test(q.text)) {
     const other = r.parties.find((x) => x.phone !== phone);
@@ -248,7 +248,7 @@ export function noProgressReply(
       ask = "כדי להמשיך צריך את שם היישוב שבו נמצא הפריט.";
     else if (field === "floor")
       ask = "כדי להמשיך צריך לדעת באיזו קומה — אפשר גם לכתוב «קרקע».";
-    else if (required) ask = `כדי להמשיך צריך ${needLabel}.`;
+    else if (required) ask = `כדי להמשיך צריך את ${needLabel}.`;
   }
   if (alreadyStored)
     return `הפרט הזה כבר רשום אצלנו. ${ask}`.trim();
