@@ -1050,6 +1050,10 @@ export class Store {
           [conversationIds],
         );
         await c.query(
+          "DELETE FROM turn_logs WHERE conversation_id=ANY($1::uuid[])",
+          [conversationIds],
+        );
+        await c.query(
           "DELETE FROM conversation_turns WHERE conversation_id=ANY($1::uuid[])",
           [conversationIds],
         );

@@ -106,6 +106,26 @@ export function parseWebhook(
       .safeParse(location);
     if (result.success) loc = result.data;
   }
+  const mediaUrl = string(media.url) || null;
+  const mediaLabel = isImage
+    ? "תמונה"
+    : isVoice
+      ? "הודעה קולית"
+      : mime
+        ? "מדיה"
+        : null;
+  const mediaDetail = mediaLabel
+    ? `[${mediaLabel}]${mime ? ` mime=${mime}` : ""}${mediaUrl ? ` url=${mediaUrl}` : ""}`
+    : "";
+  const contactDetail = contacts.length
+    ? contacts
+        .map(
+          (c) =>
+            `כרטיס איש קשר: שם=${c.name?.trim() || "לא צוין"}; טלפון=${c.phone}`,
+        )
+        .join("\n")
+    : "";
+  const parts = [text.trim(), contactDetail, mediaDetail].filter(Boolean);
   return {
     external_id: id,
     chat_id: chat,
@@ -118,8 +138,8 @@ export function parseWebhook(
           : loc
             ? "location"
             : "text",
-    text: contacts.length ? "[כרטיס איש קשר]" : text,
-    media_url: string(media.url) || null,
+    text: parts.join("\n") || (contacts.length ? contactDetail : text),
+    media_url: mediaUrl,
     contacts,
     location: loc,
   };

@@ -54,6 +54,15 @@ import {
   isCustomerClarify,
   localizeCustomer,
 } from "../domain/customer-language.js";
+import {
+  insertTurnLog,
+  messageIdsForTurn,
+  modelIOFromMetadata,
+  observePolicies,
+  snapshotTurnState,
+  toolCallsFromPlan,
+  type TurnFate,
+} from "./turn-log.js";
 
 export class Engine {
   private readonly commands: Commands;
@@ -332,6 +341,19 @@ export class Engine {
           next = last.id;
         }
       });
+      if (next === last.id && burstable.length > 1) {
+        for (const m of burstable.slice(0, -1)) {
+          void this.auditTurn(m.id, {
+            fate: "coalesced",
+            fate_detail: {
+              carried_to: last.id,
+              merged_text: mergedText,
+            },
+            reply_text: null,
+            error_code: `coalesced_into:${last.id}`,
+          });
+        }
+      }
     } else if (burstable.length && images.length) {
       const lastText =
         [...burstable].reverse().find((m) => m.kind === "text") ??
@@ -351,11 +373,12 @@ export class Engine {
               burstable.some((m) => m.contacts.length) ? "contact" : "text",
             ],
           );
-          if (earlier.length)
+          if (earlier.length) {
             await c.query(
               "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id = ANY($1::uuid[])",
               [earlier.map((m) => m.id), `coalesced_into:${lastText.id}`],
             );
+          }
         }
         await c.query(
           "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id = ANY($1::uuid[])",
@@ -363,6 +386,22 @@ export class Engine {
         );
       });
       next = lastText.id;
+      for (const m of earlier) {
+        void this.auditTurn(m.id, {
+          fate: "coalesced",
+          fate_detail: { carried_to: lastText.id },
+          reply_text: null,
+          error_code: `coalesced_into:${lastText.id}`,
+        });
+      }
+      for (const m of images) {
+        void this.auditTurn(m.id, {
+          fate: "coalesced",
+          fate_detail: { carried_to: lastText.id, kind: "image_attached" },
+          reply_text: null,
+          error_code: `attached_to:${lastText.id}`,
+        });
+      }
     }
     await this.process(next, lastAiAttempt);
   }
@@ -781,6 +820,12 @@ export class Engine {
         [ctx.conversation.id],
       );
     });
+    await this.auditTurn(id, {
+      fate: "failed",
+      fate_detail: { path: "finishFault" },
+      error_code: "openai_failure_escalated",
+      intent: "fault",
+    });
   }
 
   private async finishUnclear(id: string): Promise<void> {
@@ -843,6 +888,11 @@ export class Engine {
         "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
         [id, reply],
       );
+    });
+    await this.auditTurn(id, {
+      fate: "completed",
+      fate_detail: { path: "finishUnclear" },
+      intent: "clarification",
     });
   }
 
@@ -911,10 +961,113 @@ export class Engine {
         [id, photoReply],
       );
     });
+    await this.auditTurn(id, {
+      fate: "completed",
+      fate_detail: { path: "finishPhotoHold" },
+      intent: "ask_photo",
+      photoHold: true,
+    });
   }
 
   private voiced(ctx: Context, text: string): string {
     return localizeCustomer(text, conversationLanguage(ctx));
+  }
+
+  /** Best-effort audit row — never throws into the turn path. */
+  private async recordTurnLogSafe(
+    row: Parameters<typeof insertTurnLog>[1],
+  ): Promise<void> {
+    try {
+      await insertTurnLog(this.s.pool, row);
+    } catch (e) {
+      this.log.error({
+        code: "turn_log_write_failed",
+        error: errorCode(e),
+        turn_fate: row.turn_fate,
+        phone: row.phone ?? null,
+      });
+    }
+  }
+
+  private async auditTurn(
+    id: string,
+    opts: {
+      fate: TurnFate;
+      fate_detail?: Record<string, unknown>;
+      state_before?: Record<string, unknown>;
+      reply_text?: string | null;
+      outbox_id?: string | null;
+      error_code?: string | null;
+      opened_at?: string | null;
+      intent?: string | null;
+      photoHold?: boolean;
+      introduced?: boolean;
+    },
+  ): Promise<void> {
+    try {
+      const ctx = await this.s.context(id);
+      const ids = await messageIdsForTurn(this.s.pool, id);
+      const extras = await this.s.pool.query<{
+        ai_metadata: Record<string, unknown> | null;
+        reply: string | null;
+        error_code: string | null;
+        ai_plan: Plan | null;
+      }>(
+        "SELECT ai_metadata, reply, error_code, ai_plan FROM messages WHERE id=$1",
+        [id],
+      );
+      const row = extras.rows[0];
+      const meta = row?.ai_metadata ?? null;
+      const { model_input, model_output } = modelIOFromMetadata(meta);
+      const replyMeta =
+        meta && meta.reply && typeof meta.reply === "object"
+          ? (meta.reply as Record<string, unknown>)
+          : null;
+      if (replyMeta) {
+        const replyIO = modelIOFromMetadata(replyMeta);
+        model_input.reply = replyIO.model_input;
+        model_output.reply = replyIO.model_output;
+      }
+      const planSource = row?.ai_plan ?? ctx.message.ai_plan;
+      const plan = planSource
+        ? planSchema.safeParse(planSource).success
+          ? planSchema.parse(planSource)
+          : null
+        : null;
+      const replyText = opts.reply_text ?? row?.reply ?? null;
+      await this.recordTurnLogSafe({
+        conversation_id: ctx.conversation.id,
+        turn_id: ids.turn_id,
+        phone: ctx.conversation.phone,
+        message_ids: ids.message_ids,
+        merged_text: ctx.message.transcript ?? ctx.message.text,
+        turn_fate: opts.fate,
+        fate_detail: opts.fate_detail ?? {},
+        state_before: opts.state_before ?? {},
+        state_after: snapshotTurnState(ctx),
+        model_input,
+        model_output,
+        tool_calls: toolCallsFromPlan(plan),
+        policies: observePolicies(ctx, {
+          reply: replyText,
+          intent: opts.intent,
+          text: ctx.message.transcript ?? ctx.message.text,
+          introduced: opts.introduced,
+          photoHold: opts.photoHold,
+        }),
+        reply_text: replyText,
+        outbox_id: opts.outbox_id ?? null,
+        error_code: opts.error_code ?? row?.error_code ?? null,
+        opened_at: opts.opened_at ?? null,
+        completed_at: new Date().toISOString(),
+      });
+    } catch (e) {
+      this.log.error({
+        code: "turn_log_audit_failed",
+        error: errorCode(e),
+        message_id: id,
+      });
+    }
   }
 
   private async finish(
@@ -922,6 +1075,13 @@ export class Engine {
     proposed: Plan | null,
     technicalReason?: string,
   ): Promise<void> {
+    const openedAt = new Date().toISOString();
+    let stateBefore: Record<string, unknown> = {};
+    try {
+      stateBefore = snapshotTurnState(await this.s.context(id));
+    } catch {
+      /* pre-snapshot is best-effort */
+    }
     const deferredNotices: {
       outboxId: string;
       notice: Notice;
@@ -1655,6 +1815,12 @@ export class Engine {
       };
     });
     if (committed) this.log.info(committed);
+    let auditedReply: string | null =
+      committed && "canonicalReply" in committed
+        ? (committed.canonicalReply as string | null)
+        : null;
+    let auditedIntroduced = false;
+    let auditedMergedInto: string | null = null;
     // Phrase the customer reply only after COMMIT. Claim-guard rejects any
     // invented save/send/approval wording.
     if (
@@ -1673,6 +1839,7 @@ export class Engine {
       );
       if (newerText.rows[0]) {
         const successorId = newerText.rows[0].id;
+        auditedMergedInto = successorId;
         await this.s.transaction(async (c) => {
           await c.query(
             "UPDATE outbox SET state='cancelled',format_state='ready',error_code='reply_merged_into_next_turn' WHERE id=$1",
@@ -1737,6 +1904,7 @@ export class Engine {
         ctx.history.some(
           (entry) => entry.role === "assistant" && isSelfIntroText(entry.content),
         );
+      auditedIntroduced = introduced;
       // Photo-first and other fixed templates must not be replaced by a free
       // paraphrase that drops the required ask or invents a second intro.
       const canonical = committed.canonicalReply;
@@ -1756,6 +1924,7 @@ export class Engine {
             : localizeCustomer(text, lang);
         text = stripRepeatedSelfIntro(text, ctx.history, introduced);
       }
+      auditedReply = text;
       await this.s.transaction(async (c) => {
         const stillNewer = await c.query<{ id: string }>(
           `SELECT m.id FROM messages m
@@ -1766,6 +1935,7 @@ export class Engine {
           [id],
         );
         if (stillNewer.rows[0]) {
+          auditedMergedInto = stillNewer.rows[0].id;
           await c.query(
             "UPDATE outbox SET state='cancelled',format_state='ready',error_code='reply_merged_into_next_turn' WHERE id=$1",
             [committed.customerOutboxId],
@@ -1844,6 +2014,55 @@ export class Engine {
           }, item.requestId);
         });
       }
+    }
+    if (committed) {
+      const stage =
+        "stage" in committed ? String(committed.stage) : "processed";
+      const fate: TurnFate =
+        stage === "superseded"
+          ? "superseded"
+          : auditedMergedInto
+            ? "superseded"
+            : technicalReason
+              ? "failed"
+              : "completed";
+      await this.auditTurn(id, {
+        fate,
+        fate_detail: {
+          stage,
+          code: "code" in committed ? committed.code : null,
+          carried_to: auditedMergedInto,
+          request_number:
+            "request_number" in committed ? committed.request_number : null,
+        },
+        state_before: stateBefore,
+        reply_text: auditedMergedInto ? null : auditedReply,
+        outbox_id:
+          "customerOutboxId" in committed
+            ? (committed.customerOutboxId as string | null)
+            : null,
+        error_code:
+          fate === "failed"
+            ? technicalReason ?? null
+            : auditedMergedInto
+              ? `reply_merged_into:${auditedMergedInto}`
+              : "code" in committed && committed.code !== "ok"
+                ? String(committed.code)
+                : null,
+        opened_at: openedAt,
+        intent:
+          committed &&
+          "operation" in committed &&
+          committed.operation &&
+          typeof committed.operation === "object" &&
+          "action_results" in committed.operation
+            ? String(
+                (committed.operation as { action_results?: { intent?: string } })
+                  .action_results?.intent ?? "",
+              ) || null
+            : null,
+        introduced: auditedIntroduced,
+      });
     }
   }
 

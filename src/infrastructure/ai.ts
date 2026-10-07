@@ -487,6 +487,18 @@ export class OpenAIPlanner implements Planner {
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,
+        // Observability only — never fed back into planning.
+        model_input: {
+          prompt_mode: source.mode,
+          prompt_id: source.mode === "hosted" ? source.id : "git:prompts/haim-action.he.md",
+          prompt_version: source.mode === "hosted" ? source.version : "git",
+          payload: userPayload,
+        },
+        model_output: {
+          raw: response.output_text,
+          parsed: payload,
+        },
+        raw_output: response.output_text,
       },
     };
   }
@@ -499,6 +511,18 @@ export class OpenAIPlanner implements Planner {
       return { text: input.fallback, metadata: { provider: "fallback", ai_enabled: false } };
     const started = Date.now();
     const source = replyPromptSource(this.c, input.fallback);
+    const replyInput = {
+      sender_phone: ctx.conversation.phone,
+      current_message: ctx.message.transcript ?? ctx.message.text,
+      history: ctx.history,
+      requests: ctx.requests,
+      candidates: ctx.candidates,
+      active_search: ctx.active_search ?? null,
+      operation_result: input.operation,
+      fallback_reply: input.fallback,
+      canonical: input.fallback,
+      already_introduced: conversationAlreadyIntroduced(ctx.history),
+    };
     const response = await this.client.responses.create({
       model: this.c.OPENAI_MODEL,
       ...(source.mode === "hosted"
@@ -521,18 +545,7 @@ export class OpenAIPlanner implements Planner {
           }),
       input: [{
         role: "user",
-        content: JSON.stringify({
-          sender_phone: ctx.conversation.phone,
-          current_message: ctx.message.transcript ?? ctx.message.text,
-          history: ctx.history,
-          requests: ctx.requests,
-          candidates: ctx.candidates,
-          active_search: ctx.active_search ?? null,
-          operation_result: input.operation,
-          fallback_reply: input.fallback,
-          canonical: input.fallback,
-          already_introduced: conversationAlreadyIntroduced(ctx.history),
-        }),
+        content: JSON.stringify(replyInput),
       }],
       reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },
     });
@@ -552,6 +565,17 @@ export class OpenAIPlanner implements Planner {
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,
+        model_input: {
+          prompt_mode: source.mode,
+          prompt_id: source.mode === "hosted" ? source.id : "git:prompts/haim-reply.he.md",
+          prompt_version: source.mode === "hosted" ? source.version : "git",
+          payload: replyInput,
+        },
+        model_output: {
+          raw: response.output_text,
+          parsed: payload,
+        },
+        raw_output: response.output_text,
       },
     };
   }
