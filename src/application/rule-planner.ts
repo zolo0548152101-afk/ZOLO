@@ -709,14 +709,19 @@ export function rulePlan(ctx: Context): Plan | null {
       );
     const recipientPhone =
       ctx.conversation.pending_counterparty_phone ??
+      ctx.message.contacts[0]?.phone ??
       standalonePhone(text) ??
       namedRecipientPhone(text);
+    const recipientFromCard =
+      recipientName ??
+      ctx.message.contacts[0]?.name?.replace(/^אא\s+/u, "").trim() ??
+      null;
     return plan(text, [
       {
         type: "donate",
         items: [{ ...item, quantity: 1 }],
         counterparty_phone: recipientPhone,
-        counterparty_name: recipientName,
+        counterparty_name: recipientFromCard,
         direct: true,
         free: true,
         working: true,
