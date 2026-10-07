@@ -538,6 +538,10 @@ export function rulePlan(ctx: Context): Plan | null {
     if (choice) return plan(text, [{ type: "resolve_extra_recipient", choice }]);
     return null;
   }
+  if (pendingExtra?.stage === "confirm_another_delivery") {
+    // AI owns follow-up donate/next; do not force a sticky plan.
+    return null;
+  }
   if (customerCancelIntent(text)) {
     const requests = ctx.requests ?? [];
     const selected = requests.find(

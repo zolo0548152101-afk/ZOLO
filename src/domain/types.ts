@@ -252,7 +252,11 @@ export interface Candidate {
   state: "waiting_photo" | "queued_photo" | "presented" | "interested" | null;
 }
 export interface PendingExtraItem {
-  stage: "replace_or_add" | "same_or_other_recipient";
+  stage:
+    | "replace_or_add"
+    | "same_or_other_recipient"
+    /** Hard boundary: same donor+receiver+item — confirm before a twin request. */
+    | "confirm_another_delivery";
   request_id: string;
   request_number: number;
   existing_description: string;

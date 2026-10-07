@@ -75,6 +75,56 @@ function replaceOrAddQuestion(existingDesc: string, nextDesc: string): string {
 function sameOrOtherQuestion(nextDesc: string): string {
   return `האם ${nextDesc} מיועד/ת לאותו מקבל, או לאדם אחר? כתוב "אותו מקבל" או "מקבל אחר".`;
 }
+
+const ANOTHER_DELIVERY_ASK =
+  "כבר יש אצלנו פנייה פתוחה לאותו מקבל ואותו פריט. האם מדובר בהובלה נוספת נפרדת? כן או לא.";
+
+function bareYes(text: string): boolean {
+  return /^(?:כן|בטח|בוודאי|נכון|מאשר|מאשרת)(?:[\s,!.]|$)/u.test(norm(text));
+}
+function bareNo(text: string): boolean {
+  return /^(?:לא|אין)(?:[\s,!.]|$)/u.test(norm(text));
+}
+function explicitAnotherDelivery(text: string): boolean {
+  const t = norm(text);
+  return (
+    (/כן/.test(t) &&
+      /(?:הובלה|משלוח|פנייה|מסירה)\s+נוס|נוס(?:פת|ף)|עוד\s+(?:אחת|אחד|פנייה|הובלה)/u.test(
+        t,
+      )) ||
+    /^(?:כן[,.]?\s*)?(?:הובלה|משלוח|פנייה)\s+נוס/.test(t) ||
+    /(?:^|[\s,])בנפרד(?:[\s,]|$)|פנייה\s+חדשה|עוד\s+אחת/.test(t)
+  );
+}
+function explicitNotAnotherDelivery(text: string): boolean {
+  const t = norm(text);
+  return (
+    /^(?:לא|לא\s+נוס|אותה\s+פנייה|אותו\s+דבר|רק\s+לעדכן)/u.test(t) ||
+    /לא\s+(?:הובלה|משלוח|פנייה)\s+נוס/.test(t)
+  );
+}
+
+function itemDescriptionsMatch(
+  existing: Array<Pick<Item, "kind" | "description">>,
+  next: Array<Pick<Item, "kind" | "description">>,
+): boolean {
+  if (existing.length !== next.length) return false;
+  return existing.every((item, index) => {
+    const n = next[index];
+    if (!n || item.kind !== n.kind) return false;
+    if (item.kind !== "other") return true;
+    const a = item.description.replace(/\s+/g, "");
+    const b = n.description.replace(/\s+/g, "");
+    return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+  });
+}
+
+function receiverKey(p: Party | undefined): string | null {
+  if (!p) return null;
+  if (p.phone) return `p:${p.phone}`;
+  if (p.name) return `n:${norm(p.name)}`;
+  return null;
+}
 const party = (
   role: Party["role"],
   phone: string | null,
@@ -380,31 +430,94 @@ export class Commands {
         parties.push(receiver);
       }
       // Soft photo ask is prompt/reply-manager owned.
-      // Infra: a continuing donate for the same open item (handoff/details)
-      // must UPDATE that request — never open a twin row. Also recover a
-      // recent outside-area rejection for the same item.
+      // Hard boundary #4 — duplicate request (donor+receiver+item[+date]):
+      // incomplete fields → update existing; full triple+date → update only;
+      // full triple without date → ask before opening a twin; different
+      // known receiver → new request allowed.
       const sameItemShape = (existing: Request) =>
         existing.parties.some((p) => p.role === "donor" && p.phone === phone) &&
-        existing.items.length === items.length &&
-        existing.items.every((item, index) => {
-          const next = items[index];
-          if (!next || item.kind !== next.kind) return false;
-          if (item.kind !== "other") return true;
-          const a = item.description.replace(/\s+/g, "");
-          const b = next.description.replace(/\s+/g, "");
-          return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+        itemDescriptionsMatch(existing.items, items);
+      const openSameItem = ctx.requests.filter(
+        (existing) =>
+          !["coordinated", "closed", "cancelled", "rejected", "cancel_pending"].includes(
+            existing.status,
+          ) && sameItemShape(existing),
+      );
+      const incomingReceiver = parties.find((p) => p.role === "receiver");
+      const incomingReceiverKey = receiverKey(incomingReceiver);
+      const pendingAnother = this.pendingExtra(ctx);
+      const confirmedAnother =
+        pendingAnother?.stage === "confirm_another_delivery" &&
+        itemDescriptionsMatch(
+          pendingAnother.items.map((i) => ({
+            kind: i.kind,
+            description: i.description,
+          })),
+          items,
+        ) &&
+        (explicitAnotherDelivery(text) || bareYes(text));
+      if (
+        pendingAnother?.stage === "confirm_another_delivery" &&
+        (explicitNotAnotherDelivery(text) ||
+          (bareNo(text) && !explicitAnotherDelivery(text)))
+      ) {
+        await this.clearPendingExtra(c, ctx);
+        const existing = await this.s.request(pendingAnother.request_id, c, true);
+        // Fall through to update path via sameOpenRequest below.
+        openSameItem.unshift(existing);
+      }
+      let sameOpenRequest: Request | undefined;
+      if (!confirmedAnother && openSameItem.length) {
+        const withRecv = openSameItem.map((existing) => {
+          const existingRecv = existing.parties.find((p) => p.role === "receiver");
+          const existingKey = receiverKey(existingRecv);
+          const incomplete = !existingKey || !incomingReceiverKey;
+          const match =
+            Boolean(existingKey && incomingReceiverKey && existingKey === incomingReceiverKey);
+          const different =
+            Boolean(existingKey && incomingReceiverKey && existingKey !== incomingReceiverKey);
+          const existingDate =
+            existing.proposed_run_date?.slice(0, 10) ??
+            existing.run_date?.slice(0, 10) ??
+            existing.earliest_run_date?.slice(0, 10) ??
+            null;
+          // Donate has no date field; date is complete only when existing has one
+          // and the customer restated the same date in this turn.
+          const dateInText = existingDate && text.includes(existingDate);
+          const dateMatch = Boolean(existingDate && dateInText);
+          const dateIncomplete = !existingDate || !dateInText;
+          return { existing, incomplete, match, different, dateMatch, dateIncomplete };
         });
-      let sameOpenRequest =
-        ctx.requests.find(
-          (existing) =>
-            !["coordinated", "closed", "cancelled", "rejected", "cancel_pending"].includes(
-              existing.status,
-            ) && sameItemShape(existing),
-        ) ??
-        ctx.requests.find(
-          (existing) => existing.status === "rejected" && sameItemShape(existing),
-        );
-      if (!sameOpenRequest) {
+        // Prefer updating when incomplete or date-certain match.
+        const updateCandidate =
+          withRecv.find((x) => x.incomplete) ??
+          withRecv.find((x) => x.match && x.dateMatch) ??
+          withRecv.find((x) => x.match && x.dateIncomplete);
+        if (updateCandidate?.incomplete || updateCandidate?.dateMatch) {
+          sameOpenRequest = updateCandidate.existing;
+        } else if (updateCandidate?.match && updateCandidate.dateIncomplete) {
+          // Full donor+receiver+item match, date unknown → ask; do not create.
+          await this.setPendingExtra(c, ctx, {
+            stage: "confirm_another_delivery",
+            request_id: updateCandidate.existing.id,
+            request_number: updateCandidate.existing.number,
+            existing_description: describeItems(updateCandidate.existing.items),
+            items: cmd.type === "donate" ? cmd.items : items,
+            free: cmd.type === "donate" ? (cmd.free ?? null) : null,
+            working: cmd.type === "donate" ? (cmd.working ?? null) : null,
+            direct: Boolean(direct),
+            counterparty_phone: other ?? null,
+            counterparty_name:
+              cmd.type === "donate" ? (cmd.counterparty_name ?? null) : null,
+          });
+          return output(ANOTHER_DELIVERY_ASK, updateCandidate.existing);
+        } else if (!withRecv.some((x) => x.different)) {
+          // Same item, no differing receiver → default update (covers empty #1 + vCard).
+          sameOpenRequest = openSameItem[0];
+        }
+        // else: known different receiver → allow create below
+      }
+      if (!sameOpenRequest && !confirmedAnother) {
         const rejectedOutside = await c.query<{ id: string }>(
           `SELECT r.id FROM requests r
            JOIN request_parties p ON p.request_id=r.id
@@ -430,6 +543,7 @@ export class Commands {
         if (rejectedOutside.rows[0])
           sameOpenRequest = await this.s.request(rejectedOutside.rows[0].id, c);
       }
+      if (confirmedAnother) await this.clearPendingExtra(c, ctx);
       if (sameOpenRequest) {
         // Reopen outside-area rejection and persist fields the action manager sent.
         const existing = await this.s.request(sameOpenRequest.id, c, true);
@@ -1050,6 +1164,23 @@ export class Commands {
         );
       if (pending?.stage === "same_or_other_recipient")
         return output(sameOrOtherQuestion(describeItems(pending.items)), r);
+      if (pending?.stage === "confirm_another_delivery") {
+        if (explicitNotAnotherDelivery(text) || bareNo(text)) {
+          await this.clearPendingExtra(c, ctx);
+          return output(
+            `בסדר, נמשיך בפנייה ${pending.request_number}. ${nextQuestion(r, phone).text}`.trim(),
+            r,
+          );
+        }
+        if (explicitAnotherDelivery(text) || bareYes(text)) {
+          // Keep pending so the next donate may open a twin; acknowledge.
+          return output(
+            "הבנתי — הובלה נוספת. אפשר לכתוב שוב את הפריט או הפרטים לפתיחת הפנייה החדשה.",
+            r,
+          );
+        }
+        return output(ANOTHER_DELIVERY_ASK, r);
+      }
       const previous = ctx.history.at(-1)?.content ?? "";
       const speaker = ownParty(r, phone);
       if (ambiguousStreetCity(text) && !speaker.address)
