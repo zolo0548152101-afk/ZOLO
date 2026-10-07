@@ -224,17 +224,12 @@ export function noProgressReply(
           : field === "name"
             ? "השם"
             : "הפרט החסר";
-  // Contact consent: never loop the same yes/no — demand an explicit phrase.
+  // Contact consent: plain כן/לא is enough — do not demand a special phrase.
   if (field === "contact_counterparty" || /אימות הפרטים/.test(q.text)) {
     const other = r.parties.find((x) => x.phone !== phone);
     const who =
       other?.name ?? (p.role === "donor" ? "המקבל" : "המוסר");
-    if (
-      previousBot.includes("לאשר במפורש") ||
-      previousBot.includes("תפנה אליו")
-    )
-      return `עדיין צריך אישור מפורש לפני שפונים ל${who} — למשל «כן, תפנה אליו» או «לא».`;
-    return `כדי לוודא — לאשר במפורש שנשלח הודעה ל${who}? למשל «כן, תפנה אליו».`;
+    return `אפשר שאכתוב ל${who} כדי לאמת את הפרטים? כן או לא מספיק.`;
   }
   let ask = q.text;
   // Soft variant when the previous bot line already asked the same thing.
