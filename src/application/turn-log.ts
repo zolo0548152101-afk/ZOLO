@@ -1,13 +1,16 @@
 import type pg from "pg";
 import type { Context, Plan, Request } from "../domain/types.js";
 import {
-  PHOTO_FIRST,
   PHOTO_STATUS,
-  SOFT_PHOTO_ASK,
   photoGate,
   photoStatusSkipsGate,
 } from "../domain/policies.js";
 import { isSelfIntroText, CLARIFY_REPLY } from "../domain/ai-guards.js";
+
+/** Detect an AI photo ask in the reply (no fixed code sentences). */
+function replyAsksPhoto(reply: string): boolean {
+  return /תמונה/.test(reply) && /(?:שלח|לשלוח|אפשר לשלוח|נא לשלוח|אם יש)/u.test(reply);
+}
 
 export type TurnFate =
   | "completed"
@@ -115,8 +118,7 @@ export function observePolicies(
   const askedThisTurn =
     opts.intent === "ask_photo" ||
     Boolean(opts.photoHold) ||
-    reply.includes(PHOTO_FIRST) ||
-    reply.includes(SOFT_PHOTO_ASK);
+    replyAsksPhoto(reply);
   if (askedThisTurn || (selected && photoGate(selected))) {
     policies.photoGate = {
       fired: true,
@@ -142,15 +144,12 @@ export function observePolicies(
     };
   }
 
-  const photoFirst = askedThisTurn;
-  policies.PHOTO_FIRST = {
-    fired: photoFirst,
-    why: photoFirst
+  policies.photo_ask = {
+    fired: askedThisTurn,
+    why: askedThisTurn
       ? opts.photoHold
         ? "holdingForPhoto soft nudge (non-sticky)"
-        : reply.includes(SOFT_PHOTO_ASK)
-          ? "soft optional photo ask once"
-          : "photo ask present in reply"
+        : "photo ask present in AI reply"
       : selected && photoStatusSkipsGate(selected.photo_status)
         ? `skipped: photo_status=${selected.photo_status}`
         : "not applied this turn",

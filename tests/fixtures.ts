@@ -10,10 +10,11 @@ import type {
   Item,
   Notice,
 } from "../src/domain/types.js";
-import type { Planner } from "../src/infrastructure/ai.js";
+import type { Planner, ReplyInput, ReplyResult } from "../src/infrastructure/ai.js";
 import type { Channel, Delivery } from "../src/infrastructure/waha.js";
 import { asItem } from "../src/application/commands.js";
 import { rulePlan } from "../src/application/rule-planner.js";
+import { emptyClaims } from "../src/domain/ai-guards.js";
 import { setTimeout as delay } from "node:timers/promises";
 export const log = { info: () => {}, warn: () => {}, error: () => {} };
 export const JPEG = Buffer.from([
@@ -98,13 +99,14 @@ export class FakePlanner implements Planner {
   }
   async reply(
     _ctx: Context,
-    input: { operation: Record<string, unknown>; fallback: string },
-  ): Promise<{ text: string; metadata: Record<string, unknown> }> {
+    input: ReplyInput,
+  ): Promise<ReplyResult> {
     this.replyCalls++;
     if (this.fail) throw new Error("simulated_openai_timeout");
     return {
-      text: this.phraseReplyText || this.managedReply || input.fallback,
-      metadata: { test_double: true, operation: input.operation },
+      text: this.phraseReplyText || this.managedReply || input.fallback || "",
+      claims: emptyClaims(),
+      metadata: { test_double: true },
     };
   }
   async phraseNotice(

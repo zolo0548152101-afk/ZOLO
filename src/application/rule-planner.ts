@@ -1,3 +1,8 @@
+/**
+ * Deterministic rule planner — TEST / FIXTURE ONLY.
+ * Production Action Manager owns planning; this file must not be imported by
+ * runtime engine paths (`engine.ts`, `commands.ts`, `ai.ts`).
+ */
 import type { Command, Context, ItemKind, Plan, Request } from "../domain/types.js";
 import {
   appliance,
@@ -525,7 +530,7 @@ function recipientExtraChoice(text: string): "same" | "other" | null {
 export function rulePlan(ctx: Context): Plan | null {
   const text = (ctx.message.transcript ?? ctx.message.text).trim();
   if (!text) return null;
-  const pendingExtra = ctx.conversation.pending_extra_item ?? null;
+  const pendingExtra = ctx.conversation?.pending_extra_item ?? null;
   if (pendingExtra?.stage === "replace_or_add") {
     const choice = replaceExtraChoice(text);
     // Compat: still resolve במקום/בנוסף when pending_extra exists.
@@ -1003,17 +1008,20 @@ export function rulePlan(ctx: Context): Plan | null {
         prior,
       );
     const bare = norm(text).trim();
+    const extracted = explicitName(bare);
     if (
       askedName &&
-      looksLikePersonName(bare) &&
-      !/(?:רחוב|שכונ|קומה|בית\s*שאן|תמונה|כן|לא)/u.test(bare)
+      !/(?:רחוב|שכונ|קומה|בית\s*שאן|תמונה|כן|לא)/u.test(bare) &&
+      (extracted ||
+        (looksLikePersonName(bare) &&
+          !/(?:השם|שמי|קוראים\s+לי)/u.test(bare)))
     ) {
       return plan(text, [
         {
           type: "details",
           request_number: current.number,
           role: party.role,
-          name: bare,
+          name: extracted ?? bare,
           settlement: null,
           address: null,
           floor: null,

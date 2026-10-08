@@ -24,7 +24,7 @@ import {
 import {
   isStatus,
   photoGate,
-  quickReply,
+  isQuickTopic,
   statusText,
   PHOTO_STATUS,
   OUTSIDE,
@@ -496,7 +496,7 @@ export class Engine {
     // handoff, or answer the admin's capacity question. finish() decides.
     if (
       !plan &&
-      (quickReply(text) !== null ||
+      (isQuickTopic(text) ||
         isStatus(text) ||
         (ctx.conversation.phone === this.s.config.ADMIN_PHONE &&
           /^#פניות(?:\s+(?:ל)?חיים\s+יחד)?\s*$/.test(text.trim())))
@@ -1199,7 +1199,7 @@ export class Engine {
           reply = null;
           reason ??= "media_failure";
         }
-      } else if (quickReply(text) !== null) {
+      } else if (isQuickTopic(text)) {
         // FAQ/greeting: no code sentence — Reply manager phrases from state.
         intent = "acknowledge";
         reply = null;
