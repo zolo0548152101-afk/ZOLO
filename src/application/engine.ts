@@ -1894,6 +1894,7 @@ export class Engine {
           "UPDATE outbox SET text=$2,format_state='ready' WHERE id=$1 AND state='pending'",
           [committed.customerOutboxId, text],
         );
+        await this.s.scheduleSendIfReady(c, committed.customerOutboxId!);
         await c.query(
           "UPDATE messages SET reply=$2 WHERE id=$1",
           [id, text],
@@ -1960,6 +1961,8 @@ export class Engine {
             "UPDATE outbox SET text=$2,format_state=$3 WHERE id=$1 AND format_state='pending'",
             [item.outboxId, text, state],
           );
+          if (state === "ready")
+            await this.s.scheduleSendIfReady(c, item.outboxId);
           await this.s.event(c, ctx.message, "system", "managed_notice_formatted", {
             outbox_id: item.outboxId,
             format_state: state,
@@ -2045,9 +2048,10 @@ export class Engine {
       if (["sent", "shadow", "simulation", "cancelled"].includes(out.state))
         return null;
       // Cancelled/sent rows must never block the send FIFO. Format pending is
-      // only meaningful for live rows still waiting on notice phrasing.
-      if (out.format_state === "pending")
-        throw new RetryableError("notice_format_pending");
+      // only meaningful for rows still waiting on reply/notice phrasing —
+      // do not retry with exponential backoff (that added 8–40s of delay).
+      // Leave the job; scheduleSendIfReady enqueues a fresh send when ready.
+      if (out.format_state === "pending") return null;
       // Never freeze behind uncertain/failed older rows — abandon them and
       // continue with the current reply.
       await c.query(

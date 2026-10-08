@@ -868,34 +868,60 @@ export class Store {
         notice.match_id ?? null,
       ],
     );
-    if (row.rows[0]) {
-      // Schedule only the head of this recipient's queue. Scheduling every
-      // row at once races the FIFO worker and can permanently strand later
-      // WhatsApp replies behind a retried job.
-      const older = await c.query(
-        `SELECT 1 FROM outbox
-          WHERE phone=$1 AND seq<(SELECT seq FROM outbox WHERE id=$2)
-            AND state IN ('pending','sending','uncertain','failed')
-          LIMIT 1`,
-        [phone, row.rows[0].id],
-      );
-      if (!older.rowCount) {
-        const job = await this.queue.send(
-          c,
-          "send",
-          { id: row.rows[0].id },
-          phone,
-        );
-      await c.query("UPDATE outbox SET job_id=$2 WHERE id=$1", [
-          row.rows[0].id,
-          job,
-        ]);
-      }
-    }
     if (!row.rows[0]) return null;
-    if (formatState === "pending")
-      await c.query("UPDATE outbox SET format_state='pending' WHERE id=$1", [row.rows[0].id]);
+    // Mark pending BEFORE any send scheduling. Pending rows wait for the
+    // reply/notice formatter; enqueueing early races the worker into
+    // notice_format_pending retries with exponential backoff (8–40s delays).
+    if (formatState === "pending") {
+      await c.query("UPDATE outbox SET format_state='pending' WHERE id=$1", [
+        row.rows[0].id,
+      ]);
+      return row.rows[0].id;
+    }
+    await this.scheduleSendIfReady(c, row.rows[0].id, phone);
     return row.rows[0].id;
+  }
+
+  /**
+   * Enqueue WhatsApp send only when the outbox row is format-ready and is the
+   * head of this phone's FIFO. Used after reply/notice formatting completes.
+   */
+  async scheduleSendIfReady(
+    c: pg.PoolClient,
+    outboxId: string,
+    phone?: string,
+  ): Promise<string | null> {
+    const row = await c.query<{
+      id: string;
+      phone: string;
+      state: string;
+      format_state: string;
+      job_id: string | null;
+    }>(
+      `SELECT id, phone, state, format_state, job_id FROM outbox WHERE id=$1 FOR UPDATE`,
+      [outboxId],
+    );
+    const out = row.rows[0];
+    if (!out) return null;
+    const recipient = phone ?? out.phone;
+    if (out.state !== "pending" || out.format_state !== "ready") return null;
+    // Schedule only the head of this recipient's queue. Scheduling every
+    // row at once races the FIFO worker and can permanently strand later
+    // WhatsApp replies behind a retried job.
+    const older = await c.query(
+      `SELECT 1 FROM outbox
+        WHERE phone=$1 AND seq<(SELECT seq FROM outbox WHERE id=$2)
+          AND state IN ('pending','sending','uncertain','failed')
+        LIMIT 1`,
+      [recipient, outboxId],
+    );
+    if (older.rowCount) return null;
+    // Drop backoff leftovers from the old pending-format race so the ready
+    // row is not stuck behind a start_after delay.
+    await this.queue.releaseSingleton("send", recipient, ["retry", "failed"]);
+    const job = await this.queue.send(c, "send", { id: outboxId }, recipient);
+    await c.query("UPDATE outbox SET job_id=$2 WHERE id=$1", [outboxId, job]);
+    return job;
   }
   async linkPhoto(c: pg.PoolClient, r: Request, m: Incoming): Promise<void> {
     // Skip silently when the image cannot be attached — never 403→human.
