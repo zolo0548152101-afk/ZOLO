@@ -2,8 +2,8 @@ import { neon } from "@neondatabase/serverless";
 
 export function getSql() {
   const url = process.env.DATABASE_URL;
-  if (!url) {
-    throw new Error("DATABASE_URL is not set");
+  if (!url || !url.startsWith("postgres")) {
+    throw new Error("DATABASE_URL is missing or invalid");
   }
   return neon(url);
 }
