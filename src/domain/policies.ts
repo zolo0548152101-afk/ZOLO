@@ -94,120 +94,14 @@ export function displayPhone(phone: string): string {
  * Values come from `after` (DB state after the write) — never invented.
  * Returns null when nothing new was persisted.
  */
+/**
+ * @deprecated AI reply manager owns customer wording. Always returns null so
+ * code cannot inject save-ack sentences. Kept as a no-op for call sites.
+ */
 export function summarizeTurnChanges(
-  before: Request | null | undefined,
-  after: Request | null | undefined,
+  _before: Request | null | undefined,
+  _after: Request | null | undefined,
 ): string | null {
-  if (!after) return null;
-  const beforeItems = before?.items ?? [];
-  const afterItems = after.items ?? [];
-  const itemsNew =
-    afterItems.length > 0 &&
-    (beforeItems.length === 0 ||
-      afterItems.some(
-        (item, i) =>
-          item.description && item.description !== beforeItems[i]?.description,
-      ));
-  const itemText = itemsNew
-    ? afterItems
-        .map((i) => i.description?.trim())
-        .filter((x): x is string => Boolean(x))
-        .join(" ו")
-    : "";
-
-  const beforeReceiver = before?.parties?.find((p) => p.role === "receiver");
-  const afterReceiver = after.parties.find((p) => p.role === "receiver");
-  const receiverNew = Boolean(afterReceiver && !beforeReceiver);
-  const receiverNameNew =
-    receiverNew ||
-    Boolean(
-      afterReceiver?.name && afterReceiver.name !== (beforeReceiver?.name ?? null),
-    );
-  const receiverPhoneNew =
-    receiverNew ||
-    Boolean(
-      afterReceiver?.phone &&
-        afterReceiver.phone !== (beforeReceiver?.phone ?? null),
-    );
-  const beforeOwn = before?.parties?.find((p) => p.phone === after.parties.find((x) => x.role === "donor")?.phone);
-  const afterDonor = after.parties.find((p) => p.role === "donor");
-  const beforeDonor = before?.parties?.find((p) => p.role === "donor");
-  const settlementNew = Boolean(
-    afterDonor?.settlement &&
-      afterDonor.settlement !== (beforeDonor?.settlement ?? null),
-  );
-  const addressNew = Boolean(
-    afterDonor?.address && afterDonor.address !== (beforeDonor?.address ?? null),
-  );
-  const nameNew = Boolean(
-    afterDonor?.name && afterDonor.name !== (beforeDonor?.name ?? null),
-  );
-  const floorNew = Boolean(
-    afterDonor &&
-      afterDonor.floor !== null &&
-      afterDonor.floor !== (beforeDonor?.floor ?? null),
-  );
-
-  // Nothing newly written this turn.
-  if (
-    !itemText &&
-    !receiverNameNew &&
-    !receiverPhoneNew &&
-    !settlementNew &&
-    !addressNew &&
-    !nameNew &&
-    !floorNew
-  )
-    return null;
-
-  // Fresh handoff write: item and/or receiver captured together.
-  if (itemText || receiverNameNew || receiverPhoneNew) {
-    const name = receiverNameNew ? afterReceiver?.name : null;
-    const phone = receiverPhoneNew ? afterReceiver?.phone : null;
-    if (itemText && name && phone)
-      return `מעולה, רשמתי שאתה רוצה למסור ${itemText} ל${name} (${displayPhone(phone)})`;
-    if (itemText && name)
-      return `מעולה, רשמתי שאתה רוצה למסור ${itemText} ל${name}`;
-    if (itemText && phone)
-      return `מעולה, רשמתי שאתה רוצה למסור ${itemText} למספר ${displayPhone(phone)}`;
-    if (itemText) return `מעולה, רשמתי שאתה רוצה למסור ${itemText}`;
-    if (name && phone)
-      return `מעולה, רשמתי מסירה ל${name} (${displayPhone(phone)})`;
-    if (name) return `מעולה, רשמתי מסירה ל${name}`;
-  }
-
-  // Later turns: only the field that just changed.
-  if (settlementNew && afterDonor?.settlement)
-    return `מעולה, רשמתי ${afterDonor.settlement}`;
-  if (addressNew && afterDonor?.address) {
-    const place = [afterDonor.address, afterDonor.settlement]
-      .filter(Boolean)
-      .join(" ");
-    return `מעולה, רשמתי ${place}`;
-  }
-  const afterRecvSettlementNew = Boolean(
-    afterReceiver?.settlement &&
-      afterReceiver.settlement !== (beforeReceiver?.settlement ?? null),
-  );
-  const afterRecvAddressNew = Boolean(
-    afterReceiver?.address &&
-      afterReceiver.address !== (beforeReceiver?.address ?? null),
-  );
-  if (afterRecvAddressNew && afterReceiver?.address) {
-    const place = [afterReceiver.address, afterReceiver.settlement]
-      .filter(Boolean)
-      .join(" ");
-    return `מעולה, רשמתי יעד ${place}`;
-  }
-  if (afterRecvSettlementNew && afterReceiver?.settlement)
-    return `מעולה, רשמתי יעד ${afterReceiver.settlement}`;
-  if (floorNew && afterDonor && afterDonor.floor !== null)
-    return afterDonor.floor === 0
-      ? "מעולה, רשמתי קומת קרקע"
-      : `מעולה, רשמתי קומה ${afterDonor.floor}`;
-  if (nameNew && afterDonor?.name)
-    return `נעים מאוד ${afterDonor.name}, רשמתי`;
-  void beforeOwn;
   return null;
 }
 
@@ -278,16 +172,15 @@ export function photoAskAlreadySent(
       /(?:שלח|לשלוח|אפשר לשלוח|נא לשלוח|אם יש)/u.test(entry.content),
   );
 }
-/** Next ask, optionally prefixed with this-turn DB ack only. */
+/**
+ * @deprecated AI owns wording. Returns the ask only — never prefixes an ack.
+ */
 export function composeTurnReply(
   ask: string,
-  before: Request | null | undefined,
-  after: Request | null | undefined,
+  _before: Request | null | undefined,
+  _after: Request | null | undefined,
 ): string {
-  const ack = summarizeTurnChanges(before, after);
-  const next = ask.trim();
-  if (ack && next && !next.includes(ack)) return `${ack}\n${next}`;
-  return next || ack || "";
+  return ask.trim();
 }
 /** @deprecated use composeTurnReply — kept as alias for call sites mid-migration */
 export function composeRecordedReply(

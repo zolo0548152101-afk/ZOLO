@@ -4,7 +4,6 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Store, type Outbound } from "../infrastructure/store.js";
 import { Commands, type Outcome } from "./commands.js";
 import { type Planner } from "../infrastructure/ai.js";
-import { rulePlan } from "./rule-planner.js";
 import {
   DeliveryError,
   type Channel,
@@ -48,18 +47,25 @@ import {
   photoStatusSkipsGate,
   customerIntentClear,
   openingPhotoReply,
-  summarizeTurnChanges,
-  composeTurnReply,
 } from "../domain/policies.js";
 import {
-  CLARIFY_REPLY,
+  OUTAGE_REPLY,
+  GUARD_FALLBACK_REPLY,
   FAULT_REPLY,
+  CLARIFY_REPLY,
   probeReply,
   isSelfIntroText,
   stripRepeatedSelfIntro,
-  applyClaimGuard,
+  verifyClaims,
+  emptyClaims,
+  type ReplyClaims,
 } from "../domain/ai-guards.js";
 import { diffChangedFields, type ChangedField } from "../domain/field-map.js";
+import {
+  type ActionResultFact,
+  type NoticeFact,
+  type RulesState,
+} from "../domain/turn-facts.js";
 import {
   conversationLanguage,
   isCustomerClarify,
@@ -515,7 +521,8 @@ export class Engine {
       try {
         // Free-form Hebrew is decoded by the AI. The action manager owns every
         // field value from the prompt; commands.apply is the DB write tool.
-        const response = await this.ai.plan(ctx);
+        const rules = await this.s.loadRulesState();
+        const response = await this.ai.plan(ctx, rules);
         const parsed = planSchema.parse(response.plan);
         plan = parsed;
         await this.s.pool.query(
@@ -534,28 +541,11 @@ export class Engine {
         if (!response.understood && !actionable)
           throw new AppError("action_manager_unclear");
       } catch (e) {
-        // Transient API failures retry once. After the last attempt, rulePlan
-        // is only a fallback when the action manager itself failed — never to
-        // override a successful AI plan.
+        // Transient API failures retry once. No rule-planner conversation
+        // steering — on final failure send the neutral outage line.
         if (!lastAiAttempt && !(e instanceof AppError))
           throw new RetryableError("openai_retry");
-        const deterministic = rulePlan(ctx);
-        if (deterministic) {
-          plan = deterministic;
-          await this.s.pool.query(
-            `UPDATE messages SET ai_plan=$2,plan_versions=$3,ai_metadata=$4 WHERE id=$1 AND ai_plan IS NULL AND processed_at IS NULL`,
-            [
-              id,
-              JSON.stringify(plan),
-              JSON.stringify(this.versions(ctx)),
-              JSON.stringify({
-                provider: "rules",
-                action_source: "rules_fallback",
-                ai_error: errorCode(e),
-              }),
-            ],
-          );
-        } else if (this.softContinuePastPhoto(ctx, text)) {
+        if (this.softContinuePastPhoto(ctx, text)) {
           await this.finishNextDetail(id);
           return;
         } else if (this.holdingForPhoto(ctx, text)) {
@@ -967,20 +957,10 @@ export class Engine {
           "cancel_pending",
         ].includes(request.status),
     );
-    if (!waiting) return false;
-    const planned = rulePlan(ctx);
-    if (
-      planned?.commands.some((command) =>
-        command.type === "donate" ||
-        command.type === "seek" ||
-        command.type === "cancel" ||
-        command.type === "counterparty" ||
-        command.type === "counterparty_candidate" ||
-        command.type === "confirm_counterparty",
-      )
-    )
-      return false;
-    return true;
+    // Photo holds are decided by the action/reply managers, not by a
+    // deterministic planner shortcut.
+    void waiting;
+    return false;
   }
 
   /** After a soft photo ask: decline or other text → next missing field (no re-ask). */
@@ -1797,27 +1777,11 @@ export class Engine {
             ) {
               void handoffTransitionPlanned;
               if (!declinedPhoto && !photoAsked) {
-                // Soft photo ask once for open donations. Never mark «בוקשה»
-                // unless the outbound reply actually asks for a photo.
-                const mentionsPhoto = /תמונה/.test(reply ?? "");
-                if (!reply?.trim()) {
-                  reply = openingPhotoReply(request, phone, beforeRequest);
-                  intent = "ask_photo";
-                } else if (
-                  !mentionsPhoto &&
-                  request.origin === "donation" &&
-                  !request.parties.some((p) => p.role === "receiver")
-                ) {
-                  const ack = summarizeTurnChanges(beforeRequest, request);
-                  reply = ack
-                    ? `${ack}\n${reply}\n${SOFT_PHOTO_ASK}`
-                    : `${reply}\n${SOFT_PHOTO_ASK}`;
-                  intent = "ask_photo";
-                }
-                if (intent === "ask_photo" || /תמונה/.test(reply ?? "")) {
-                  request.photo_status = PHOTO_STATUS.ASKED;
-                  await this.s.save(c, request);
-                }
+                // Photo nudge is owned by the reply manager. Code only marks
+                // status when the customer already declined or a photo arrived.
+                void openingPhotoReply;
+                void SOFT_PHOTO_ASK;
+                void PHOTO_FIRST;
               } else if (declinedPhoto) {
                 request.photo_status = PHOTO_STATUS.NO_PHOTO;
                 await this.s.save(c, request);
@@ -1984,26 +1948,13 @@ export class Engine {
         beforeSearch,
         afterSearch: afterCtx.active_search ?? null,
       });
-      // Keep AI/command replies — do not rebuild via composeTurnReply or
-      // overwrite with noProgressReply. Capacity/schedule/coordination
-      // boundary replies are applied earlier and remain authoritative.
-      // protectedReply still marks operational replies that must not be
-      // replaced by free model text; claim-guard handles phrasing instead.
+      // The AI reply manager owns customer wording after commit. Code only
+      // keeps a pending placeholder here; boundaries already applied above.
       void protectedReply;
       if (reason) await this.alert(c, ctx, reason, reply, request);
-      // Every processed customer turn must produce an outbound reply.
-      if (!reply?.trim())
-        reply = request
-          ? nextQuestion(request, phone).text || CLARIFY_REPLY
-          : CLARIFY_REPLY;
-      // Safety net: always prefix this-turn DB ack (name/address/…) when
-      // commands forgot composeTurnReply or a later step overwrote it.
-      if (request && beforeRequest && reply?.trim()) {
-        const withAck = composeTurnReply(reply, beforeRequest, request);
-        if (withAck && withAck !== reply) reply = withAck;
-      }
-      // Never ship the old «חסר רק…» wording (canonical or model paraphrase).
-      if (reply) reply = stripRakOnlyClaims(reply);
+      // Placeholder until the reply manager writes the real text. Keep any
+      // structured command result only as an AI-disabled / outage fallback.
+      if (!reply?.trim()) reply = GUARD_FALLBACK_REPLY;
       let customerOutboxId: string | null = null;
       customerOutboxId = await this.s.outbound(
         c,
@@ -2112,36 +2063,80 @@ export class Engine {
         });
       } else {
       const ctx = await this.s.context(id);
-      let text = committed.canonicalReply;
+      const rules = await this.s.loadRulesState(this.s.pool);
+      let text = OUTAGE_REPLY;
       let rejected = false;
+      let rejectedClaims: string[] = [];
       let replyMeta: Record<string, unknown> | null = null;
+      let claims: ReplyClaims = emptyClaims();
+      const changedPaths = (committed.changedFields ?? []).map((field) =>
+        field.role
+          ? `${field.table}.${field.column}:${field.role}`
+          : `${field.table}.${field.column}`,
+      );
+      const claimFacts = {
+        changedPaths,
+        openedRequestNumber:
+          typeof committed.operation?.request_number === "number" &&
+          committed.operation?.action_results?.intent === "donate"
+            ? (committed.operation.request_number as number)
+            : null,
+        contactedCounterparty:
+          (committed.operation?.outbound_notices_queued ?? 0) > 0,
+        scheduleDate:
+          typeof committed.operation?.changed_fields === "object"
+            ? ((ctx.requests.find((r) => r.id === committed.requestId)
+                ?.proposed_run_date as string | null) ?? null)
+            : null,
+        cancelled: committed.operation?.request_status === "cancelled",
+        humanHandoff: committed.operation?.request_status === "human",
+        knownRequestNumbers: ctx.requests.map((r) => r.number),
+      };
+      const replyInput = {
+        rules,
+        commands: Array.isArray(committed.operation?.action_results)
+          ? []
+          : ((committed as { planCommands?: unknown[] }).planCommands ?? []),
+        results: [] as ActionResultFact[],
+        changed: committed.changedFields ?? [],
+        boundary: null as RulesState extends never ? never : null,
+        notices: [] as NoticeFact[],
+        fallback: OUTAGE_REPLY,
+      };
       try {
-        const generated = await this.ai.reply(ctx, {
-          fallback: committed.canonicalReply,
-          operation: committed.operation,
-        });
+        let generated = await this.ai.reply(ctx, replyInput);
         replyMeta = generated.metadata;
-        // Reply manager owns customer wording. Do not replace it with the
-        // canonical template when the model produced text.
-        const phrased = (generated.text ?? "").trim();
-        const guarded = applyClaimGuard(
-          committed.canonicalReply,
-          phrased || committed.canonicalReply,
-          Boolean(committed.provenOperational),
-          committed.changedFields ?? [],
-        );
-        text = guarded.text;
-        rejected = guarded.rejected;
+        claims = generated.claims;
+        let check = verifyClaims(claims, claimFacts);
+        if (!check.ok) {
+          rejected = true;
+          rejectedClaims = check.rejected;
+          generated = await this.ai.reply(ctx, {
+            ...replyInput,
+            guardFeedback: { rejected_claims: check.rejected },
+          });
+          replyMeta = generated.metadata;
+          claims = generated.claims;
+          check = verifyClaims(claims, claimFacts);
+          if (!check.ok) {
+            rejected = true;
+            rejectedClaims = check.rejected;
+            text = GUARD_FALLBACK_REPLY;
+          } else {
+            rejected = false;
+            text = generated.text.trim() || GUARD_FALLBACK_REPLY;
+          }
+        } else {
+          text = generated.text.trim() || GUARD_FALLBACK_REPLY;
+        }
       } catch (e) {
         this.log.error({
           code: errorCode(e),
           outbox_id: committed.customerOutboxId,
-          stage: "customer_phrase",
+          stage: "customer_reply",
         });
+        text = OUTAGE_REPLY;
       }
-      // Intro-once against outbox: if this phone already received any sent
-      // reply since reset, never introduce again — even when the first reply
-      // itself skipped the intro line.
       const priorOutbox = await this.s.pool.query<{ n: number; intro: number }>(
         `SELECT count(*)::int AS n,
                 count(*) FILTER (
@@ -2164,42 +2159,12 @@ export class Engine {
           (entry) => entry.role === "assistant" && isSelfIntroText(entry.content),
         );
       auditedIntroduced = introduced;
-      // Intro only when intent is unclear. Clear donate/receive paths skip it.
       const clearIntent =
         customerIntentClear(ctx.message.transcript ?? ctx.message.text) ||
         ctx.requests.length > 0;
       const suppressIntro = introduced || clearIntent;
-      const canonical = committed.canonicalReply;
-      // Never lock the whole reply to the fixed PHOTO_FIRST line — allow natural
-      // phrasing, but keep a photo ask if the canonical soft-ask included one.
+      // Only strip a repeated intro — never rewrite or reinject sentences.
       text = stripRepeatedSelfIntro(text, ctx.history, suppressIntro);
-      const lang = conversationLanguage(ctx);
-      const fromTemplate = localizeCustomer(canonical, lang);
-      text =
-        fromTemplate !== canonical
-          ? fromTemplate
-          : localizeCustomer(text, lang);
-      text = stripRepeatedSelfIntro(text, ctx.history, suppressIntro);
-      // If the model dropped a required soft photo ask, restore canonical (DB-backed).
-      if (
-        committed.operation?.action_results?.intent === "ask_photo" &&
-        /תמונה/.test(canonical) &&
-        !/תמונה/.test(text)
-      )
-        text = stripRepeatedSelfIntro(canonical, ctx.history, suppressIntro);
-      // Keep this-turn save ack (name/address/…) when the model jumped to the next ask.
-      const turnAck = canonical.match(
-        /^(?:נעים מאוד[^\n]+|מעולה, רשמתי[^\n]+)/u,
-      )?.[0];
-      if (
-        turnAck &&
-        (committed.changedFields?.length ?? 0) > 0 &&
-        !text.includes(turnAck.slice(0, Math.min(12, turnAck.length)))
-      )
-        text = `${turnAck}\n${text}`.trim();
-      // Reply manager may reintroduce «חסר רק…» — strip after phrasing too.
-      text = stripRakOnlyClaims(text);
-      // Do not re-attach a full-chat “רשמתי מסירה…” — ack is only for this turn’s writes.
       auditedReply = text;
       await this.s.transaction(async (c) => {
         const stillNewer = await c.query<{ id: string }>(
@@ -2223,7 +2188,6 @@ export class Engine {
           return;
         }
         await c.query(
-          // Update text even if a race flipped format_state to ready already.
           "UPDATE outbox SET text=$2,format_state='ready' WHERE id=$1 AND state='pending'",
           [committed.customerOutboxId, text],
         );
@@ -2231,14 +2195,20 @@ export class Engine {
           "UPDATE messages SET reply=$2 WHERE id=$1",
           [id, text],
         );
-        // Persist reply-manager provenance next to decode metadata so OpenAI
-        // Responses can be retrieved by id and distinguished from action decode.
         if (replyMeta) {
           await c.query(
             `UPDATE messages
                 SET ai_metadata = coalesce(ai_metadata, '{}'::jsonb) || jsonb_build_object('reply', $2::jsonb)
               WHERE id=$1`,
-            [id, JSON.stringify(replyMeta)],
+            [
+              id,
+              JSON.stringify({
+                ...replyMeta,
+                claims,
+                claim_rejected: rejected,
+                rejected_claims: rejectedClaims,
+              }),
+            ],
           );
           await this.s.event(
             c,
@@ -2251,12 +2221,14 @@ export class Engine {
               prompt_version: replyMeta.prompt_version ?? null,
               response_id: replyMeta.response_id ?? null,
               rejected,
+              rejected_claims: rejectedClaims,
             },
             committed.requestId,
           );
         }
         if (rejected)
           await this.s.event(c, ctx.message, "system", "phrase_claim_rejected", {
+            rejected_claims: rejectedClaims,
             claim: text.slice(0, 500),
           }, committed.requestId);
       });

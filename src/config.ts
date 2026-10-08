@@ -17,11 +17,16 @@ const envSchema = z.object({
   DB_POOL_MAX: z.coerce.number().int().min(4).max(50).default(12),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
   OPENAI_API_KEY: z.string().default(""),
-  OPENAI_MODEL: z.string().default("gpt-5.6-luna"),
-  OPENAI_PROMPT_ID: z
-    .string()
-    .default("pmpt_6a9d0c66737881938a0f60f5df9088cb0806a26699929a86"),
-  OPENAI_PROMPT_VERSION: z.string().default("23"),
+  // Dashboard owns the model. This is only a log/fallback label; requests
+  // do not override the hosted prompt's model.
+  OPENAI_MODEL: z.string().default("gpt-6-luna"),
+  OPENAI_ACTION_PROMPT_ID: z.string().default(""),
+  OPENAI_ACTION_PROMPT_VERSION: z.string().default(""),
+  OPENAI_REPLY_PROMPT_ID: z.string().default(""),
+  OPENAI_REPLY_PROMPT_VERSION: z.string().default(""),
+  // Legacy eval harness only — never used at runtime.
+  OPENAI_PROMPT_ID: z.string().default(""),
+  OPENAI_PROMPT_VERSION: z.string().default(""),
   OPENAI_REASONING_EFFORT: z.enum(["none", "low", "medium"]).default("low"),
   OPENAI_TIMEOUT_MS: z.coerce
     .number()
@@ -136,6 +141,12 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error("simulation_requires_separate_schema");
   if (c.AI_ENABLED && !c.OPENAI_API_KEY)
     throw new Error("missing_openai_key_or_disable_ai");
+  if (c.AI_ENABLED) {
+    if (!c.OPENAI_ACTION_PROMPT_ID || !c.OPENAI_ACTION_PROMPT_VERSION)
+      throw new Error("missing_hosted_action_prompt");
+    if (!c.OPENAI_REPLY_PROMPT_ID || !c.OPENAI_REPLY_PROMPT_VERSION)
+      throw new Error("missing_hosted_reply_prompt");
+  }
   if (
     c.BOT_MODE === "live" &&
     (!c.WAHA_API_KEY ||
