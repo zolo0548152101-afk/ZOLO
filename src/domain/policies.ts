@@ -463,52 +463,60 @@ export function photoGate(r: Request): boolean {
 export function isClosed(r: Request): boolean {
   return ["closed", "cancelled", "rejected"].includes(r.status);
 }
-export function mutable(r: Request): void {
-  if (
-    r.status === "coordinated" ||
-    isClosed(r) ||
-    r.status === "cancel_pending"
-  )
-    throw new AppError(
-      "request_protected",
-      409,
-      "הפנייה מוגנת משינוי. לפנייה חדשה יש לציין שמדובר בבקשה חדשה; לשינוי התיאום נעביר לטיפול אנושי.",
-    );
+/** No-op: write path never blocks on status. Program rules live in prompts. */
+export function mutable(_r: Request): void {}
+
+function blankParty(
+  role: "donor" | "receiver",
+  phone: string | null,
+): Party {
+  return {
+    role,
+    phone,
+    name: null,
+    settlement: null,
+    address: null,
+    floor: null,
+    floor_note_shown: false,
+    approved_at: null,
+    approved_by: null,
+    schedule_approved: false,
+    schedule_approved_date: null,
+    schedule_approved_at: null,
+  };
 }
+
+/**
+ * Resolve (or create) the party row Action wants to write.
+ * Code never enforces authorization — prompts own who may update whom.
+ * Missing role rows are created so details/donate plans can persist.
+ */
 export function ownParty(
   r: Request,
   phone: string,
   role?: "donor" | "receiver",
 ): Party {
-  // Strangers (not on the request) cannot write. A party already on the
-  // request may update either side when Action specifies a role — e.g. donor
-  // correcting the receiver name (יוסי→טל). Not one of the 4 hard boundaries.
-  const speakerOnRequest = r.parties.some((p) => p.phone === phone);
-  if (!speakerOnRequest)
-    throw new AppError(
-      "forbidden_party",
-      403,
-      "אפשר לעדכן רק פנייה שאתה צד בה.",
-    );
   if (role) {
     const target = r.parties.find((p) => p.role === role);
     if (target) return target;
-  }
-  const own = r.parties.filter(
-    (p) => p.phone === phone && (!role || p.role === role),
-  );
-  const p = own.find((x) => !x.name || !x.settlement || !x.address) ?? own[0];
-  if (!p)
-    throw new AppError(
-      "forbidden_party",
-      403,
-      "אפשר לעדכן רק פנייה שאתה צד בה.",
+    const speaker = r.parties.find((p) => p.phone === phone);
+    // Counterparty side stays phone-null until Action/contact supplies it.
+    const created = blankParty(
+      role,
+      speaker && speaker.role !== role ? null : phone,
     );
-  return p;
+    r.parties.push(created);
+    return created;
+  }
+  const own = r.parties.filter((p) => p.phone === phone);
+  const p = own.find((x) => !x.name || !x.settlement || !x.address) ?? own[0];
+  if (p) return p;
+  const created = blankParty("donor", phone);
+  r.parties.push(created);
+  return created;
 }
 export function itemError(items: Item[], hasPhoto: boolean): string | null {
-  // Furniture count / grouping is prompt-only (AI decides). Code does not
-  // enforce a numeric item ceiling here — only program disqualifiers below.
+  // Advisory copy for completeness/prompts only — never used to block writes.
   if (items.some((i) => i.kind === "piano" || i.kind === "house_move"))
     return "לא ניתן לסייע בהובלת פסנתרים או בהובלות דירה.";
   if (items.some((i) => i.free === false))

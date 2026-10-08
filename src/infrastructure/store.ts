@@ -65,43 +65,11 @@ export class Store {
   }
 
   /**
-   * Shared rules facts for both AI stages. Falls back to defaults when the
-   * rules table is missing or empty. Capacity counts are live from requests.
+   * Live capacity snapshot for AI prompts. Program rules live in the hosted
+   * Action/Reply prompts — not in the database, and code does not enforce them.
    */
   async loadRulesState(c: DB = this.pool, date?: string): Promise<RulesState> {
     const base = defaultRulesState(this.config.TRANSPORT_CAPACITY);
-    try {
-      const rows = await c.query<{ key: string; value: unknown }>(
-        "SELECT key, value FROM rules",
-      );
-      for (const row of rows.rows) {
-        if (row.key === "transport_capacity_limit") {
-          const n = Number(row.value);
-          if (Number.isFinite(n) && n > 0) {
-            base.transport_capacity_limit = n;
-            base.capacity.limit = n;
-          }
-        } else if (row.key === "transport_window" && row.value && typeof row.value === "object") {
-          base.transport_window = {
-            ...base.transport_window,
-            ...(row.value as Record<string, string>),
-          } as RulesState["transport_window"];
-        } else if (row.key === "service_area" && row.value && typeof row.value === "object") {
-          const area = row.value as {
-            allowed?: string[];
-            borderline?: string[];
-            notes?: string;
-          };
-          base.service_area = {
-            allowed: area.allowed ?? base.service_area.allowed,
-            borderline: area.borderline ?? base.service_area.borderline,
-            notes: area.notes ?? base.service_area.notes,
-          };
-        }
-      }
-    } catch {
-      /* rules table may not exist yet during rolling deploy */
-    }
     const runDate = date ?? nextTuesday(new Date()).date;
     base.capacity.date = runDate;
     try {

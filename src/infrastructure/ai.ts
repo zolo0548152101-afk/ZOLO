@@ -33,6 +33,7 @@ import {
   type RulesState,
   type TurnFacts,
 } from "../domain/turn-facts.js";
+import { PROGRAM_RULES_HE } from "../domain/program-rules.js";
 import type { ChangedField } from "../domain/field-map.js";
 
 export function promptSha(text: string): string {
@@ -288,6 +289,7 @@ export class OpenAIPlanner implements Planner {
       customer_language: facts.customer_language,
       state: facts.state,
       rules: facts.rules,
+      program_rules: PROGRAM_RULES_HE,
       completeness: facts.this_turn.completeness,
       data_map: facts.data_map || renderWriteMapMarkdown(),
     };
@@ -386,6 +388,7 @@ export class OpenAIPlanner implements Planner {
       sender_phone: facts.sender_phone,
       state: facts.state,
       rules: facts.rules,
+      program_rules: PROGRAM_RULES_HE,
       this_turn: facts.this_turn,
       /** Exact strings allowed in claims.saved this turn (subset or empty). */
       allowed_saved: allowedSaved,

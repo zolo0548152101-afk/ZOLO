@@ -2696,9 +2696,8 @@ test("claim guard rejects unbacked רשמתי", async () => {
   );
 });
 
-test("ownParty lets donor update receiver while collecting", async () => {
+test("ownParty lets donor update receiver and creates missing roles", async () => {
   const { ownParty } = await import("../src/domain/policies.js");
-  const { AppError } = await import("../src/domain/types.js");
   const request = {
     number: 1,
     status: "collecting",
@@ -2741,11 +2740,15 @@ test("ownParty lets donor update receiver while collecting", async () => {
   assert.equal(receiver.name, "יוסי");
   receiver.name = "טל";
   assert.equal(ownParty(request as never, "584152101", "receiver").name, "טל");
-  assert.throws(
-    () => ownParty(request as never, "999999999", "donor"),
-    (error: unknown) =>
-      error instanceof AppError && error.code === "forbidden_party",
-  );
+  // Missing role is created (no forbidden_party) so Action writes persist.
+  const onlyDonor = {
+    ...request,
+    parties: [request.parties[0]!],
+  };
+  const created = ownParty(onlyDonor as never, "584152101", "receiver");
+  assert.equal(created.role, "receiver");
+  assert.equal(created.phone, null);
+  assert.equal(onlyDonor.parties.length, 2);
 });
 
 test("verifyClaims ignores Hebrew saved labels and enforces path claims", async () => {

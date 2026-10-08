@@ -30,7 +30,6 @@ import {
   OUTSIDE,
   isOperationsAlert,
   customerInsistsAfterDenial,
-  mutable,
   nextQuestion,
   nextTuesday,
   readyToProposeSchedule,
@@ -1296,46 +1295,7 @@ export class Engine {
         }
         await c.query("SAVEPOINT business_commands");
         try {
-          // A clear outside endpoint takes precedence over all collection/escalation
-          // commands from this message. Never alert a human for this rejection.
-          const outside = [];
-          for (const cmd of plan.commands)
-            if (
-              cmd.type === "details" &&
-              cmd.settlement &&
-              !(
-                cmd.address &&
-                /^(?:רחוב|שיכון|שכונה|שכונת|שדרות|שד)/.test(cmd.address) &&
-                cmd.address.includes(cmd.settlement)
-              ) &&
-              (await this.s.region(c, cmd.settlement)).decision === "outside"
-            )
-              outside.push(cmd);
-          if (outside.length) {
-            const n = outside[0]!.request_number;
-            const r =
-              ctx.requests.find((r) =>
-                n
-                  ? r.number === n
-                  : r.id === ctx.conversation.selected_request_id,
-              ) ?? (ctx.requests.length === 1 ? ctx.requests[0] : undefined);
-            if (r) {
-              request = await this.s.request(r.id, c, true);
-              mutable(request);
-              request.status = "rejected";
-              await this.s.save(c, request);
-            }
-            reply = null;
-            turnBoundary = { code: "outside_area", details: {} };
-            await this.s.event(
-              c,
-              ctx.message,
-              phone,
-              "outside_area_rejected",
-              {},
-              request?.id ?? null,
-            );
-          } else {
+          {
             const handoffTransitionPlanned = plan.commands.some((candidate) =>
               candidate.type === "counterparty_candidate" ||
               candidate.type === "confirm_counterparty" ||
@@ -1345,9 +1305,8 @@ export class Engine {
                   Boolean(candidate.counterparty_name) ||
                   Boolean(candidate.counterparty_phone)))
             );
-            // Run the action-manager plan in dependency order. Do not drop or
-            // skip commands for photo/status gates — those only shape the reply
-            // after every write has been attempted.
+            // Run the action-manager plan in dependency order. Code only writes —
+            // program rules (area/capacity/window/duplicates) live in prompts.
             const orderedCommands = [...plan.commands];
             for (let detailsIndex = 0; detailsIndex < orderedCommands.length; detailsIndex++) {
               const detailsCommand = orderedCommands[detailsIndex]!;

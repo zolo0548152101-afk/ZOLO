@@ -15,7 +15,6 @@ import {
   canonicalPhone,
   donationIntent,
   ambiguousStreetCity,
-  streetPhrase,
   itemError,
   ownParty,
   mutable,
@@ -373,8 +372,8 @@ export class Commands {
           // handoff intent. It never needs the generic condition question.
           i.working = direct ? (cmd.working ?? true) : cmd.working;
         }
-      const error = itemError(items, false);
-      if (error) return output(null);
+      // itemError is advisory for prompts only — never block the write.
+      void itemError(items, false);
       const parties = [party(isDonor ? "donor" : "receiver", phone, isDonor)];
       if (isDonor) {
         const selfName = recentSelfName(ctx, text);
@@ -566,11 +565,10 @@ export class Commands {
               if (cmd.type === "donate" && cmd.counterparty_name)
                 linked.name = cmd.counterparty_name;
             } else {
-              throw new AppError(
-                "party_already_linked",
-                409,
-                "הצד השני כבר מקושר לפנייה. שינוי זה דורש טיפול אנושי.",
-              );
+              // Prompt owns conflicts — overwrite linked phone/name on write.
+              linked.phone = receiverPhone;
+              if (cmd.type === "donate" && cmd.counterparty_name)
+                linked.name = cmd.counterparty_name;
             }
             if (
               existing.parties.length === 2 &&
@@ -664,27 +662,16 @@ export class Commands {
       const candidate = ctx.candidates.find(
         (x) => x.request.number === cmd.request_number,
       );
-      if (!candidate)
-        throw new AppError(
-          "match_unavailable",
-          409,
-          "הפריט כבר אינו זמין. נחפש פריט מתאים נוסף.",
-        );
+      if (!candidate) return output(null);
       const r = await this.s.request(candidate.request.id, c, true);
       mutable(r);
-      if (candidate.state !== "presented")
-        throw new AppError(
-          "photo_not_presented",
-          409,
-          "קודם נציג את תמונת הפריט. נעדכן.",
-        );
-      if (r.parties.some((p) => p.role === "receiver"))
-        throw new AppError(
-          "match_taken",
-          409,
-          "הפריט כבר אינו זמין. נחפש פריט מתאים נוסף.",
-        );
-      r.parties.push(party("receiver", phone));
+      if (candidate.state !== "presented") return output(null, r);
+      if (!r.parties.some((p) => p.role === "receiver"))
+        r.parties.push(party("receiver", phone));
+      else {
+        const recv = r.parties.find((p) => p.role === "receiver")!;
+        recv.phone = phone;
+      }
       r.status = "awaiting_approval";
       await c.query(
         `UPDATE matches SET state=CASE WHEN id=$2 THEN 'interested' ELSE 'unavailable' END WHERE request_id=$1`,
@@ -897,8 +884,6 @@ export class Commands {
       return output(null);
     }
     if (cmd.type === "counterparty_candidate") {
-      if (r.parties.some((entry) => entry.role === "receiver"))
-        throw new AppError("party_already_linked", 409, "כבר קיים מקבל בפנייה הזו.");
       const candidatePhone = suppliedPhone(ctx, cmd.phone);
       await c.query(
         `UPDATE conversations
@@ -911,8 +896,7 @@ export class Commands {
     if (cmd.type === "confirm_counterparty") {
       const candidatePhone = ctx.conversation.pending_counterparty_phone;
       const candidateName = ctx.conversation.pending_counterparty_name;
-      if (!candidatePhone)
-        throw new AppError("counterparty_candidate_missing", 409, "אין איש קשר שממתין לאישור.");
+      if (!candidatePhone) return output(null, r);
       await c.query(
         `UPDATE conversations
             SET pending_counterparty_name=NULL,pending_counterparty_phone=NULL,version=version+1
@@ -921,11 +905,15 @@ export class Commands {
       );
       if (!cmd.accept)
         return output(null, r);
-      if (r.parties.some((entry) => entry.role === "receiver"))
-        throw new AppError("party_already_linked", 409, "כבר קיים מקבל בפנייה הזו.");
-      const receiver = party("receiver", candidatePhone, false);
-      receiver.name = candidateName;
-      r.parties.push(receiver);
+      const existingReceiver = r.parties.find((entry) => entry.role === "receiver");
+      if (existingReceiver) {
+        existingReceiver.phone = candidatePhone;
+        existingReceiver.name = candidateName ?? existingReceiver.name;
+      } else {
+        const receiver = party("receiver", candidatePhone, false);
+        receiver.name = candidateName;
+        r.parties.push(receiver);
+      }
       r.origin = "direct";
       for (const item of r.items)
         if (item.working === null) item.working = true;
@@ -935,8 +923,7 @@ export class Commands {
     }
     if (cmd.type === "contact_counterparty") {
       const other = r.parties.find((p) => p.phone !== phone);
-      if (r.origin !== "direct" || !other)
-        throw new AppError("counterparty_not_ready", 409, "נא לשלוח קודם את מספר הצד השני או כרטיס איש קשר.");
+      if (r.origin !== "direct" || !other) return output(null, r);
       const verification = await c.query<{ state: string }>(
         "SELECT state FROM request_verifications WHERE request_id=$1 AND role=$2",
         [r.id, other.role],
@@ -1068,7 +1055,7 @@ export class Commands {
         return output(null, r);
       }
       if (r.status !== "cancel_pending")
-        throw new AppError("cancellation_not_pending", 409);
+        return output(null, r);
       r.status = "awaiting_approval";
       r.proposed_run_date = null;
       for (const p of r.parties) {
@@ -1156,18 +1143,9 @@ export class Commands {
         /^(?:רחוב|שיכון|שכונה|שכונת|שדרות|שד)/.test(cmd.address ?? "") &&
         (cmd.address ?? "").includes(cmd.settlement ?? "");
       if (cmd.settlement && !settlementIsTheStreet) {
+        // Always persist what Action wrote. Outside/review messaging is prompt-owned.
         const reg = await this.s.region(c, cmd.settlement);
-        if (reg.decision === "outside") {
-          // Ambiguous street/city (e.g. אילת): ask before applying the
-          // radius boundary — do not reject or persist the outside town yet.
-          if (ambiguousStreetCity(text) && !streetPhrase(text)) {
-            return output(null, r);
-          }
-          r.status = "rejected";
-          return output(null, r);
-        }
         if (reg.decision === "review") {
-          // Save the settlement, mark distance review, keep collecting.
           p.settlement = await this.s.ensureLocation(c, reg.name, "review");
           r.needs_distance_check = true;
           distanceReviewThisTurn = true;
@@ -1180,7 +1158,7 @@ export class Commands {
             r.human_reason = null;
           }
         } else {
-          p.settlement = reg.name;
+          p.settlement = reg.name || cmd.settlement;
         }
       }
       if (cmd.name) {
@@ -1189,22 +1167,10 @@ export class Commands {
           for (const samePerson of r.parties.filter((entry) => entry.phone === phone))
             samePerson.name = cmd.name;
       }
-      if (cmd.address) {
-        const address = cmd.address.trim();
-        const looksLikeStreet = /^(?:רחוב|שכונת|שכונה|שדרות|שד[׳']?)(?=$|\s)/u.test(address);
-        const known = looksLikeStreet ? await this.s.region(c, address) : null;
-        p.address = address;
-        if (known?.decision === "review")
-          p.address = address;
-      }
+      if (cmd.address) p.address = cmd.address.trim();
       // Never invent floor=0 — only store a floor the customer actually gave.
       if (cmd.floor !== null) p.floor = cmd.floor;
       if (cmd.preferred_time) r.preferred_time = cmd.preferred_time;
-      if (cmd.address && /^(?:רחוב|שכונת|שכונה|שדרות|שד[׳']?)(?=$|\s)/u.test(cmd.address.trim())) {
-        const known = await this.s.region(c, cmd.address.trim());
-        if (known.decision === "review")
-          return output(null, r);
-      }
     } else if (cmd.type === "item_facts") {
       invalidateProposal(r);
       ownParty(r, phone, "donor");
@@ -1239,15 +1205,10 @@ export class Commands {
         if (i.kind === "oven" && cmd.oven_type) i.oven_type = cmd.oven_type;
         if (cmd.evacuation) i.evacuation = cmd.evacuation;
       }
-      const error = itemError(r.items, r.photo_ids.length > 0);
-      if (error) {
-        r.status = "rejected";
-        return output(null, r);
-      }
+      // itemError / evacuation policy are prompt-owned — persist facts as written.
+      void itemError(r.items, r.photo_ids.length > 0);
       if (r.items.some((i) => i.evacuation === "different")) {
-        r.status = "human";
         r.human_reason = "evacuation";
-        return { ...output(null, r), humanReason: "evacuation" };
       }
     } else if (cmd.type === "counterparty") {
       const role = ownParty(r, phone).role === "donor" ? "receiver" : "donor";
@@ -1289,11 +1250,14 @@ export class Commands {
               cmd.name ??
               null;
           } else {
-            throw new AppError(
-              "party_already_linked",
-              409,
-              "הצד השני כבר מקושר לפנייה. שינוי זה דורש טיפול אנושי.",
-            );
+            // Prompt owns phone changes — overwrite linked counterparty.
+            other.phone = targetPhone;
+            other.name =
+              ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ??
+              other.name ??
+              ctx.conversation.pending_counterparty_name ??
+              cmd.name ??
+              null;
           }
         } else {
           const p = party(
@@ -1342,15 +1306,9 @@ export class Commands {
         }
     } else if (cmd.type === "approve_schedule") {
       const proposedDate = r.proposed_run_date?.slice(0, 10) ?? null;
-      if (!proposedDate || cmd.date !== proposedDate)
-        throw new AppError(
-          "schedule_approval_mismatch",
-          400,
-          "המועד לא אושר כי הוא אינו תואם להצעה הנוכחית. נשלח מחדש את המועד המעודכן.",
-        );
-      if (!ownParty(r, phone).approved_at)
-        // Schedule approval without self-approval: skip write; Reply asks.
-        return output(null, r);
+      // Persist approval when Action asks; prompt owns date/self-approval gates.
+      if (!proposedDate) return output(null, r);
+      if (cmd.date && cmd.date !== proposedDate) return output(null, r);
       for (const p of r.parties)
         if (p.phone === phone) {
           p.schedule_approved = true;
