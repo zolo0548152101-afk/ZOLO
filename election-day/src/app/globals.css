@@ -99,7 +99,7 @@ h1 {
 
 .filters {
   display: grid;
-  grid-template-columns: 1fr 1fr auto;
+  grid-template-columns: 1fr 1fr 1fr auto;
   gap: 0.85rem;
   align-items: end;
   background: var(--card);

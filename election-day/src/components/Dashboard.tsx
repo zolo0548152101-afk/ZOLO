@@ -22,6 +22,7 @@ type SortKey =
 export function Dashboard() {
   const [minRight, setMinRight] = useState(70);
   const [maxTurnout, setMaxTurnout] = useState(60);
+  const [minBzb, setMinBzb] = useState(300);
   const [sort, setSort] = useState<SortKey>("right_pct");
   const [dir, setDir] = useState<"asc" | "desc">("desc");
   const [clusters, setClusters] = useState<ClusterView[]>([]);
@@ -36,6 +37,7 @@ export function Dashboard() {
       const q = new URLSearchParams({
         minRight: String(minRight),
         maxTurnout: String(maxTurnout),
+        minBzb: String(minBzb),
         sort,
         dir,
       });
@@ -49,7 +51,7 @@ export function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [minRight, maxTurnout, sort, dir]);
+  }, [minRight, maxTurnout, minBzb, sort, dir]);
 
   useEffect(() => {
     const t = setTimeout(load, 150);
@@ -123,6 +125,24 @@ export function Dashboard() {
             onChange={(e) => setMaxTurnout(Number(e.target.value))}
           />
         </label>
+        <label>
+          מינימום בז״ב
+          <input
+            type="range"
+            min={0}
+            max={5000}
+            step={50}
+            value={minBzb}
+            onChange={(e) => setMinBzb(Number(e.target.value))}
+          />
+          <input
+            type="number"
+            min={0}
+            step={50}
+            value={minBzb}
+            onChange={(e) => setMinBzb(Number(e.target.value))}
+          />
+        </label>
         <div className="filter-actions">
           <button
             type="button"
@@ -130,9 +150,10 @@ export function Dashboard() {
             onClick={() => {
               setMinRight(70);
               setMaxTurnout(60);
+              setMinBzb(300);
             }}
           >
-            ברירת מחדל 70 / 60
+            ברירת מחדל 70 / 60 / 300
           </button>
           <button
             type="button"
@@ -141,7 +162,7 @@ export function Dashboard() {
             onClick={() =>
               downloadClustersCsv(
                 clusters,
-                `ashkolot-yamin${minRight}-turnout${maxTurnout}.csv`,
+                `ashkolot-yamin${minRight}-turnout${maxTurnout}-bzb${minBzb}.csv`,
               )
             }
           >
