@@ -275,12 +275,9 @@ export class OpenAIPlanner implements Planner {
       alreadyIntroduced: conversationAlreadyIntroduced(ctx.history),
       customerLanguage: conversationLanguage(ctx),
     });
-    const variables = {
-      data_map: facts.data_map || renderWriteMapMarkdown(),
-      state: JSON.stringify(facts.state),
-      rules_state: JSON.stringify(facts.rules),
-      completeness: JSON.stringify(facts.this_turn.completeness),
-    };
+    // Facts travel in the user JSON payload. Prompt variables are only sent
+    // after they are declared on the hosted prompt (dashboard); undeclared
+    // variables cause a 400 from the Responses API.
     const userPayload = {
       history: facts.history,
       current_message: facts.current_message,
@@ -292,13 +289,12 @@ export class OpenAIPlanner implements Planner {
       state: facts.state,
       rules: facts.rules,
       completeness: facts.this_turn.completeness,
-      data_map: facts.data_map,
+      data_map: facts.data_map || renderWriteMapMarkdown(),
     };
     const response = await this.client.responses.create({
       prompt: {
         id: hosted.id,
         version: hosted.version,
-        variables,
       },
       text: {
         format: {
@@ -342,7 +338,6 @@ export class OpenAIPlanner implements Planner {
           prompt_id: hosted.id,
           prompt_version: hosted.version,
           payload: userPayload,
-          variables,
         },
         model_output: {
           raw: response.output_text,
@@ -378,13 +373,6 @@ export class OpenAIPlanner implements Planner {
       boundary: input.boundary,
       notices: input.notices,
     });
-    const variables = {
-      data_map: facts.data_map,
-      state: JSON.stringify(facts.state),
-      rules_state: JSON.stringify(facts.rules),
-      this_turn: JSON.stringify(facts.this_turn),
-      completeness: JSON.stringify(facts.this_turn.completeness),
-    };
     const userPayload = {
       history: facts.history,
       current_message: facts.current_message,
@@ -403,7 +391,6 @@ export class OpenAIPlanner implements Planner {
       prompt: {
         id: hosted.id,
         version: hosted.version,
-        variables,
       },
       text: {
         format: {
@@ -446,7 +433,6 @@ export class OpenAIPlanner implements Planner {
           prompt_id: hosted.id,
           prompt_version: hosted.version,
           payload: userPayload,
-          variables,
         },
         model_output: {
           raw: response.output_text,
@@ -502,13 +488,6 @@ export class OpenAIPlanner implements Planner {
       prompt: {
         id: hosted.id,
         version: hosted.version,
-        variables: {
-          data_map: renderWriteMapMarkdown(),
-          state: JSON.stringify({ notice: true }),
-          rules_state: "{}",
-          this_turn: JSON.stringify(userPayload),
-          completeness: "{}",
-        },
       },
       text: {
         format: {
