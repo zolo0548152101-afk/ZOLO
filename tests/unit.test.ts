@@ -2774,16 +2774,40 @@ test("claim guard rejects unbacked רשמתי", async () => {
     [],
   );
   assert.equal(guarded.rejected, true);
-  assert.equal(
-    guarded.text,
-    "נא לציין אם ברצונך למסור פריט, לקבל פריט או לתאם הובלה.",
-  );
+  // Legacy guard marks reject; caller swaps to GUARD_FALLBACK_REPLY.
+  assert.equal(guarded.text, "רשמתי: רחוב העלייה, קומה 2");
   assert.equal(
     applyClaimGuard("נשמר: רחוב העלייה.", "נשמר: רחוב העלייה.", false, [
       { table: "searches", column: "address" },
     ]).rejected,
     false,
   );
+});
+
+test("verifyClaims ignores Hebrew saved labels and enforces path claims", async () => {
+  const { verifyClaims, emptyClaims } = await import("../src/domain/ai-guards.js");
+  const facts = {
+    changedPaths: ["request_items.kind", "request_parties.name:receiver"],
+    openedRequestNumber: null,
+    contactedCounterparty: false,
+    scheduleDate: null,
+    cancelled: false,
+    humanHandoff: false,
+    knownRequestNumbers: [3],
+  };
+  const hebrewOnly = emptyClaims();
+  hebrewOnly.saved = ["סוג הפריט: שולחן", "שם המקבל: יוסי"];
+  assert.equal(verifyClaims(hebrewOnly, facts).ok, true);
+
+  const badPath = emptyClaims();
+  badPath.saved = ["request_parties.name:donor"];
+  const bad = verifyClaims(badPath, facts);
+  assert.equal(bad.ok, false);
+  assert.deepEqual(bad.rejected, ["saved:request_parties.name:donor"]);
+
+  const good = emptyClaims();
+  good.saved = ["request_items.kind", "request_parties.name:receiver"];
+  assert.equal(verifyClaims(good, facts).ok, true);
 });
 
 test("seeker follow-up stores street and floor on the search, not next", () => {

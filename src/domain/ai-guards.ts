@@ -87,9 +87,19 @@ export function emptyClaims(): ReplyClaims {
   };
 }
 
+/** Path-shaped save claim: `table.column` or `table.column:role`. */
+const SAVED_PATH = /^[a-z_]+\.[a-z_]+(?::(?:donor|receiver))?$/i;
+
+export function isSavedPathClaim(value: string): boolean {
+  return SAVED_PATH.test(value.trim());
+}
+
 /**
  * Verify structured claims against this-turn facts. Does not rewrite text.
  * Returns rejected claim keys; empty means the reply is allowed.
+ *
+ * Only path-shaped `saved` entries are enforced. Free-text labels are a
+ * prompt-schema miss (ignored) — they must not nuke an otherwise valid reply.
  */
 export function verifyClaims(
   claims: ReplyClaims,
@@ -98,8 +108,13 @@ export function verifyClaims(
   const rejected: string[] = [];
   const allowed = new Set(facts.changedPaths);
   for (const path of claims.saved) {
-    if (!allowed.has(path) && !allowed.has(path.replace(/^requests\[\d+\]\./, "")))
-      rejected.push(`saved:${path}`);
+    const trimmed = path.trim();
+    if (!isSavedPathClaim(trimmed)) continue;
+    if (
+      !allowed.has(trimmed) &&
+      !allowed.has(trimmed.replace(/^requests\[\d+\]\./, ""))
+    )
+      rejected.push(`saved:${trimmed}`);
   }
   if (claims.contacted_counterparty && !facts.contactedCounterparty)
     rejected.push("contacted_counterparty");

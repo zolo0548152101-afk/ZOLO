@@ -373,6 +373,11 @@ export class OpenAIPlanner implements Planner {
       boundary: input.boundary,
       notices: input.notices,
     });
+    const allowedSaved = input.changed.map((field) =>
+      field.role
+        ? `${field.table}.${field.column}:${field.role}`
+        : `${field.table}.${field.column}`,
+    );
     const userPayload = {
       history: facts.history,
       current_message: facts.current_message,
@@ -382,6 +387,8 @@ export class OpenAIPlanner implements Planner {
       state: facts.state,
       rules: facts.rules,
       this_turn: facts.this_turn,
+      /** Exact strings allowed in claims.saved this turn (subset or empty). */
+      allowed_saved: allowedSaved,
       data_map: facts.data_map,
       ...(input.guardFeedback
         ? { guard_feedback: input.guardFeedback }
