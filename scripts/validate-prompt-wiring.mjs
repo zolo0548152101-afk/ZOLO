@@ -10,10 +10,9 @@ const required = [
   "requireHosted",
   "OPENAI_AGENT_PROMPT_ID",
   "OPENAI_ACTION_PROMPT_ID",
-  "OPENAI_REPLY_PROMPT_ID",
   "AGENT_WRITE_TOOLS",
   'provider: "openai_responses_agent"',
-  'provider: "openai_responses_notice"',
+  'provider: "openai_responses_agent_reply"',
   "async agentTurn(",
   "async phraseNotice(",
   "allowed_saved",
@@ -34,8 +33,8 @@ if (present.length)
   throw new Error(`prompt_wiring_forbidden_present:${present.join(",")}`);
 if (!source.includes("haim-agent.he.md"))
   throw new Error("prompt_wiring_missing:haim-agent.he.md_instructions");
-if (!source.includes("instructions: AGENT_INSTRUCTIONS"))
-  throw new Error("prompt_wiring_missing:AGENT_INSTRUCTIONS");
+if (!source.includes("agentInstructions ? { instructions: agentInstructions }"))
+  throw new Error("prompt_wiring_missing:agent_instructions_fallback");
 
 const calls = source.match(/this\.client\.responses\.create/g)?.length ?? 0;
 if (calls < 2) throw new Error(`prompt_wiring_expected_two_calls:${calls}`);

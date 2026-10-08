@@ -111,27 +111,6 @@ const decodeSchemaSource = z.strictObject({
   evidence: z.string().max(2000),
 });
 
-const replyClaimsSchema = z.strictObject({
-  saved: z.array(z.string()).max(40),
-  contacted_counterparty: z.boolean(),
-  opened_request: z.number().int().positive().nullable(),
-  schedule_date: z.string().nullable(),
-  cancelled: z.boolean(),
-  human_handoff: z.boolean(),
-});
-
-const replyResponseSchema = z.strictObject({
-  reply: z.string().trim().min(1).max(4000),
-  claims: replyClaimsSchema.default({
-    saved: [],
-    contacted_counterparty: false,
-    opened_request: null,
-    schedule_date: null,
-    cancelled: false,
-    human_handoff: false,
-  }),
-});
-
 type JsonSchemaObject = Record<string, unknown>;
 
 /** Responses strict JSON Schema requires all object properties to be required. */
@@ -166,15 +145,6 @@ function toResponsesStrictSchema(source: JsonSchemaObject): JsonSchemaObject {
 
 const decodeOutputJsonSchema = toResponsesStrictSchema(
   z.toJSONSchema(decodeSchemaSource) as JsonSchemaObject,
-);
-
-const replyOutputJsonSchema = toResponsesStrictSchema(
-  z.toJSONSchema(
-    z.strictObject({
-      reply: z.string().trim().min(1).max(4000),
-      claims: replyClaimsSchema,
-    }),
-  ) as JsonSchemaObject,
 );
 
 const agentFinalOutputJsonSchema = toResponsesStrictSchema(
@@ -660,11 +630,7 @@ export class OpenAIPlanner implements Planner {
       };
     }
     const started = Date.now();
-    const hosted = requireHosted(
-      this.c.OPENAI_REPLY_PROMPT_ID,
-      this.c.OPENAI_REPLY_PROMPT_VERSION,
-      "reply",
-    );
+    const hosted = agentHosted(this.c);
     const facts = buildStage2Facts({
       ctx,
       rules: input.rules,
@@ -706,9 +672,9 @@ export class OpenAIPlanner implements Planner {
       text: {
         format: {
           type: "json_schema",
-          name: "haim_reply",
+          name: "haim_agent_reply",
           strict: true,
-          schema: replyOutputJsonSchema,
+          schema: agentFinalOutputJsonSchema,
         },
       },
       input: [
@@ -724,13 +690,13 @@ export class OpenAIPlanner implements Planner {
     } catch {
       throw new AppError("invalid_reply_manager_response");
     }
-    const parsed = replyResponseSchema.safeParse(payload);
+    const parsed = agentFinalReplySchema.safeParse(payload);
     if (!parsed.success) throw new AppError("invalid_reply_manager_response");
     return {
       text: parsed.data.reply,
       claims: parsed.data.claims,
       metadata: {
-        provider: "openai_responses_reply_manager",
+        provider: "openai_responses_agent_reply",
         prompt_mode: "hosted",
         prompt_id: hosted.id,
         prompt_version: hosted.version,
@@ -760,17 +726,14 @@ export class OpenAIPlanner implements Planner {
     request: Request | null,
     facts: Record<string, unknown> = {},
   ): Promise<{ text: string; metadata: Record<string, unknown> }> {
-    // Notices are still AI-written via the reply hosted prompt in notice mode.
+    // Notices use the same unified hosted Agent prompt. There are no tools on
+    // this request because counterparty notice phrasing is write-free.
     if (!this.c.AI_ENABLED)
       return {
         text: notice.text,
         metadata: { provider: "fallback", ai_enabled: false },
       };
-    const hosted = requireHosted(
-      this.c.OPENAI_REPLY_PROMPT_ID,
-      this.c.OPENAI_REPLY_PROMPT_VERSION,
-      "reply",
-    );
+    const hosted = agentHosted(this.c);
     const started = Date.now();
     const userPayload = {
       mode: "notice_to_counterparty",
@@ -803,9 +766,9 @@ export class OpenAIPlanner implements Planner {
       text: {
         format: {
           type: "json_schema",
-          name: "haim_reply",
+          name: "haim_agent_reply",
           strict: true,
-          schema: replyOutputJsonSchema,
+          schema: agentFinalOutputJsonSchema,
         },
       },
       input: [{ role: "user", content: JSON.stringify(userPayload) }],
@@ -819,7 +782,7 @@ export class OpenAIPlanner implements Planner {
         metadata: { provider: "fallback_parse", ai_enabled: true },
       };
     }
-    const parsed = replyResponseSchema.safeParse(payload);
+    const parsed = agentFinalReplySchema.safeParse(payload);
     return {
       text: parsed.success ? parsed.data.reply : notice.text,
       metadata: {

@@ -25,7 +25,7 @@ const envSchema = z.object({
   OPENAI_AGENT_PROMPT_VERSION: z.string().default(""),
   OPENAI_ACTION_PROMPT_ID: z.string().default(""),
   OPENAI_ACTION_PROMPT_VERSION: z.string().default(""),
-  // Notices (counterparty) still use the reply hosted prompt.
+  // Deprecated after 0.7: retained only so existing host env files parse.
   OPENAI_REPLY_PROMPT_ID: z.string().default(""),
   OPENAI_REPLY_PROMPT_VERSION: z.string().default(""),
   // Legacy eval harness only — never used at runtime.
@@ -151,8 +151,6 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
       c.OPENAI_AGENT_PROMPT_VERSION || c.OPENAI_ACTION_PROMPT_VERSION;
     if (!agentId || !agentVersion)
       throw new Error("missing_hosted_agent_prompt");
-    if (!c.OPENAI_REPLY_PROMPT_ID || !c.OPENAI_REPLY_PROMPT_VERSION)
-      throw new Error("missing_hosted_reply_prompt");
   }
   if (
     c.BOT_MODE === "live" &&
