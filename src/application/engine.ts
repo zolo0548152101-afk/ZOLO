@@ -26,34 +26,22 @@ import {
   photoGate,
   quickReply,
   statusText,
-  PHOTO_THANKS,
-  PHOTO_FIRST,
   PHOTO_STATUS,
-  SOFT_PHOTO_ASK,
-  SAME_DAY_WINDOW,
-  sameDayDemand,
-  HUMAN_REPLY,
   OUTSIDE,
   isOperationsAlert,
-  customerCancelIntent,
   customerInsistsAfterDenial,
-  directHandoffIntent,
   mutable,
   nextQuestion,
   nextTuesday,
   readyToProposeSchedule,
   photoDeclined,
   photoAskAlreadySent,
-  photoStatusSkipsGate,
   customerIntentClear,
-  openingPhotoReply,
 } from "../domain/policies.js";
 import {
   OUTAGE_REPLY,
   GUARD_FALLBACK_REPLY,
   FAULT_REPLY,
-  CLARIFY_REPLY,
-  probeReply,
   isSelfIntroText,
   stripRepeatedSelfIntro,
   verifyClaims,
@@ -63,12 +51,11 @@ import {
 import { diffChangedFields, type ChangedField } from "../domain/field-map.js";
 import {
   type ActionResultFact,
+  type BoundaryCode,
   type NoticeFact,
-  type RulesState,
 } from "../domain/turn-facts.js";
 import {
   conversationLanguage,
-  isCustomerClarify,
   localizeCustomer,
 } from "../domain/customer-language.js";
 import {
@@ -538,25 +525,19 @@ export class Engine {
         // understood=false. Only fall through to rules when there is nothing
         // to write.
         const actionable = plan.commands.some((command) => command.type !== "next");
+        // Unclear with nothing to write: continue with next so Reply phrases.
         if (!response.understood && !actionable)
-          throw new AppError("action_manager_unclear");
+          plan = { commands: [{ type: "next" }], evidence: "" };
       } catch (e) {
-        // Transient API failures retry once. No rule-planner conversation
-        // steering — on final failure send the neutral outage line.
+        // Transient API failures retry once. Soft-photo / unclear templates
+        // are gone — only OUTAGE_REPLY after final OpenAI failure.
         if (!lastAiAttempt && !(e instanceof AppError))
           throw new RetryableError("openai_retry");
-        if (this.softContinuePastPhoto(ctx, text)) {
-          await this.finishNextDetail(id);
-          return;
-        } else if (this.holdingForPhoto(ctx, text)) {
-          await this.finishPhotoHold(id);
-          return;
-        } else if (
+        if (
           e instanceof AppError &&
           (e.code === "ai_disabled" || e.code === "action_manager_unclear")
         ) {
-          await this.finishUnclear(id);
-          return;
+          plan = { commands: [{ type: "next" }], evidence: "" };
         } else {
           await this.finishFault(id, e);
           return;
@@ -658,23 +639,6 @@ export class Engine {
       else break;
     }
     return count;
-  }
-
-  private async unclearCount(
-    conversationId: string,
-    beforeSeq: string,
-    c: { query: Store["pool"]["query"] } = this.s.pool,
-  ): Promise<number> {
-    return this.consecutiveReplyCount(
-      conversationId,
-      beforeSeq,
-      (reply) =>
-        isCustomerClarify(reply) ||
-        /^(?:למי תרצה למסור|איזה פריט|מה תרצה לעשות|מה תרצה לקבל|מאיפה או ממי)/u.test(
-          reply,
-        ),
-      c,
-    );
   }
 
   private async faultCount(
@@ -859,251 +823,6 @@ export class Engine {
       fate_detail: { path: "finishFault" },
       error_code: "openai_failure_escalated",
       intent: "fault",
-    });
-  }
-
-  private async finishUnclear(id: string): Promise<void> {
-    await this.s.transaction(async (c) => {
-      const ctx = await this.s.context(id, c, true);
-      if (ctx.message.processed_at) return;
-      const phone = ctx.conversation.phone;
-      const prior = await this.unclearCount(ctx.conversation.id, ctx.message.seq, c);
-      const next = prior + 1;
-      if (next >= 2) {
-        const open =
-          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-          ctx.requests.find(
-            (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
-          ) ??
-          null;
-        if (open) {
-          open.status = "human";
-          open.human_reason = "unclear_after_two_clarifications";
-          await this.s.save(c, open);
-        }
-        await this.alert(c, ctx, "unclear_after_two_clarifications", HUMAN_REPLY, open);
-        const handoff = this.voiced(ctx, HUMAN_REPLY);
-        await this.s.outbound(
-          c,
-          ctx.message,
-          { phone, text: handoff },
-          `reply:${id}`,
-          open?.id ?? null,
-        );
-        await this.s.event(c, ctx.message, phone, "unclear_escalated", {
-          unclear_count: next,
-        });
-        await c.query(
-          "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
-          [id, handoff, "unclear_escalated"],
-        );
-        await c.query(
-          "UPDATE conversations SET mode='human',version=version+1 WHERE id=$1",
-          [ctx.conversation.id],
-        );
-        return;
-      }
-      const reply = this.voiced(
-        ctx,
-        probeReply(ctx.message.transcript ?? ctx.message.text),
-      );
-      await this.s.outbound(
-        c,
-        ctx.message,
-        { phone, text: reply },
-        `reply:${id}`,
-        null,
-      );
-      await this.s.event(c, ctx.message, phone, "unclear_clarify", {
-        unclear_count: next,
-        probe: reply !== this.voiced(ctx, CLARIFY_REPLY),
-      });
-      await c.query(
-        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
-        [id, reply],
-      );
-    });
-    await this.auditTurn(id, {
-      fate: "completed",
-      fate_detail: { path: "finishUnclear" },
-      intent: "clarification",
-    });
-  }
-
-  /** Open donation still missing photo — never sticky for direct; never repeats. */
-  private holdingForPhoto(ctx: Context, text: string): boolean {
-    if (!text.trim() || customerCancelIntent(text)) return false;
-    if (photoDeclined(text)) return false;
-    if (photoAskAlreadySent(ctx.history)) return false;
-    // Direct handoff: photo is optional; never park the turn on it.
-    if (
-      directHandoffIntent(text) ||
-      ctx.conversation.pending_counterparty_name ||
-      ctx.conversation.pending_counterparty_phone ||
-      ctx.conversation.pending_extra_item ||
-      ctx.requests.some((r) => r.origin === "direct" && photoGate(r))
-    )
-      return false;
-    const waiting = ctx.requests.some(
-      (request) =>
-        photoGate(request) &&
-        request.origin === "donation" &&
-        ![
-          "coordinated",
-          "closed",
-          "cancelled",
-          "rejected",
-          "human",
-          "cancel_pending",
-        ].includes(request.status),
-    );
-    // Photo holds are decided by the action/reply managers, not by a
-    // deterministic planner shortcut.
-    void waiting;
-    return false;
-  }
-
-  /** After a soft photo ask: decline or other text → next missing field (no re-ask). */
-  private softContinuePastPhoto(ctx: Context, text: string): boolean {
-    if (!text.trim() || customerCancelIntent(text)) return false;
-    const open = (request: Request) =>
-      ![
-        "coordinated",
-        "closed",
-        "cancelled",
-        "rejected",
-        "human",
-        "cancel_pending",
-      ].includes(request.status);
-    // Already asked once — any follow-up text continues past photo.
-    if (
-      ctx.requests.some(
-        (request) =>
-          open(request) && request.photo_status === PHOTO_STATUS.ASKED,
-      )
-    )
-      return true;
-    const waiting = ctx.requests.some(
-      (request) => photoGate(request) && open(request),
-    );
-    if (!waiting) return false;
-    return (
-      photoDeclined(text) ||
-      photoAskAlreadySent(ctx.history) ||
-      ctx.requests.some((r) => r.origin === "direct" && photoGate(r))
-    );
-  }
-
-  private async finishPhotoHold(id: string): Promise<void> {
-    await this.s.transaction(async (c) => {
-      const ctx = await this.s.context(id, c, true);
-      if (ctx.message.processed_at) return;
-      const phone = ctx.conversation.phone;
-      const request =
-        ctx.requests.find(
-          (candidate) =>
-            candidate.id === ctx.conversation.selected_request_id &&
-            photoGate(candidate),
-        ) ??
-        ctx.requests.find((candidate) => photoGate(candidate)) ??
-        null;
-      const text = ctx.message.transcript ?? ctx.message.text;
-      const continuePast =
-        !request ||
-        photoDeclined(text) ||
-        photoAskAlreadySent(ctx.history) ||
-        request.origin === "direct" ||
-        photoStatusSkipsGate(request.photo_status);
-      if (request && continuePast) {
-        // Only mark «אין תמונה» on an explicit decline — continuing past
-        // photo without declining leaves בוקשה / לא בוקשה as-is.
-        if (
-          photoDeclined(text) &&
-          (request.photo_status === PHOTO_STATUS.NOT_ASKED ||
-            request.photo_status === PHOTO_STATUS.ASKED)
-        ) {
-          request.photo_status = PHOTO_STATUS.NO_PHOTO;
-          await this.s.save(c, request);
-        }
-      } else if (request && photoGate(request)) {
-        request.photo_status = PHOTO_STATUS.ASKED;
-        await this.s.save(c, request);
-      }
-      const photoReply = this.voiced(
-        ctx,
-        request
-          ? continuePast
-            ? // No new write this turn — ask next field only, no full-chat summary.
-              nextQuestion(request, phone).text
-            : openingPhotoReply(request, phone, null)
-          : SOFT_PHOTO_ASK,
-      );
-      await this.s.outbound(
-        c,
-        ctx.message,
-        { phone, text: photoReply },
-        `reply:${id}`,
-        request?.id ?? null,
-      );
-      await c.query(
-        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
-        [id, photoReply],
-      );
-    });
-    await this.auditTurn(id, {
-      fate: "completed",
-      fate_detail: { path: "finishPhotoHold" },
-      intent: "ask_photo",
-      photoHold: true,
-    });
-  }
-
-  private async finishNextDetail(id: string): Promise<void> {
-    await this.s.transaction(async (c) => {
-      const ctx = await this.s.context(id, c, true);
-      if (ctx.message.processed_at) return;
-      const phone = ctx.conversation.phone;
-      const request =
-        ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-        ctx.requests.find((r) => photoGate(r)) ??
-        ctx.requests.find(
-          (r) =>
-            !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
-        ) ??
-        null;
-      const detailText = ctx.message.transcript ?? ctx.message.text;
-      if (
-        request &&
-        photoDeclined(detailText) &&
-        (request.photo_status === PHOTO_STATUS.ASKED ||
-          (request.photo_status === PHOTO_STATUS.NOT_ASKED &&
-            photoAskAlreadySent(ctx.history)))
-      ) {
-        request.photo_status = PHOTO_STATUS.NO_PHOTO;
-        await this.s.save(c, request);
-      }
-      const reply = this.voiced(
-        ctx,
-        request
-          ? nextQuestion(request, phone).text
-          : "מה הפרט הבא שתרצה להשלים?",
-      );
-      await this.s.outbound(
-        c,
-        ctx.message,
-        { phone, text: reply },
-        `reply:${id}`,
-        request?.id ?? null,
-      );
-      await c.query(
-        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
-        [id, reply],
-      );
-    });
-    await this.auditTurn(id, {
-      fate: "completed",
-      fate_detail: { path: "finishNextDetail" },
-      intent: "ask_details",
     });
   }
 
@@ -1338,6 +1057,11 @@ export class Engine {
         reason: string | undefined = technicalReason,
         protectedReply = false,
         intent = "other";
+      const actionResults: ActionResultFact[] = [];
+      let turnBoundary: {
+        code: BoundaryCode;
+        details?: Record<string, unknown>;
+      } | null = null;
       const plan = ctx.message.ai_plan
         ? planSchema.parse(ctx.message.ai_plan)
         : proposed;
@@ -1436,15 +1160,9 @@ export class Engine {
             await this.s.outbound(c, ctx.message, { phone, text: `תמונה שמורה מפנייה ${current.number}`, media_id: mediaId }, `admin-status-media:${id}:${current.id}:${mediaId}`, current.id);
       } else if (isStatus(text)) { reply = statusText(ctx.requests); intent = "other"; }
       else if (ctx.conversation.mode === "human") {
-        // Already handed off — no repeat ops alerts. Keep collecting silently
-        // only if the customer insists again is already covered by mode=human.
+        // Already handed off — Reply manager acknowledges; no template ask.
         intent = "human_escalation";
-        const open =
-          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-          (ctx.requests.length === 1 ? ctx.requests[0] : null);
-        reply = open
-          ? `הפנייה בטיפול אנושי. ${nextQuestion(open, phone).text}`
-          : "הפנייה בטיפול אנושי. נחזור אליך.";
+        reply = null;
       } else if (
         customerInsistsAfterDenial(text) &&
         ctx.history.some(
@@ -1464,7 +1182,7 @@ export class Engine {
           await this.s.save(c, open);
           request = open;
         }
-        reply = HUMAN_REPLY;
+        reply = null;
         reason = "customer_insisted";
       } else if (technicalReason || ctx.message.media_state === "failed") {
         intent = technicalReason ? "clarification" : "human_escalation";
@@ -1472,29 +1190,19 @@ export class Engine {
           ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
           (ctx.requests.length === 1 ? ctx.requests[0] : undefined);
         if (technicalReason === "openai_failure" || technicalReason === "voice_failure") {
-          reply = selected
-            ? `לא הצלחתי להבין את ההודעה. ${nextQuestion(selected, phone).text}`
-            : "לא הצלחתי להבין. אפשר לכתוב, למשל: אני רוצה למסור מיטה.";
-          // A final AI failure is a real human-handling event. Keep the safe
-          // fallback for the customer, but also create the durable admin alert.
+          reply = null;
           reason = technicalReason;
           await this.s.event(c, ctx.message, "system", "automatic_fallback", {
             technical_reason: technicalReason,
           }, selected?.id ?? null);
         } else {
-          reply =
-            "לא הצלחנו להשלים את הטיפול בהודעה. העברתי לבדיקה אנושית. נעדכן.";
+          reply = null;
           reason ??= "media_failure";
         }
       } else if (quickReply(text) !== null) {
+        // FAQ/greeting: no code sentence — Reply manager phrases from state.
         intent = "acknowledge";
-        const quick = quickReply(text)!;
-        const selected =
-          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-          (ctx.requests.length === 1 ? ctx.requests[0] : undefined);
-        reply = selected && quick.startsWith("שלום וברוכים")
-          ? nextQuestion(selected, phone).text
-          : quick;
+        reply = null;
       }
       else if (ctx.message.kind === "image") {
         intent = "ask_details";
@@ -1544,9 +1252,7 @@ export class Engine {
           await this.s.event(c, ctx.message, phone, "unassigned_photo", {
             media_id: ctx.message.media_id,
           });
-        reply = request
-          ? `${PHOTO_THANKS}\n${nextQuestion(request, phone).text}`
-          : PHOTO_THANKS;
+        reply = null;
       } else if (ctx.message.kind === "location") {
         intent = "ask_address";
         const selected =
@@ -1577,9 +1283,7 @@ export class Engine {
           { location: ctx.message.location },
           request?.id ?? ctx.conversation.selected_request_id,
         );
-        reply = request
-          ? `נקודת המיקום התקבלה. ${nextQuestion(request, phone).text}`
-          : "נקודת המיקום התקבלה. נא לציין גם את שם היישוב אם עדיין לא נמסר.";
+        reply = null;
       } else if (plan) {
         const stored = await c.query<{
           plan_versions: Record<string, number> | null;
@@ -1621,7 +1325,8 @@ export class Engine {
               request.status = "rejected";
               await this.s.save(c, request);
             }
-            reply = OUTSIDE;
+            reply = null;
+            turnBoundary = { code: "outside_area", details: {} };
             await this.s.event(
               c,
               ctx.message,
@@ -1672,6 +1377,13 @@ export class Engine {
               }
               reply = result.reply;
               reason = result.humanReason;
+              actionResults.push({
+                command: command.type,
+                ok: true,
+                detail: result.humanReason
+                  ? { human_reason: result.humanReason }
+                  : undefined,
+              });
               intent =
                 command.type === "counterparty" ||
                 command.type === "contact_counterparty"
@@ -1679,8 +1391,7 @@ export class Engine {
                   : command.type === "details"
                     ? "ask_details"
                     : command.type === "donate" &&
-                        (/תמונה/.test(result.reply ?? "") ||
-                          result.request?.origin !== "direct")
+                        result.request?.origin !== "direct"
                       ? "ask_photo"
                       : "acknowledge";
               await this.s.event(
@@ -1711,13 +1422,6 @@ export class Engine {
               index++;
               if (reason || request?.status === "rejected") break;
             }
-            // If this turn just marked «בוקשה» (commands or below), keep the soft
-            // ask even when a later command overwrote the reply with nextQuestion.
-            const photoAskedThisTurn =
-              Boolean(request) &&
-              request!.photo_status === PHOTO_STATUS.ASKED &&
-              (beforeRequest?.photo_status ?? PHOTO_STATUS.NOT_ASKED) ===
-                PHOTO_STATUS.NOT_ASKED;
             if (request) {
               const attached = await c.query<{
                 id: string;
@@ -1751,16 +1455,10 @@ export class Engine {
                   request.status = "available";
                 request.photo_status = PHOTO_STATUS.RECEIVED;
                 await this.s.save(c, request);
-                if (reply && !reply.includes(PHOTO_THANKS))
-                  reply = `${PHOTO_THANKS}\n${reply}`;
-                else if (!reply) reply = PHOTO_THANKS;
+                reply = null;
               }
             }
-            // Soft optional photo ask once. Persist «בוקשה»; never re-ask after that.
-            const explicitClarification =
-              /כבר קיימת פנייה|הפרטים האלה כבר רשומים|כתוב "במקום" או "בנוסף"|כתוב "אותו מקבל" או "מקבל אחר"|עד שני רהיטים לכל מוסר|רשמתי שמדובר במסירה|מה הפריט שברצונך למסור/.test(
-                reply ?? "",
-              );
+            // Soft optional photo ask once. Persist status only; Reply phrases.
             const photoAsked = photoAskAlreadySent(ctx.history);
             const declinedPhoto = photoDeclined(text);
             // Never auto-flip ASKED→NO_PHOTO on a non-image answer — only
@@ -1768,7 +1466,6 @@ export class Engine {
             if (
               request &&
               !reason &&
-              !explicitClarification &&
               photoGate(request) &&
               !ctx.conversation.pending_extra_item &&
               !["cancelled", "rejected", "human", "closed", "coordinated"].includes(
@@ -1777,38 +1474,14 @@ export class Engine {
             ) {
               void handoffTransitionPlanned;
               if (!declinedPhoto && !photoAsked) {
-                // Photo nudge is owned by the reply manager. Code only marks
-                // status when the customer already declined or a photo arrived.
-                void openingPhotoReply;
-                void SOFT_PHOTO_ASK;
-                void PHOTO_FIRST;
+                // Photo nudge is owned by the reply manager.
               } else if (declinedPhoto) {
                 request.photo_status = PHOTO_STATUS.NO_PHOTO;
                 await this.s.save(c, request);
-                if (!reply?.trim()) {
-                  reply = nextQuestion(request, phone).text;
-                  intent = "ask_details";
-                }
+                intent = "ask_details";
               }
               // photoAsked && !declined: leave status as בוקשה — do not flip.
-            } else if (
-              request &&
-              !reason &&
-              photoStatusSkipsGate(request.photo_status) &&
-              !photoAskedThisTurn &&
-              (reply?.includes(PHOTO_FIRST) || reply?.includes(SOFT_PHOTO_ASK))
-            ) {
-              // Never re-surface a photo ask after the gate closed on a prior turn.
-              reply = nextQuestion(request, phone).text;
-              if (intent === "ask_photo") intent = "ask_details";
             }
-            if (
-              reply &&
-              sameDayDemand(text) &&
-              (reply.includes(SOFT_PHOTO_ASK) || reply.includes(PHOTO_FIRST)) &&
-              !reply.includes(SAME_DAY_WINDOW)
-            )
-              reply = `${SAME_DAY_WINDOW}\n${reply}`;
             if (
               request &&
               !reason &&
@@ -1820,15 +1493,11 @@ export class Engine {
               const proposed = await this.s.proposeScheduleDate(c, request, this.now());
               if (!proposed) {
                 request.status = "waiting_capacity";
-                const capacityApproval = await c.query<{ status: string }>(
-                  "SELECT status FROM transport_capacity_approvals WHERE request_id=$1 ORDER BY requested_at DESC LIMIT 1",
-                  [request.id],
-                );
-                reply = capacityApproval.rows[0]?.status === "pending"
-                  ? "מכסת ההובלות ליום שלישי מלאה. שלחתי למנהל בקשה לאשר הובלה נוספת. הפנייה ממתינה, ולא ייקבע מועד נוסף עד לאישור מפורש."
-                  : capacityApproval.rows[0]?.status === "denied"
-                    ? "המנהל לא אישר הובלה נוספת ליום שלישי זה. הפנייה נשארה בהמתנה ולא תואמה."
-                    : "אין כרגע מועד שניתן להציע. השארתי את הפנייה בהמתנה; לא תואם מועד נוסף.";
+                turnBoundary = {
+                  code: "capacity_full",
+                  details: { request_id: request.id },
+                };
+                reply = null;
                 await this.s.save(c, request);
               } else {
                 request.proposed_run_date = proposed;
@@ -1840,7 +1509,7 @@ export class Engine {
                     p.schedule_approved_at = null;
                   }
                 await this.s.save(c, request);
-                reply = nextQuestion(request, phone).text;
+                reply = null;
                 intent = "ask_schedule_approval";
                 for (const p of request.parties) {
                   if (!p.phone || p.phone === phone || request.represents_both_parties) continue;
@@ -1850,7 +1519,15 @@ export class Engine {
                   );
                   const authorized = ["consented", "queued", "provider_accepted", "delivered", "approved"].includes(permission.rows[0]?.state ?? "");
                   if (!authorized) continue;
-                  const notice = { phone: p.phone, text: nextQuestion(request, p.phone).text };
+                  // Draft facts only — phraseNotice owns wording.
+                  const notice = {
+                    phone: p.phone,
+                    text: JSON.stringify({
+                      kind: "schedule_proposal",
+                      request_number: request.number,
+                      proposed_run_date: proposed,
+                    }),
+                  };
                   const outboxId = await this.s.outbound(
                     c,
                     ctx.message,
@@ -1872,27 +1549,30 @@ export class Engine {
               );
               if (coordinated === "same_day") {
                 reason = "same_day_admin_approval";
-                reply = HUMAN_REPLY;
+                reply = null;
+                turnBoundary = { code: "schedule_window", details: { same_day: true } };
               }
               if (coordinated === "full") {
                 const fullDate = request.proposed_run_date!;
                 request.status = "waiting_capacity";
                 await this.s.save(c, request);
-                const approval = await c.query<{ status: string }>(
-                  "SELECT status FROM transport_capacity_approvals WHERE run_date=$1 ORDER BY requested_at DESC LIMIT 1",
-                  [fullDate],
-                );
-                reply = approval.rows[0]?.status === "pending"
-                  ? `הגענו למכסת ההובלות ליום שלישי ${fullDate}. שלחתי למנהל בקשה לאשר הובלה נוספת. הפנייה ממתינה; לא אעביר אותה אוטומטית לשבוע הבא ולא אתאם בלי אישור.`
-                  : `מכסת ההובלות ליום שלישי ${fullDate} מלאה ולא אושרה הובלה נוספת. הפנייה נשארה בהמתנה ללא תיאום.`;
+                reply = null;
+                turnBoundary = {
+                  code: "capacity_full",
+                  details: { date: fullDate },
+                };
               } else if (coordinated === "capacity_denied") {
                 request.status = "waiting_capacity";
                 await this.s.save(c, request);
-                reply = "המנהל לא אישר הובלה נוספת ליום שלישי הזה. הפנייה נשארה בהמתנה ולא תואמה.";
+                reply = null;
+                turnBoundary = {
+                  code: "capacity_full",
+                  details: { denied: true },
+                };
               }
               if (coordinated === "coordinated") {
                 await this.s.save(c, request);
-                reply = statusText([request]);
+                reply = null;
                 intent = "coordinated";
                 await this.s.event(
                   c,
@@ -1905,7 +1585,14 @@ export class Engine {
                 for (const p of request.parties)
                   if (p.phone && p.phone !== phone)
                     {
-                    const notice = { phone: p.phone, text: reply };
+                    const notice = {
+                      phone: p.phone,
+                      text: JSON.stringify({
+                        kind: "coordinated",
+                        request_number: request.number,
+                        run_date: request.run_date,
+                      }),
+                    };
                     const outboxId = await this.s.outbound(
                       c,
                       ctx.message,
@@ -1931,15 +1618,19 @@ export class Engine {
           await this.s.event(c, ctx.message, phone, "tool_rejected", {
             code: e.code,
           });
-          if (e.status === 403) {
-            reason = `tool_authorization:${e.code}`;
-            reply = HUMAN_REPLY;
-          }
+          actionResults.push({
+            command: "apply",
+            ok: false,
+            detail: { code: e.code, status: e.status },
+          });
+          // Never escalate leftover authz to human. Reply phrases from facts.
+          reply = null;
+          intent = "clarification";
         }
       } else {
-        reply = HUMAN_REPLY;
-        reason = "no_plan";
-        intent = "human_escalation";
+        // No plan: still let Reply manager speak (placeholder only).
+        reply = null;
+        intent = "acknowledge";
       }
       const afterCtx = await this.s.context(id, c);
       changedFields = diffChangedFields({
@@ -2016,6 +1707,9 @@ export class Engine {
           active_search: afterCtx.active_search ?? null,
         },
         changedFields,
+        planCommands: plan?.commands ?? [],
+        actionResultFacts: actionResults,
+        turnBoundary,
       };
     });
     if (committed) this.log.info(committed);
@@ -2094,12 +1788,21 @@ export class Engine {
       };
       const replyInput = {
         rules,
-        commands: Array.isArray(committed.operation?.action_results)
-          ? []
-          : ((committed as { planCommands?: unknown[] }).planCommands ?? []),
-        results: [] as ActionResultFact[],
+        commands:
+          (committed as { planCommands?: unknown[] }).planCommands ?? [],
+        results:
+          ((committed as { actionResultFacts?: ActionResultFact[] })
+            .actionResultFacts ?? []) as ActionResultFact[],
         changed: committed.changedFields ?? [],
-        boundary: null as RulesState extends never ? never : null,
+        boundary:
+          (
+            committed as {
+              turnBoundary?: {
+                code: BoundaryCode;
+                details?: Record<string, unknown>;
+              } | null;
+            }
+          ).turnBoundary ?? null,
         notices: [] as NoticeFact[],
         fallback: OUTAGE_REPLY,
       };

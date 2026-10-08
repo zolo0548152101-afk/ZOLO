@@ -898,13 +898,15 @@ export class Store {
     return row.rows[0].id;
   }
   async linkPhoto(c: pg.PoolClient, r: Request, m: Incoming): Promise<void> {
+    // Skip silently when the image cannot be attached — never 403→human.
+    // Reply manager phrases any follow-up from state.
     if (
       !m.media_id ||
       m.kind !== "image" ||
       m.media_state !== "ready" ||
       !r.parties.some((p) => p.role === "donor" && p.phone === m.phone)
     )
-      throw new AppError("photo_authorization_failed", 403);
+      return;
     await c.query(
       "INSERT INTO request_media(request_id,media_id,added_by) SELECT $1,$2,id FROM contacts WHERE phone=$3 ON CONFLICT DO NOTHING",
       [r.id, m.media_id, m.phone],

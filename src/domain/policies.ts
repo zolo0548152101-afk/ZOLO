@@ -601,6 +601,20 @@ export function ownParty(
   phone: string,
   role?: "donor" | "receiver",
 ): Party {
+  // Strangers (not on the request) cannot write. A party already on the
+  // request may update either side when Action specifies a role — e.g. donor
+  // correcting the receiver name (יוסי→טל). Not one of the 4 hard boundaries.
+  const speakerOnRequest = r.parties.some((p) => p.phone === phone);
+  if (!speakerOnRequest)
+    throw new AppError(
+      "forbidden_party",
+      403,
+      "אפשר לעדכן רק פנייה שאתה צד בה.",
+    );
+  if (role) {
+    const target = r.parties.find((p) => p.role === role);
+    if (target) return target;
+  }
   const own = r.parties.filter(
     (p) => p.phone === phone && (!role || p.role === role),
   );
@@ -609,7 +623,7 @@ export function ownParty(
     throw new AppError(
       "forbidden_party",
       403,
-      "אפשר לעדכן רק את הצד שלך בפנייה.",
+      "אפשר לעדכן רק פנייה שאתה צד בה.",
     );
   return p;
 }

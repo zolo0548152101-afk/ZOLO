@@ -2784,6 +2784,58 @@ test("claim guard rejects unbacked רשמתי", async () => {
   );
 });
 
+test("ownParty lets donor update receiver while collecting", async () => {
+  const { ownParty } = await import("../src/domain/policies.js");
+  const { AppError } = await import("../src/domain/types.js");
+  const request = {
+    number: 1,
+    status: "collecting",
+    origin: "direct",
+    photo_status: "לא בוקשה",
+    photo_ids: [],
+    parties: [
+      {
+        role: "donor",
+        phone: "584152101",
+        name: "אברהם",
+        settlement: null,
+        address: null,
+        floor: null,
+        floor_note_shown: false,
+        approved_at: null,
+        approved_by: null,
+        schedule_approved: false,
+        schedule_approved_date: null,
+        schedule_approved_at: null,
+      },
+      {
+        role: "receiver",
+        phone: null,
+        name: "יוסי",
+        settlement: null,
+        address: null,
+        floor: null,
+        floor_note_shown: false,
+        approved_at: null,
+        approved_by: null,
+        schedule_approved: false,
+        schedule_approved_date: null,
+        schedule_approved_at: null,
+      },
+    ],
+    items: [],
+  };
+  const receiver = ownParty(request as never, "584152101", "receiver");
+  assert.equal(receiver.name, "יוסי");
+  receiver.name = "טל";
+  assert.equal(ownParty(request as never, "584152101", "receiver").name, "טל");
+  assert.throws(
+    () => ownParty(request as never, "999999999", "donor"),
+    (error: unknown) =>
+      error instanceof AppError && error.code === "forbidden_party",
+  );
+});
+
 test("verifyClaims ignores Hebrew saved labels and enforces path claims", async () => {
   const { verifyClaims, emptyClaims } = await import("../src/domain/ai-guards.js");
   const facts = {

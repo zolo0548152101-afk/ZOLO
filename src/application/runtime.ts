@@ -19,7 +19,7 @@ import {
   type Log,
   type Request,
 } from "../domain/types.js";
-import { localDate, nextQuestion, statusText } from "../domain/policies.js";
+import { localDate, statusText } from "../domain/policies.js";
 import {
   integrationAdapters,
   IntegrationDeliveryError,
@@ -596,7 +596,14 @@ export class Runtime {
             );
             const authorized = ["consented", "queued", "provider_accepted", "delivered", "approved"].includes(permission.rows[0]?.state ?? "");
             if (!authorized) continue;
-            const notice = { phone: p.phone, text: nextQuestion(r, p.phone).text };
+            const notice = {
+              phone: p.phone,
+              text: JSON.stringify({
+                kind: "schedule_proposal",
+                request_number: r.number,
+                proposed_run_date: proposed,
+              }),
+            };
             await store.outbound(
               c,
               { trace_id, mode: this.config.BOT_MODE },

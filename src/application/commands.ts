@@ -26,7 +26,6 @@ import {
   appliance,
   nextQuestion,
   composeTurnReply,
-  readyToAskContactCounterparty,
   statusText,
   nextTuesday,
   norm,
@@ -218,10 +217,13 @@ export class Commands {
     const phone = ctx.conversation.phone,
       text = ctx.message.transcript ?? ctx.message.text,
       notices: Notice[] = [];
+    // Customer wording is owned by the Reply manager post-commit. Command
+    // handlers may still pass draft strings for logs, but they never seed
+    // the customer outbox.
     const output = (
-      reply: string | null,
+      _reply: string | null,
       request: Request | null = null,
-    ): Outcome => ({ reply, request, notices });
+    ): Outcome => ({ reply: null, request, notices });
     const invalidateProposal = (request: Request) => {
       request.proposed_run_date = null;
       for (const party of request.parties) {
@@ -1014,12 +1016,7 @@ export class Commands {
         )
       )
         return output("הפנייה לצד השני כבר בוצעה.", r);
-      // AI owns consent wording (bare «כן» is enough). Execute contact=true
-      // when own details/rules are ready; otherwise keep asking missing fields.
-      if (cmd.contact && !readyToAskContactCounterparty(r, phone)) {
-        const q = nextQuestion(r, phone);
-        return output(q.text, r);
-      }
+      // AI owns when to contact. Soft progress gates must not block the write.
       r.verification_contacted = cmd.contact;
       await c.query(
         `INSERT INTO request_verifications(request_id,role,state,consented_at,updated_at,last_error)
@@ -1037,7 +1034,16 @@ export class Commands {
         if (other.phone) {
           notices.push({
             phone: other.phone,
-            text: `שלום${other.name ? ` ${other.name}` : ""},\n\nפנייה ${r.number}: ${r.items.map((i) => i.description).join(", ")}. ${phone === r.parties.find((p) => p.role === "donor")?.phone ? "המוסר" : "המקבל"} ביקש שנפנה אליך לאימות הפרטים.${other.settlement || other.address || other.floor !== null ? `\nהפרטים שנמסרו: ${[other.settlement, other.address, other.floor === null ? null : `קומה ${other.floor}`].filter(Boolean).join(", ")}.` : ""}\nנא לאשר את חלקך ב${other.role === "donor" ? "מסירה" : "קבלה"}.`,
+            text: JSON.stringify({
+              kind: "counterparty_verification",
+              request_number: r.number,
+              items: r.items.map((i) => i.description),
+              other_role: other.role,
+              other_name: other.name,
+              other_settlement: other.settlement,
+              other_address: other.address,
+              other_floor: other.floor,
+            }),
           });
           await c.query(
             `UPDATE conversations SET selected_request_id=$2,version=version+1
@@ -1245,37 +1251,7 @@ export class Commands {
     if (cmd.type === "details") {
       if (cmd.name || cmd.settlement || cmd.address || cmd.floor !== null)
         invalidateProposal(r);
-      let p: Party;
-      try {
-        p = ownParty(r, phone, cmd.role ?? undefined);
-      } catch (error) {
-        const actor = r.parties.find((candidate) => candidate.phone === phone);
-        const receiver = r.parties.find((candidate) => candidate.role === "receiver");
-        const onlyFillsMissingReceiverFields = Boolean(
-          receiver &&
-          (!cmd.name || !receiver.name || receiver.name === cmd.name) &&
-          (!cmd.settlement || !receiver.settlement || receiver.settlement === cmd.settlement) &&
-          (!cmd.address || !receiver.address || receiver.address === cmd.address) &&
-          (cmd.floor === null || receiver.floor === null || receiver.floor === cmd.floor),
-        );
-        // In a direct handoff the donor may supply the receiver's destination
-        // ("כתובת היעד…"), either in the opening message or together with
-        // later consent to contact them. Store those facts as provisional so
-        // the receiver can verify a complete summary. Keep this limited to
-        // empty/same fields and the period before the receiver has approved;
-        // later cross-party edits stay forbidden.
-        if (
-          !(error instanceof AppError && error.code === "forbidden_party") ||
-          r.origin !== "direct" ||
-          cmd.role !== "receiver" ||
-          actor?.role !== "donor" ||
-          !receiver ||
-          receiver.approved_at !== null ||
-          !onlyFillsMissingReceiverFields
-        )
-          throw error;
-        p = receiver;
-      }
+      const p = ownParty(r, phone, cmd.role ?? undefined);
       const settlementIsTheStreet =
         Boolean(cmd.settlement) &&
         Boolean(cmd.address) &&
@@ -1382,8 +1358,9 @@ export class Commands {
       const role = ownParty(r, phone).role === "donor" ? "receiver" : "donor";
       const other = r.parties.find((p) => p.role === role);
       if (!cmd.phone) {
+        // Missing phone is incompleteness for Reply to ask — not a 403 human escalate.
         if (role !== "receiver" || !cmd.name)
-          throw new AppError("phone_not_supplied", 403, "נא לשלוח את מספר הצד השני או כרטיס איש קשר.");
+          return output(null, r);
         if (other) {
           other.name = cmd.name;
         } else {
@@ -1477,11 +1454,8 @@ export class Commands {
           "המועד לא אושר כי הוא אינו תואם להצעה הנוכחית. נשלח מחדש את המועד המעודכן.",
         );
       if (!ownParty(r, phone).approved_at)
-        throw new AppError(
-          "identity_approval_required",
-          409,
-          "נא לאשר תחילה את חלקך בפנייה.",
-        );
+        // Schedule approval without self-approval: skip write; Reply asks.
+        return output(null, r);
       for (const p of r.parties)
         if (p.phone === phone) {
           p.schedule_approved = true;
