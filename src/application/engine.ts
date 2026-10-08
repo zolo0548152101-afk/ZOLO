@@ -775,13 +775,17 @@ export class Engine {
       commands: [{ type: "next" }],
       evidence: "agent_tools",
     };
+    // Refresh versions AFTER tool writes — pre-tool snapshots go stale and
+    // finish() would RetryableError("stale_plan"), re-enter agentTurn, and
+    // overwrite tool metadata with a no-write second attempt.
+    const ctxAfterTools = await this.s.context(id);
     await this.s.pool.query(
       `UPDATE messages SET ai_plan=$2,plan_versions=$3,ai_metadata=$4
         WHERE id=$1 AND ai_plan IS NULL AND processed_at IS NULL`,
       [
         id,
         JSON.stringify(plan),
-        JSON.stringify(this.versions(ctx0)),
+        JSON.stringify(this.versions(ctxAfterTools)),
         JSON.stringify({
           ...agent.metadata,
           agent_reply: replyText,
