@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useState } from "react";
 import { ClusterTable, type ClusterView } from "./ClusterTable";
+import { downloadClustersCsv } from "@/lib/csv";
 
 const ClusterMap = dynamic(
   () => import("./ClusterMap").then((m) => m.ClusterMap),
@@ -122,16 +123,31 @@ export function Dashboard() {
             onChange={(e) => setMaxTurnout(Number(e.target.value))}
           />
         </label>
-        <button
-          type="button"
-          className="reset"
-          onClick={() => {
-            setMinRight(70);
-            setMaxTurnout(60);
-          }}
-        >
-          ברירת מחדל 70 / 60
-        </button>
+        <div className="filter-actions">
+          <button
+            type="button"
+            className="reset"
+            onClick={() => {
+              setMinRight(70);
+              setMaxTurnout(60);
+            }}
+          >
+            ברירת מחדל 70 / 60
+          </button>
+          <button
+            type="button"
+            className="export"
+            disabled={loading || clusters.length === 0}
+            onClick={() =>
+              downloadClustersCsv(
+                clusters,
+                `ashkolot-yamin${minRight}-turnout${maxTurnout}.csv`,
+              )
+            }
+          >
+            ייצוא CSV ({loading ? "…" : clusters.length})
+          </button>
+        </div>
       </section>
 
       {error && <p className="error">{error}</p>}

@@ -127,15 +127,36 @@ h1 {
   font: inherit;
 }
 
-.reset {
+.filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.reset,
+.export {
   border: 0;
   border-radius: 999px;
   padding: 0.7rem 1rem;
-  background: var(--accent);
-  color: white;
   font: inherit;
   font-weight: 700;
   cursor: pointer;
+}
+
+.reset {
+  background: var(--accent);
+  color: white;
+}
+
+.export {
+  background: var(--ink);
+  color: var(--sand);
+}
+
+.export:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .split {
