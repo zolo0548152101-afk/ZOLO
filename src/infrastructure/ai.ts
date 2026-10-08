@@ -4,6 +4,9 @@
  * sentences and never runs free SQL.
  */
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import OpenAI from "openai";
 import { z } from "zod";
 import type { Config } from "../config.js";
@@ -232,6 +235,25 @@ function agentHosted(c: Config): { id: string; version: string } {
   return requireHosted(id, version, "agent");
 }
 
+function loadAgentInstructions(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(process.cwd(), "prompts/haim-agent.he.md"),
+    join(here, "../../prompts/haim-agent.he.md"),
+    join(here, "../../../prompts/haim-agent.he.md"),
+  ];
+  for (const path of candidates) {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      /* try next */
+    }
+  }
+  throw new AppError("missing_agent_prompt_file");
+}
+
+const AGENT_INSTRUCTIONS = loadAgentInstructions();
+
 const OPENING_COMMANDS = new Set(["donate", "receive_from_donor", "seek"]);
 
 function hasOpenRequest(ctx: Context): boolean {
@@ -354,11 +376,14 @@ export class OpenAIPlanner implements Planner {
     const rounds: unknown[] = [];
     const tools = maxToolCalls > 0 ? AGENT_WRITE_TOOLS : undefined;
 
+    // Hosted Action prompt is still the dashboard id until AGENT is published;
+    // overlay local agent instructions so the model uses tools + reply JSON.
     let response = await this.client.responses.create({
       prompt: {
         id: hosted.id,
         version: hosted.version,
       },
+      instructions: AGENT_INSTRUCTIONS,
       ...(tools ? { tools } : {}),
       text: {
         format: {
@@ -457,6 +482,7 @@ export class OpenAIPlanner implements Planner {
           id: hosted.id,
           version: hosted.version,
         },
+        instructions: AGENT_INSTRUCTIONS,
         ...(tools ? { tools } : {}),
         text: {
           format: {

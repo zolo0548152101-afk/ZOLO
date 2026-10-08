@@ -24,7 +24,6 @@ if (missing.length) throw new Error(`prompt_wiring_missing:${missing.join(",")}`
 const forbidden = [
   'loadPrompt("haim-action.he.md")',
   'loadPrompt("haim-reply.he.md")',
-  'loadPrompt("haim-agent.he.md")',
   'mode: "git"',
   "git:prompts/haim-reply.he.md",
   "withCanonical(",
@@ -33,6 +32,10 @@ const forbidden = [
 const present = forbidden.filter((value) => source.includes(value));
 if (present.length)
   throw new Error(`prompt_wiring_forbidden_present:${present.join(",")}`);
+if (!source.includes("haim-agent.he.md"))
+  throw new Error("prompt_wiring_missing:haim-agent.he.md_instructions");
+if (!source.includes("instructions: AGENT_INSTRUCTIONS"))
+  throw new Error("prompt_wiring_missing:AGENT_INSTRUCTIONS");
 
 const calls = source.match(/this\.client\.responses\.create/g)?.length ?? 0;
 if (calls < 2) throw new Error(`prompt_wiring_expected_two_calls:${calls}`);

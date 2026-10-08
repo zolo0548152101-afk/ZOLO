@@ -687,25 +687,30 @@ export class Engine {
         ? `${field.table}.${field.column}:${field.role}`
         : `${field.table}.${field.column}`,
     );
+    const allToolResults =
+      toolResults.length > 0 ? toolResults : agent.toolResults;
+    const donateResult = allToolResults.find(
+      (r) => r.command.type === "donate" && r.ok && typeof r.request_number === "number",
+    );
     const claimFacts = {
       changedPaths,
-      openedRequestNumber:
-        agent.commands.find((c) => c.type === "donate") &&
-        typeof agent.toolResults.find((r) => r.command.type === "donate")
-          ?.request_number === "number"
-          ? (agent.toolResults.find((r) => r.command.type === "donate")!
-              .request_number as number)
-          : null,
-      contactedCounterparty: agent.toolResults.some(
-        (r) => r.command.type === "contact_counterparty" && r.ok && r.notices_queued > 0,
+      openedRequestNumber: donateResult?.request_number ?? null,
+      contactedCounterparty: allToolResults.some(
+        (r) =>
+          r.command.type === "contact_counterparty" &&
+          r.ok &&
+          (r.notices_queued > 0 ||
+            (r.command.type === "contact_counterparty" &&
+              "contact" in r.command &&
+              (r.command as { contact?: boolean }).contact === true)),
       ),
       scheduleDate: null as string | null,
-      cancelled: agent.toolResults.some(
+      cancelled: allToolResults.some(
         (r) => r.request_status === "cancelled" || r.command.type === "cancel",
       ),
       humanHandoff:
         Boolean(humanReason) ||
-        agent.toolResults.some((r) => r.request_status === "human"),
+        allToolResults.some((r) => r.request_status === "human"),
       knownRequestNumbers: (await this.s.context(id)).requests.map((r) => r.number),
     };
     let claims = agent.claims;
@@ -785,9 +790,10 @@ export class Engine {
           agent_rejected: rejected,
           agent_rejected_claims: rejectedClaims,
           agent_commands: planCommands,
-          tool_results: toolResults,
+          tool_results: allToolResults,
           tools_already_applied: true,
           human_reason: humanReason ?? null,
+          claim_facts: claimFacts,
         }),
       ],
     );
@@ -2080,7 +2086,7 @@ export class Engine {
           typeof agentMeta.agent_reply === "string" &&
           agentMeta.agent_reply.trim()
         ) {
-          // Single agent turn already produced the customer reply + claims.
+          // Single agent turn already produced + claim-checked the reply.
           text = agentMeta.agent_reply.trim();
           claims =
             agentMeta.agent_claims &&
@@ -2096,10 +2102,39 @@ export class Engine {
               (path): path is string => typeof path === "string",
             );
           }
-          const check = verifyClaims(claims, claimFacts);
-          if (!check.ok) {
-            rejected = true;
-            rejectedClaims = check.rejected;
+          // Rebuild donate/contact facts from tool results — finish() only saw `next`.
+          const toolRows = Array.isArray(agentMeta.tool_results)
+            ? agentMeta.tool_results
+            : [];
+          const donate = toolRows.find(
+            (row) =>
+              row &&
+              typeof row === "object" &&
+              (row as { command?: { type?: string }; ok?: boolean; request_number?: number })
+                .command?.type === "donate" &&
+              (row as { ok?: boolean }).ok === true &&
+              typeof (row as { request_number?: number }).request_number === "number",
+          ) as { request_number: number } | undefined;
+          if (donate) claimFacts.openedRequestNumber = donate.request_number;
+          claimFacts.contactedCounterparty =
+            claimFacts.contactedCounterparty ||
+            toolRows.some(
+              (row) =>
+                row &&
+                typeof row === "object" &&
+                (row as { command?: { type?: string }; notices_queued?: number })
+                  .command?.type === "contact_counterparty" &&
+                ((row as { notices_queued?: number }).notices_queued ?? 0) > 0,
+            );
+          if (!rejected) {
+            const check = verifyClaims(claims, claimFacts);
+            if (!check.ok) {
+              rejected = true;
+              rejectedClaims = check.rejected;
+              text = GUARD_FALLBACK_REPLY;
+              claims = emptyClaims();
+            }
+          } else {
             text = GUARD_FALLBACK_REPLY;
             claims = emptyClaims();
           }
