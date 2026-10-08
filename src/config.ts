@@ -20,8 +20,12 @@ const envSchema = z.object({
   // Dashboard owns the model. This is only a log/fallback label; requests
   // do not override the hosted prompt's model.
   OPENAI_MODEL: z.string().default("gpt-6-luna"),
+  // Unified customer agent (tools + reply). Falls back to ACTION when empty.
+  OPENAI_AGENT_PROMPT_ID: z.string().default(""),
+  OPENAI_AGENT_PROMPT_VERSION: z.string().default(""),
   OPENAI_ACTION_PROMPT_ID: z.string().default(""),
   OPENAI_ACTION_PROMPT_VERSION: z.string().default(""),
+  // Notices (counterparty) still use the reply hosted prompt.
   OPENAI_REPLY_PROMPT_ID: z.string().default(""),
   OPENAI_REPLY_PROMPT_VERSION: z.string().default(""),
   // Legacy eval harness only — never used at runtime.
@@ -142,8 +146,11 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (c.AI_ENABLED && !c.OPENAI_API_KEY)
     throw new Error("missing_openai_key_or_disable_ai");
   if (c.AI_ENABLED) {
-    if (!c.OPENAI_ACTION_PROMPT_ID || !c.OPENAI_ACTION_PROMPT_VERSION)
-      throw new Error("missing_hosted_action_prompt");
+    const agentId = c.OPENAI_AGENT_PROMPT_ID || c.OPENAI_ACTION_PROMPT_ID;
+    const agentVersion =
+      c.OPENAI_AGENT_PROMPT_VERSION || c.OPENAI_ACTION_PROMPT_VERSION;
+    if (!agentId || !agentVersion)
+      throw new Error("missing_hosted_agent_prompt");
     if (!c.OPENAI_REPLY_PROMPT_ID || !c.OPENAI_REPLY_PROMPT_VERSION)
       throw new Error("missing_hosted_reply_prompt");
   }

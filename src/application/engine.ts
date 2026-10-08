@@ -15,12 +15,14 @@ import {
   RetryableError,
   errorCode,
   planSchema,
+  type Command,
   type Plan,
   type Request,
   type Context,
   type Log,
   type Notice,
 } from "../domain/types.js";
+import { snapshotToolResult, type AgentToolResult } from "./agent-tools.js";
 import {
   isStatus,
   photoGate,
@@ -505,31 +507,12 @@ export class Engine {
     }
     if (!plan) {
       try {
-        // Free-form Hebrew is decoded by the AI. The action manager owns every
-        // field value from the prompt; commands.apply is the DB write tool.
-        const rules = await this.s.loadRulesState();
-        const response = await this.ai.plan(ctx, rules);
-        const parsed = planSchema.parse(response.plan);
-        plan = parsed;
-        await this.s.pool.query(
-          `UPDATE messages SET ai_plan=$2,plan_versions=$3,ai_metadata=$4 WHERE id=$1 AND ai_plan IS NULL AND processed_at IS NULL`,
-          [
-            id,
-            JSON.stringify(plan),
-            JSON.stringify(this.versions(ctx)),
-            JSON.stringify(response.metadata),
-          ],
-        );
-        // If the model returned actionable commands, execute them even when
-        // understood=false. Only fall through to rules when there is nothing
-        // to write.
-        const actionable = plan.commands.some((command) => command.type !== "next");
-        // Unclear with nothing to write: continue with next so Reply phrases.
-        if (!response.understood && !actionable)
-          plan = { commands: [{ type: "next" }], evidence: "" };
+        // One agent turn: write via function tools, then phrase from results.
+        await this.finishWithAgentTools(id, lastAiAttempt);
+        return;
       } catch (e) {
-        // Transient API failures retry once. Soft-photo / unclear templates
-        // are gone — only OUTAGE_REPLY after final OpenAI failure.
+        if (e instanceof RetryableError) throw e;
+        // Transient API failures retry once.
         if (!lastAiAttempt && !(e instanceof AppError))
           throw new RetryableError("openai_retry");
         if (
@@ -552,6 +535,325 @@ export class Engine {
           [id],
         );
       throw e;
+    }
+  }
+
+  /**
+   * Bounded tool loop: model calls write tools (Commands.apply), sees results,
+   * then returns the customer reply. Schedule/coordinate still run in finish().
+   */
+  private async finishWithAgentTools(
+    id: string,
+    lastAiAttempt: boolean,
+  ): Promise<void> {
+    const ctx0 = await this.s.context(id);
+    if (ctx0.message.processed_at) return;
+    const rules = await this.s.loadRulesState();
+    const deferredToolNotices: {
+      outboxId: string;
+      notice: Notice;
+      requestId: string | null;
+    }[] = [];
+    const executedCommands: Command[] = [];
+    const toolResults: AgentToolResult[] = [];
+    const changedFromTools: ChangedField[] = [];
+    let humanReason: string | undefined;
+
+    const executeTool = async (command: Command): Promise<AgentToolResult> => {
+      return this.s.transaction(async (c) => {
+        const ctx = await this.s.context(id, c, true);
+        if (ctx.message.processed_at) {
+          return {
+            ok: false,
+            command,
+            changed_fields: [],
+            request_number: null,
+            request_status: null,
+            missing_required: null,
+            notices_queued: 0,
+            error: "already_processed",
+          };
+        }
+        const before =
+          structuredClone(
+            ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+              ctx.requests.find(
+                (r) =>
+                  !["coordinated", "closed", "cancelled", "rejected"].includes(
+                    r.status,
+                  ),
+              ) ??
+              null,
+          );
+        await c.query("SAVEPOINT agent_tool");
+        try {
+          const result: Outcome = await this.commands.apply(c, ctx, command);
+          if (result.request) await this.s.save(c, result.request);
+          if (result.humanReason) humanReason = result.humanReason;
+          await this.s.event(
+            c,
+            ctx.message,
+            ctx.conversation.phone,
+            `command.${command.type}`,
+            { command, via: "agent_tool" },
+            result.request?.id ?? null,
+          );
+          const noticeIndex = deferredToolNotices.length;
+          for (const [n, notice] of result.notices.entries()) {
+            const dedupeKey = `notice:${id}:tool:${noticeIndex + n}`;
+            const outboxId = await this.s.outbound(
+              c,
+              ctx.message,
+              notice,
+              dedupeKey,
+              result.request?.id ?? null,
+              "pending",
+            );
+            if (outboxId)
+              deferredToolNotices.push({
+                outboxId,
+                notice,
+                requestId: result.request?.id ?? null,
+              });
+          }
+          await c.query("RELEASE SAVEPOINT agent_tool");
+          const afterCtx = await this.s.context(id, c);
+          const after =
+            result.request ??
+            afterCtx.requests.find(
+              (r) => r.id === afterCtx.conversation.selected_request_id,
+            ) ??
+            null;
+          const changed = diffChangedFields({
+            beforeRequest: before,
+            afterRequest: after,
+            beforeSearch: null,
+            afterSearch: afterCtx.active_search ?? null,
+          });
+          executedCommands.push(command);
+          changedFromTools.push(...changed);
+          const snap = snapshotToolResult({
+            command,
+            before,
+            after,
+            changed,
+            notices: result.notices,
+            humanReason: result.humanReason,
+            phone: ctx.conversation.phone,
+          });
+          toolResults.push(snap);
+          return snap;
+        } catch (e) {
+          await c.query("ROLLBACK TO SAVEPOINT agent_tool");
+          if (!(e instanceof AppError)) throw e;
+          await this.s.event(c, ctx.message, ctx.conversation.phone, "tool_rejected", {
+            code: e.code,
+            via: "agent_tool",
+          });
+          const snap = snapshotToolResult({
+            command,
+            before,
+            after: before,
+            changed: [],
+            notices: [],
+            phone: ctx.conversation.phone,
+            error: e.code,
+          });
+          toolResults.push(snap);
+          return snap;
+        }
+      });
+    };
+
+    let agent;
+    try {
+      agent = await this.ai.agentTurn(ctx0, {
+        rules,
+        executeTool,
+        maxToolCalls: 5,
+      });
+    } catch (e) {
+      if (!lastAiAttempt && !(e instanceof AppError))
+        throw new RetryableError("openai_retry");
+      throw e;
+    }
+
+    // One claim-guard retry inside the agent when the first reply over-claims.
+    const changedPaths = (agent.changedFields.length
+      ? agent.changedFields
+      : changedFromTools
+    ).map((field) =>
+      field.role
+        ? `${field.table}.${field.column}:${field.role}`
+        : `${field.table}.${field.column}`,
+    );
+    const claimFacts = {
+      changedPaths,
+      openedRequestNumber:
+        agent.commands.find((c) => c.type === "donate") &&
+        typeof agent.toolResults.find((r) => r.command.type === "donate")
+          ?.request_number === "number"
+          ? (agent.toolResults.find((r) => r.command.type === "donate")!
+              .request_number as number)
+          : null,
+      contactedCounterparty: agent.toolResults.some(
+        (r) => r.command.type === "contact_counterparty" && r.ok && r.notices_queued > 0,
+      ),
+      scheduleDate: null as string | null,
+      cancelled: agent.toolResults.some(
+        (r) => r.request_status === "cancelled" || r.command.type === "cancel",
+      ),
+      humanHandoff:
+        Boolean(humanReason) ||
+        agent.toolResults.some((r) => r.request_status === "human"),
+      knownRequestNumbers: (await this.s.context(id)).requests.map((r) => r.number),
+    };
+    let claims = agent.claims;
+    let replyText = agent.text;
+    let rejected = false;
+    let rejectedClaims: string[] = [];
+    let check = verifyClaims(claims, claimFacts);
+    if (!check.ok) {
+      rejected = true;
+      rejectedClaims = check.rejected;
+      try {
+        const retry = await this.ai.agentTurn(await this.s.context(id), {
+          rules,
+          executeTool: async (command) => {
+            // Guard retry is phrase-only — refuse further writes.
+            return snapshotToolResult({
+              command,
+              before: null,
+              after: null,
+              changed: [],
+              notices: [],
+              phone: ctx0.conversation.phone,
+              error: "guard_retry_writes_disabled",
+            });
+          },
+          guardFeedback: { rejected_claims: check.rejected },
+          maxToolCalls: 0,
+        });
+        claims = retry.claims;
+        replyText = retry.text;
+        agent = {
+          ...agent,
+          text: replyText,
+          claims,
+          metadata: { ...agent.metadata, guard_retry: retry.metadata },
+        };
+        check = verifyClaims(claims, claimFacts);
+        if (!check.ok) {
+          rejected = true;
+          rejectedClaims = check.rejected;
+          replyText = GUARD_FALLBACK_REPLY;
+          claims = emptyClaims();
+        } else {
+          rejected = false;
+          rejectedClaims = [];
+        }
+      } catch {
+        replyText = GUARD_FALLBACK_REPLY;
+        claims = emptyClaims();
+      }
+    }
+
+    const planCommands =
+      executedCommands.length > 0
+        ? executedCommands
+        : agent.commands.filter((c) => c.type !== "next").length
+          ? agent.commands
+          : ([{ type: "next" }] as Command[]);
+    // Persist next-only ai_plan so finish() does not re-apply tool writes.
+    // Real commands live in metadata for audit / turn-log.
+    const plan: Plan = {
+      commands: [{ type: "next" }],
+      evidence: "agent_tools",
+    };
+    await this.s.pool.query(
+      `UPDATE messages SET ai_plan=$2,plan_versions=$3,ai_metadata=$4
+        WHERE id=$1 AND ai_plan IS NULL AND processed_at IS NULL`,
+      [
+        id,
+        JSON.stringify(plan),
+        JSON.stringify(this.versions(ctx0)),
+        JSON.stringify({
+          ...agent.metadata,
+          agent_reply: replyText,
+          agent_claims: claims,
+          agent_changed_fields: changedPaths,
+          agent_rejected: rejected,
+          agent_rejected_claims: rejectedClaims,
+          agent_commands: planCommands,
+          tool_results: toolResults,
+          tools_already_applied: true,
+          human_reason: humanReason ?? null,
+        }),
+      ],
+    );
+
+    if (humanReason) {
+      const reason = humanReason;
+      await this.s.transaction(async (c) => {
+        const ctx = await this.s.context(id, c, true);
+        const open =
+          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+          ctx.requests.find(
+            (r) =>
+              !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
+          ) ??
+          null;
+        if (open && open.status !== "human") {
+          open.status = "human";
+          open.human_reason = reason;
+          await this.s.save(c, open);
+        }
+        await this.alert(c, ctx, reason, replyText, open);
+      });
+    }
+
+    // finish() applies the `next` plan (no-op writes) then schedule/coordinate
+    // and uses agent_reply from ai_metadata instead of a second model call.
+    try {
+      await this.finish(id, plan);
+    } catch (e) {
+      if (e instanceof RetryableError && e.code === "stale_plan")
+        await this.s.pool.query(
+          "UPDATE messages SET ai_plan=NULL,plan_versions=NULL WHERE id=$1 AND processed_at IS NULL",
+          [id],
+        );
+      throw e;
+    }
+
+    // Format notices queued during tool applies (finish may also queue more).
+    if (deferredToolNotices.length) {
+      const ctx = await this.s.context(id);
+      for (const item of deferredToolNotices) {
+        let text = item.notice.text;
+        let state: "ready" | "failed" = "ready";
+        try {
+          const request = item.requestId
+            ? await this.s.request(item.requestId)
+            : null;
+          text = (await this.ai.phraseNotice(ctx, item.notice, request)).text;
+          text = text.trim() || item.notice.text;
+        } catch (e) {
+          state = "failed";
+          this.log.error({
+            code: errorCode(e),
+            outbox_id: item.outboxId,
+            stage: "notice_format_tool",
+          });
+        }
+        await this.s.transaction(async (c) => {
+          await c.query(
+            "UPDATE outbox SET text=$2,format_state=$3 WHERE id=$1 AND format_state='pending'",
+            [item.outboxId, text, state],
+          );
+          if (state === "ready")
+            await this.s.scheduleSendIfReady(c, item.outboxId);
+        });
+      }
     }
   }
 
@@ -1766,30 +2068,74 @@ export class Engine {
         fallback: OUTAGE_REPLY,
       };
       try {
-        let generated = await this.ai.reply(ctx, replyInput);
-        replyMeta = generated.metadata;
-        claims = generated.claims;
-        let check = verifyClaims(claims, claimFacts);
-        if (!check.ok) {
-          rejected = true;
-          rejectedClaims = check.rejected;
-          generated = await this.ai.reply(ctx, {
-            ...replyInput,
-            guardFeedback: { rejected_claims: check.rejected },
-          });
-          replyMeta = generated.metadata;
-          claims = generated.claims;
-          check = verifyClaims(claims, claimFacts);
+        const metaRow = await this.s.pool.query<{
+          ai_metadata: Record<string, unknown> | null;
+        }>("SELECT ai_metadata FROM messages WHERE id=$1", [id]);
+        const agentMeta = (metaRow.rows[0]?.ai_metadata ?? {}) as Record<
+          string,
+          unknown
+        >;
+        if (
+          agentMeta.tools_already_applied === true &&
+          typeof agentMeta.agent_reply === "string" &&
+          agentMeta.agent_reply.trim()
+        ) {
+          // Single agent turn already produced the customer reply + claims.
+          text = agentMeta.agent_reply.trim();
+          claims =
+            agentMeta.agent_claims &&
+            typeof agentMeta.agent_claims === "object"
+              ? (agentMeta.agent_claims as ReplyClaims)
+              : emptyClaims();
+          rejected = agentMeta.agent_rejected === true;
+          rejectedClaims = Array.isArray(agentMeta.agent_rejected_claims)
+            ? (agentMeta.agent_rejected_claims as string[])
+            : [];
+          if (Array.isArray(agentMeta.agent_changed_fields)) {
+            claimFacts.changedPaths = agentMeta.agent_changed_fields.filter(
+              (path): path is string => typeof path === "string",
+            );
+          }
+          const check = verifyClaims(claims, claimFacts);
           if (!check.ok) {
             rejected = true;
             rejectedClaims = check.rejected;
             text = GUARD_FALLBACK_REPLY;
+            claims = emptyClaims();
+          }
+          replyMeta = {
+            provider: "openai_responses_agent",
+            prompt_id: agentMeta.prompt_id ?? null,
+            prompt_version: agentMeta.prompt_version ?? null,
+            response_id: agentMeta.response_id ?? null,
+            tools_already_applied: true,
+          };
+        } else {
+          let generated = await this.ai.reply(ctx, replyInput);
+          replyMeta = generated.metadata;
+          claims = generated.claims;
+          let check = verifyClaims(claims, claimFacts);
+          if (!check.ok) {
+            rejected = true;
+            rejectedClaims = check.rejected;
+            generated = await this.ai.reply(ctx, {
+              ...replyInput,
+              guardFeedback: { rejected_claims: check.rejected },
+            });
+            replyMeta = generated.metadata;
+            claims = generated.claims;
+            check = verifyClaims(claims, claimFacts);
+            if (!check.ok) {
+              rejected = true;
+              rejectedClaims = check.rejected;
+              text = GUARD_FALLBACK_REPLY;
+            } else {
+              rejected = false;
+              text = generated.text.trim() || GUARD_FALLBACK_REPLY;
+            }
           } else {
-            rejected = false;
             text = generated.text.trim() || GUARD_FALLBACK_REPLY;
           }
-        } else {
-          text = generated.text.trim() || GUARD_FALLBACK_REPLY;
         }
       } catch (e) {
         this.log.error({

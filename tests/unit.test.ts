@@ -29,7 +29,7 @@ import {
   pressureCanonical,
   pressureSignals,
 } from "../src/domain/customer-language.js";
-import { CLARIFY_REPLY } from "../src/domain/ai-guards.js";
+import { CLARIFY_REPLY, verifyClaims, emptyClaims } from "../src/domain/ai-guards.js";
 import { Commands } from "../src/application/commands.js";
 import type { Store } from "../src/infrastructure/store.js";
 import type { Command, Context } from "../src/domain/types.js";
@@ -43,6 +43,13 @@ import {
 } from "../src/infrastructure/media.js";
 import { WahaChannel, DeliveryError } from "../src/infrastructure/waha.js";
 import { config, JPEG, sampleRequest, donate } from "./fixtures.js";
+import {
+  AGENT_WRITE_TOOLS,
+  buildAgentWriteTools,
+  parseAgentToolCall,
+  snapshotToolResult,
+  agentFinalReplySchema,
+} from "../src/application/agent-tools.js";
 
 test("FAQ/greeting topics are detected without code sentences", () => {
   assert.equal(isQuickTopic("שלום"), true);
@@ -2853,4 +2860,123 @@ test("nextQuestion asks whether a receive-from-donor item is free", () => {
   const question = nextQuestion(request, request.parties[1]!.phone!);
   assert.equal(question.missing?.field, "free");
   assert.equal(question.text, "");
+});
+
+test("agent write tools cover every commandSchema variant", () => {
+  const tools = buildAgentWriteTools();
+  assert.equal(tools.length, AGENT_WRITE_TOOLS.length);
+  assert.ok(tools.length >= 15);
+  const names = new Set(tools.map((tool) => tool.name));
+  for (const required of [
+    "donate",
+    "details",
+    "item_facts",
+    "counterparty",
+    "contact_counterparty",
+    "next",
+    "seek",
+    "cancel",
+  ]) {
+    assert.ok(names.has(required), `missing tool ${required}`);
+  }
+  for (const tool of tools) {
+    assert.equal(tool.type, "function");
+    assert.equal(tool.strict, true);
+    assert.equal(tool.parameters.type, "object");
+    assert.equal(tool.parameters.additionalProperties, false);
+  }
+});
+
+test("parseAgentToolCall builds a validated donate command", () => {
+  const command = parseAgentToolCall("donate", {
+    items: [{ kind: "bed", description: "מיטה", quantity: 1 }],
+    counterparty_phone: null,
+    counterparty_name: "טל",
+    direct: true,
+    free: null,
+    working: null,
+  });
+  assert.equal(command.type, "donate");
+  if (command.type === "donate") {
+    assert.equal(command.counterparty_name, "טל");
+    assert.equal(command.direct, true);
+  }
+});
+
+test("snapshotToolResult reports changed_fields and missing_required", () => {
+  const request = sampleRequest();
+  const changed = [
+    { table: "request_parties", column: "name", role: "donor" as const },
+  ];
+  const snap = snapshotToolResult({
+    command: { type: "details", request_number: request.number, role: "donor", name: "ישראל", settlement: null, address: null, floor: null, preferred_time: null },
+    before: null,
+    after: request,
+    changed,
+    notices: [],
+    phone: request.parties[0]!.phone!,
+  });
+  assert.equal(snap.ok, true);
+  assert.equal(snap.request_number, request.number);
+  assert.deepEqual(snap.changed_fields, changed);
+  assert.ok(snap.missing_required !== undefined);
+});
+
+test("agent final reply schema and claim guard accept tool changed_fields only", () => {
+  const parsed = agentFinalReplySchema.parse({
+    reply: "רשמתי את השם ישראל. באיזו קומה?",
+    claims: {
+      saved: ["request_parties.name:donor"],
+      contacted_counterparty: false,
+      opened_request: null,
+      schedule_date: null,
+      cancelled: false,
+      human_handoff: false,
+    },
+  });
+  const ok = verifyClaims(parsed.claims, {
+    changedPaths: ["request_parties.name:donor"],
+    openedRequestNumber: null,
+    contactedCounterparty: false,
+    scheduleDate: null,
+    cancelled: false,
+    humanHandoff: false,
+    knownRequestNumbers: [1],
+  });
+  assert.equal(ok.ok, true);
+  const bad = verifyClaims(
+    { ...emptyClaims(), saved: ["request_parties.address:donor"] },
+    {
+      changedPaths: ["request_parties.name:donor"],
+      openedRequestNumber: null,
+      contactedCounterparty: false,
+      scheduleDate: null,
+      cancelled: false,
+      humanHandoff: false,
+      knownRequestNumbers: [1],
+    },
+  );
+  assert.equal(bad.ok, false);
+  assert.ok(bad.rejected.includes("saved:request_parties.address:donor"));
+});
+
+test("config accepts agent prompt falling back to action prompt", () => {
+  const c = readConfig({
+    NODE_ENV: "test",
+    DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:55432/postgres",
+    DB_SCHEMA: "haim_core_test",
+    BOT_MODE: "shadow",
+    AI_ENABLED: "true",
+    OPENAI_API_KEY: "sk-test",
+    OPENAI_ACTION_PROMPT_ID: "pmpt_action",
+    OPENAI_ACTION_PROMPT_VERSION: "2",
+    OPENAI_REPLY_PROMPT_ID: "pmpt_reply",
+    OPENAI_REPLY_PROMPT_VERSION: "4",
+    WAHA_WEBHOOK_HMAC_KEY: "test-only-hmac-key-not-a-secret-000000",
+    HAIM_ADMIN_TOKEN: "test-only-admin-key-not-a-secret-00000",
+    MEDIA_ROOT: "/tmp/haim-agent-test-media",
+  });
+  assert.equal(c.OPENAI_AGENT_PROMPT_ID, "");
+  assert.equal(c.OPENAI_ACTION_PROMPT_ID, "pmpt_action");
+  assert.equal(c.OPENAI_REPLY_PROMPT_ID, "pmpt_reply");
 });

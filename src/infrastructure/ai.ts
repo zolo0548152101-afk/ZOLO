@@ -1,7 +1,7 @@
 /**
- * OpenAI Responses client. Prompts are owned in the OpenAI dashboard
- * (hosted pmpt_ ids). Code never loads customer prompt files at runtime,
- * never invents customer sentences, and only sends facts + strict schemas.
+ * OpenAI Responses client. Customer turns use one agent + write tools.
+ * Notices still use the hosted reply prompt. Code never invents customer
+ * sentences and never runs free SQL.
  */
 import { createHash } from "node:crypto";
 import OpenAI from "openai";
@@ -35,6 +35,12 @@ import {
 } from "../domain/turn-facts.js";
 import { PROGRAM_RULES_HE } from "../domain/program-rules.js";
 import type { ChangedField } from "../domain/field-map.js";
+import {
+  AGENT_WRITE_TOOLS,
+  agentFinalReplySchema,
+  parseAgentToolCall,
+  type AgentToolResult,
+} from "../application/agent-tools.js";
 
 export function promptSha(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16);
@@ -64,9 +70,26 @@ export interface ReplyInput {
   guardFeedback?: { rejected_claims: string[] };
 }
 
+export interface AgentTurnInput {
+  rules?: RulesState;
+  executeTool: (command: Command) => Promise<AgentToolResult>;
+  guardFeedback?: { rejected_claims: string[] };
+  maxToolCalls?: number;
+}
+
+export interface AgentTurnResult {
+  text: string;
+  claims: ReplyClaims;
+  commands: Command[];
+  toolResults: AgentToolResult[];
+  changedFields: ChangedField[];
+  metadata: Record<string, unknown>;
+}
+
 export interface Planner {
   plan(context: Context, rules?: RulesState): Promise<DecodeResult>;
   reply(context: Context, input: ReplyInput): Promise<ReplyResult>;
+  agentTurn(context: Context, input: AgentTurnInput): Promise<AgentTurnResult>;
   phraseNotice(
     context: Context,
     notice: Notice,
@@ -151,6 +174,10 @@ const replyOutputJsonSchema = toResponsesStrictSchema(
   ) as JsonSchemaObject,
 );
 
+const agentFinalOutputJsonSchema = toResponsesStrictSchema(
+  z.toJSONSchema(agentFinalReplySchema) as JsonSchemaObject,
+);
+
 function asCommands(raw: unknown[]): Command[] {
   const out: Command[] = [];
   for (const entry of raw.slice(0, 5)) {
@@ -192,11 +219,17 @@ export function translate(
 function requireHosted(
   id: string | undefined,
   version: string | undefined,
-  kind: "action" | "reply",
+  kind: "action" | "reply" | "agent",
 ): { id: string; version: string } {
   if (!id?.trim() || !version?.trim())
     throw new AppError(`missing_hosted_${kind}_prompt`);
   return { id: id.trim(), version: version.trim() };
+}
+
+function agentHosted(c: Config): { id: string; version: string } {
+  const id = c.OPENAI_AGENT_PROMPT_ID || c.OPENAI_ACTION_PROMPT_ID;
+  const version = c.OPENAI_AGENT_PROMPT_VERSION || c.OPENAI_ACTION_PROMPT_VERSION;
+  return requireHosted(id, version, "agent");
 }
 
 const OPENING_COMMANDS = new Set(["donate", "receive_from_donor", "seek"]);
@@ -236,6 +269,24 @@ export function selectDecodePlan(
   };
 }
 
+function collectFunctionCalls(
+  output: Array<{ type: string; [key: string]: unknown }>,
+): Array<{ call_id: string; name: string; arguments: string }> {
+  const calls: Array<{ call_id: string; name: string; arguments: string }> = [];
+  for (const item of output) {
+    if (item.type !== "function_call") continue;
+    const callId = typeof item.call_id === "string" ? item.call_id : "";
+    const name = typeof item.name === "string" ? item.name : "";
+    const args =
+      typeof item.arguments === "string"
+        ? item.arguments
+        : JSON.stringify(item.arguments ?? {});
+    if (!callId || !name) continue;
+    calls.push({ call_id: callId, name, arguments: args });
+  }
+  return calls;
+}
+
 export class OpenAIPlanner implements Planner {
   private readonly client: OpenAI;
   constructor(private readonly c: Config) {
@@ -248,6 +299,227 @@ export class OpenAIPlanner implements Planner {
 
   async close(): Promise<void> {
     // The OpenAI client has no lifecycle resources that need explicit shutdown.
+  }
+
+  async agentTurn(ctx: Context, input: AgentTurnInput): Promise<AgentTurnResult> {
+    const text = ctx.message.transcript ?? ctx.message.text;
+    if (!this.c.AI_ENABLED) {
+      return {
+        text: "קיבלתי.",
+        claims: emptyClaims(),
+        commands: [{ type: "next" }],
+        toolResults: [],
+        changedFields: [],
+        metadata: {
+          provider: "rules",
+          ai_enabled: false,
+          action_source: "unclear_ai_disabled",
+        },
+      };
+    }
+    const started = Date.now();
+    const hosted = agentHosted(this.c);
+    const rulesState = input.rules ?? defaultRulesState(this.c.TRANSPORT_CAPACITY);
+    const facts = buildStage1Facts({
+      ctx,
+      rules: rulesState,
+      alreadyIntroduced: conversationAlreadyIntroduced(ctx.history),
+      customerLanguage: conversationLanguage(ctx),
+    });
+    const allowedSaved: string[] = [];
+    const userPayload: Record<string, unknown> = {
+      history: facts.history,
+      current_message: facts.current_message,
+      sender_phone: facts.sender_phone,
+      contacts: facts.contacts,
+      has_location: facts.has_location,
+      media_kind: facts.media_kind,
+      customer_language: facts.customer_language,
+      already_introduced: facts.already_introduced,
+      state: facts.state,
+      rules: facts.rules,
+      program_rules: PROGRAM_RULES_HE,
+      completeness: facts.this_turn.completeness,
+      data_map: facts.data_map || renderWriteMapMarkdown(),
+      allowed_saved: allowedSaved,
+      ...(input.guardFeedback
+        ? { guard_feedback: input.guardFeedback }
+        : {}),
+    };
+
+    const maxToolCalls = Math.min(Math.max(input.maxToolCalls ?? 5, 0), 5);
+    const commands: Command[] = [];
+    const toolResults: AgentToolResult[] = [];
+    const changedFields: ChangedField[] = [];
+    const rounds: unknown[] = [];
+    const tools = maxToolCalls > 0 ? AGENT_WRITE_TOOLS : undefined;
+
+    let response = await this.client.responses.create({
+      prompt: {
+        id: hosted.id,
+        version: hosted.version,
+      },
+      ...(tools ? { tools } : {}),
+      text: {
+        format: {
+          type: "json_schema",
+          name: "haim_agent_reply",
+          strict: true,
+          schema: agentFinalOutputJsonSchema,
+        },
+      },
+      input: [
+        {
+          role: "user",
+          content: JSON.stringify(userPayload),
+        },
+      ],
+    });
+    rounds.push({
+      response_id: response.id,
+      output_text: response.output_text,
+      output_types: response.output.map((item) => item.type),
+    });
+
+    let toolCalls = 0;
+    while (toolCalls < maxToolCalls) {
+      const calls = collectFunctionCalls(
+        response.output as unknown as Array<{
+          type: string;
+          [key: string]: unknown;
+        }>,
+      );
+      if (!calls.length) break;
+
+      const toolOutputs: Array<{
+        type: "function_call_output";
+        call_id: string;
+        output: string;
+      }> = [];
+
+      for (const call of calls) {
+        if (toolCalls >= maxToolCalls) break;
+        toolCalls += 1;
+        let command: Command;
+        let result: AgentToolResult;
+        try {
+          command = parseAgentToolCall(call.name, call.arguments);
+          if (command.type === "next") {
+            result = {
+              ok: true,
+              command,
+              changed_fields: [],
+              request_number: null,
+              request_status: null,
+              missing_required: null,
+              notices_queued: 0,
+            };
+          } else {
+            result = await input.executeTool(command);
+          }
+        } catch (error) {
+          command = {
+            type: "next",
+          };
+          result = {
+            ok: false,
+            command: { type: call.name as Command["type"] } as Command,
+            changed_fields: [],
+            request_number: null,
+            request_status: null,
+            missing_required: null,
+            notices_queued: 0,
+            error:
+              error instanceof Error
+                ? error.message.slice(0, 200)
+                : "tool_failed",
+          };
+        }
+        commands.push(command);
+        toolResults.push(result);
+        for (const field of result.changed_fields) {
+          changedFields.push(field);
+          const path = field.role
+            ? `${field.table}.${field.column}:${field.role}`
+            : `${field.table}.${field.column}`;
+          if (!allowedSaved.includes(path)) allowedSaved.push(path);
+        }
+        toolOutputs.push({
+          type: "function_call_output",
+          call_id: call.call_id,
+          output: JSON.stringify(result),
+        });
+      }
+
+      response = await this.client.responses.create({
+        previous_response_id: response.id,
+        prompt: {
+          id: hosted.id,
+          version: hosted.version,
+        },
+        ...(tools ? { tools } : {}),
+        text: {
+          format: {
+            type: "json_schema",
+            name: "haim_agent_reply",
+            strict: true,
+            schema: agentFinalOutputJsonSchema,
+          },
+        },
+        input: toolOutputs,
+      });
+      rounds.push({
+        response_id: response.id,
+        output_text: response.output_text,
+        output_types: response.output.map((item) => item.type),
+        tool_calls_so_far: toolCalls,
+      });
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(response.output_text);
+    } catch {
+      throw new AppError("invalid_agent_response");
+    }
+    const parsed = agentFinalReplySchema.safeParse(payload);
+    if (!parsed.success) throw new AppError("invalid_agent_response");
+
+    if (!commands.length) commands.push({ type: "next" });
+
+    return {
+      text: parsed.data.reply,
+      claims: parsed.data.claims,
+      commands,
+      toolResults,
+      changedFields,
+      metadata: {
+        provider: "openai_responses_agent",
+        prompt_mode: "hosted",
+        prompt_id: hosted.id,
+        prompt_version: hosted.version,
+        model: response.model ?? this.c.OPENAI_MODEL,
+        action_source: "ai_agent_tools",
+        response_id: response.id,
+        elapsed_ms: Date.now() - started,
+        usage: response.usage,
+        tool_call_count: toolCalls,
+        claims: parsed.data.claims,
+        model_input: {
+          prompt_mode: "hosted",
+          prompt_id: hosted.id,
+          prompt_version: hosted.version,
+          payload: userPayload,
+        },
+        model_output: {
+          raw: response.output_text,
+          parsed: payload,
+          rounds,
+        },
+        raw_output: response.output_text,
+        customer_message: text.slice(0, 500),
+      },
+    };
   }
 
   async plan(ctx: Context, rules?: RulesState): Promise<DecodeResult> {

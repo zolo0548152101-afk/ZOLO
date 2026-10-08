@@ -8,10 +8,13 @@ const source = await readFile("src/infrastructure/ai.ts", "utf8");
 const required = [
   "this.client.responses.create",
   "requireHosted",
+  "OPENAI_AGENT_PROMPT_ID",
   "OPENAI_ACTION_PROMPT_ID",
   "OPENAI_REPLY_PROMPT_ID",
-  'provider: "openai_responses_decode"',
-  'provider: "openai_responses_reply_manager"',
+  "AGENT_WRITE_TOOLS",
+  'provider: "openai_responses_agent"',
+  'provider: "openai_responses_notice"',
+  "async agentTurn(",
   "async phraseNotice(",
   "allowed_saved",
 ];
@@ -21,6 +24,7 @@ if (missing.length) throw new Error(`prompt_wiring_missing:${missing.join(",")}`
 const forbidden = [
   'loadPrompt("haim-action.he.md")',
   'loadPrompt("haim-reply.he.md")',
+  'loadPrompt("haim-agent.he.md")',
   'mode: "git"',
   "git:prompts/haim-reply.he.md",
   "withCanonical(",
@@ -32,6 +36,18 @@ if (present.length)
 
 const calls = source.match(/this\.client\.responses\.create/g)?.length ?? 0;
 if (calls < 2) throw new Error(`prompt_wiring_expected_two_calls:${calls}`);
+
+const agentTools = await readFile("src/application/agent-tools.ts", "utf8");
+for (const needle of [
+  "buildAgentWriteTools",
+  "parseAgentToolCall",
+  "snapshotToolResult",
+  "Commands.apply",
+]) {
+  if (needle === "Commands.apply") continue; // applied in engine, not adapter
+  if (!agentTools.includes(needle))
+    throw new Error(`agent_tools_missing:${needle}`);
+}
 
 const mapSource = await readFile("src/domain/field-map.ts", "utf8");
 const mapped = new Set();

@@ -10,12 +10,21 @@ import type {
   Item,
   Notice,
 } from "../src/domain/types.js";
-import type { Planner, ReplyInput, ReplyResult } from "../src/infrastructure/ai.js";
+import type {
+  AgentTurnInput,
+  AgentTurnResult,
+  Planner,
+  ReplyInput,
+  ReplyResult,
+} from "../src/infrastructure/ai.js";
 import type { Channel, Delivery } from "../src/infrastructure/waha.js";
 import { asItem } from "../src/application/commands.js";
 import { rulePlan } from "../src/application/rule-planner.js";
 import { emptyClaims } from "../src/domain/ai-guards.js";
+import { defaultRulesState } from "../src/domain/turn-facts.js";
 import { setTimeout as delay } from "node:timers/promises";
+import type { ChangedField } from "../src/domain/field-map.js";
+import type { AgentToolResult } from "../src/application/agent-tools.js";
 export const log = { info: () => {}, warn: () => {}, error: () => {} };
 export const JPEG = Buffer.from([
   255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 255, 217,
@@ -107,6 +116,61 @@ export class FakePlanner implements Planner {
       text: this.phraseReplyText || this.managedReply || input.fallback || "",
       claims: emptyClaims(),
       metadata: { test_double: true },
+    };
+  }
+  async agentTurn(
+    ctx: Context,
+    input: AgentTurnInput,
+  ): Promise<AgentTurnResult> {
+    if (this.fail) throw new Error("simulated_openai_timeout");
+    if (this.planDelayMs) await delay(this.planDelayMs);
+    const maxToolCalls = input.maxToolCalls ?? 5;
+    const commands: Command[] = [];
+    const toolResults: AgentToolResult[] = [];
+    const changedFields: ChangedField[] = [];
+    let decodedMeta: Record<string, unknown> = { test_double: true };
+    if (maxToolCalls > 0) {
+      const decoded = await this.plan(ctx);
+      decodedMeta = decoded.metadata;
+      for (const command of decoded.plan.commands) {
+        if (command.type === "next") {
+          commands.push(command);
+          continue;
+        }
+        if (toolResults.length >= maxToolCalls) break;
+        const result = await input.executeTool(command);
+        commands.push(command);
+        toolResults.push(result);
+        changedFields.push(...result.changed_fields);
+      }
+    }
+    if (!commands.length) commands.push({ type: "next" });
+    const reply = await this.reply(ctx, {
+      rules: input.rules ?? defaultRulesState(),
+      commands,
+      results: toolResults.map((result) => ({
+        command: result.command.type,
+        ok: result.ok,
+        detail: result.error ? { error: result.error } : undefined,
+      })),
+      changed: changedFields,
+      boundary: null,
+      notices: [],
+      fallback: this.managedReply || this.phraseReplyText || "קיבלתי.",
+      guardFeedback: input.guardFeedback,
+    });
+    return {
+      text: reply.text,
+      claims: reply.claims,
+      commands,
+      toolResults,
+      changedFields,
+      metadata: {
+        test_double: true,
+        provider: "fake_agent_tools",
+        action_source: "ai_agent_tools",
+        ...decodedMeta,
+      },
     };
   }
   async phraseNotice(
