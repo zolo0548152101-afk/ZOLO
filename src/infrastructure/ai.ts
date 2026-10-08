@@ -376,14 +376,17 @@ export class OpenAIPlanner implements Planner {
     const rounds: unknown[] = [];
     const tools = maxToolCalls > 0 ? AGENT_WRITE_TOOLS : undefined;
 
-    // Hosted Action prompt is still the dashboard id until AGENT is published;
-    // overlay local agent instructions so the model uses tools + reply JSON.
+    // The published Agent prompt is the source of truth. Keep the local full
+    // prompt as a safe fallback while AGENT_PROMPT_ID is not configured.
+    const agentInstructions = this.c.OPENAI_AGENT_PROMPT_ID
+      ? undefined
+      : AGENT_INSTRUCTIONS;
     let response = await this.client.responses.create({
       prompt: {
         id: hosted.id,
         version: hosted.version,
       },
-      instructions: AGENT_INSTRUCTIONS,
+      ...(agentInstructions ? { instructions: agentInstructions } : {}),
       ...(tools ? { tools } : {}),
       text: {
         format: {
@@ -482,7 +485,7 @@ export class OpenAIPlanner implements Planner {
           id: hosted.id,
           version: hosted.version,
         },
-        instructions: AGENT_INSTRUCTIONS,
+        ...(agentInstructions ? { instructions: agentInstructions } : {}),
         ...(tools ? { tools } : {}),
         text: {
           format: {
