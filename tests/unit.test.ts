@@ -31,6 +31,11 @@ import {
 } from "../src/domain/customer-language.js";
 import { CLARIFY_REPLY, verifyClaims, emptyClaims } from "../src/domain/ai-guards.js";
 import { Commands, validTransportPreference } from "../src/application/commands.js";
+import {
+  draftCounterpartyVerification,
+  noticeKeepsRequiredFacts,
+  resolveNoticeDraft,
+} from "../src/domain/notices.js";
 import type { Store } from "../src/infrastructure/store.js";
 import type { Command, Context } from "../src/domain/types.js";
 import { planSchema, commandSchema } from "../src/domain/types.js";
@@ -2986,4 +2991,40 @@ test("transport preference rejects a non-Tuesday or out-of-window request", () =
   assert.equal(validTransportPreference("יום שלישי ב-15:00"), false);
   assert.equal(validTransportPreference("Tuesday 20:00"), false);
   assert.equal(validTransportPreference("יום שלישי אחרי 18:00"), true);
+});
+
+test("counterparty verification names the other party, day, address, and day confirmation", () => {
+  const request = sampleRequest();
+  request.items[0]!.description = "מיטה";
+  const donor = request.parties.find((party) => party.role === "donor")!;
+  const receiver = request.parties.find((party) => party.role === "receiver")!;
+  donor.name = "ישראל";
+  receiver.name = "טל";
+  receiver.settlement = "בית שאן";
+  receiver.address = "רחוב המלך 5";
+  receiver.floor = 2;
+  request.proposed_run_date = "2026-10-13";
+  const text = draftCounterpartyVerification({
+    request,
+    recipient: receiver,
+    now: new Date("2026-10-09T12:00:00Z"),
+  });
+  assert.match(text, /ישראל רוצה למסור לך מיטה/);
+  assert.match(text, /שלום טל/);
+  assert.match(text, /שלישי 13\/10\/2026/);
+  assert.match(text, /בית שאן, רחוב המלך 5, קומה 2/);
+  assert.match(text, /נא לאשר שהכתובת נכונה ושהיום מתאים/);
+  assert.equal(noticeKeepsRequiredFacts(text, text), true);
+  assert.equal(noticeKeepsRequiredFacts(text, '{"kind":"counterparty_verification"}'), false);
+  assert.equal(
+    noticeKeepsRequiredFacts(text, "שלום טל, נפנה אליך לאימות. האם זו אותה הובלה?"),
+    false,
+  );
+  const fromJson = resolveNoticeDraft(
+    JSON.stringify({ kind: "counterparty_verification" }),
+    request,
+    receiver.phone!,
+    new Date("2026-10-09T12:00:00Z"),
+  );
+  assert.match(fromJson, /ישראל רוצה למסור לך מיטה/);
 });

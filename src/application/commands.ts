@@ -27,6 +27,7 @@ import {
   appendTeamNote,
   customerInsistsAfterDenial,
 } from "../domain/policies.js";
+import { draftCounterpartyVerification } from "../domain/notices.js";
 export interface Outcome {
   reply: string | null;
   request: Request | null;
@@ -971,15 +972,10 @@ export class Commands {
         if (other.phone) {
           notices.push({
             phone: other.phone,
-            text: JSON.stringify({
-              kind: "counterparty_verification",
-              request_number: r.number,
-              items: r.items.map((i) => i.description),
-              other_role: other.role,
-              other_name: other.name,
-              other_settlement: other.settlement,
-              other_address: other.address,
-              other_floor: other.floor,
+            text: draftCounterpartyVerification({
+              request: r,
+              recipient: other,
+              now: this.now(),
             }),
           });
           await c.query(

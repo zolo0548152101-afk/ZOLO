@@ -40,6 +40,10 @@ import {
   customerIntentClear,
 } from "../domain/policies.js";
 import {
+  draftCoordinatedNotice,
+  draftScheduleProposal,
+} from "../domain/notices.js";
+import {
   OUTAGE_REPLY,
   GUARD_FALLBACK_REPLY,
   FAULT_REPLY,
@@ -1793,10 +1797,10 @@ export class Engine {
                   // Draft facts only — phraseNotice owns wording.
                   const notice = {
                     phone: p.phone,
-                    text: JSON.stringify({
-                      kind: "schedule_proposal",
-                      request_number: request.number,
-                      proposed_run_date: proposed,
+                    text: draftScheduleProposal({
+                      request,
+                      recipient: p,
+                      date: proposed,
                     }),
                   };
                   const outboxId = await this.s.outbound(
@@ -1858,10 +1862,9 @@ export class Engine {
                     {
                     const notice = {
                       phone: p.phone,
-                      text: JSON.stringify({
-                        kind: "coordinated",
-                        request_number: request.number,
-                        run_date: request.run_date,
+                      text: draftCoordinatedNotice({
+                        request,
+                        date: request.run_date ?? "",
                       }),
                     };
                     const outboxId = await this.s.outbound(

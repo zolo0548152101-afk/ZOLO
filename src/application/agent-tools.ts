@@ -66,7 +66,7 @@ const COMMAND_DESCRIPTIONS: Record<string, string> = {
   escalate: "Escalate for human review with a reason.",
   status: "Customer asked for status of their requests (read-only).",
   next: "No DB write this turn — only ask/acknowledge in the final reply.",
-  clarify_duplicate: "Ask whether this is another delivery for a duplicate shape.",
+  clarify_duplicate: "Ask only if the customer clearly started a second delivery of the same item to the same parties after the current request is already complete. Never while collecting missing_required on the open request.",
   resolve_extra_item: "Customer chose replace or add for an extra item.",
   resolve_extra_recipient: "Customer chose same or other recipient for an extra item.",
 };

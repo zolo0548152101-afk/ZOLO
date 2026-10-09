@@ -37,6 +37,10 @@ import {
   type TurnFacts,
 } from "../domain/turn-facts.js";
 import { PROGRAM_RULES_HE } from "../domain/program-rules.js";
+import {
+  noticeKeepsRequiredFacts,
+  resolveNoticeDraft,
+} from "../domain/notices.js";
 import type { ChangedField } from "../domain/field-map.js";
 import {
   AGENT_WRITE_TOOLS,
@@ -728,23 +732,35 @@ export class OpenAIPlanner implements Planner {
   ): Promise<{ text: string; metadata: Record<string, unknown> }> {
     // Notices use the same unified hosted Agent prompt. There are no tools on
     // this request because counterparty notice phrasing is write-free.
+    const draft = resolveNoticeDraft(
+      notice.text,
+      request,
+      notice.phone,
+      new Date(),
+    );
     if (!this.c.AI_ENABLED)
       return {
-        text: notice.text,
+        text: draft,
         metadata: { provider: "fallback", ai_enabled: false },
       };
     const hosted = agentHosted(this.c);
     const started = Date.now();
+    const recipient =
+      request?.parties.find((party) => party.phone === notice.phone) ?? null;
+    const initiator =
+      request?.parties.find((party) => party.phone !== notice.phone) ?? null;
     const userPayload = {
       mode: "notice_to_counterparty",
       notice_recipient_phone: notice.phone,
       notice_facts: facts,
-      notice_draft_facts: notice.text,
+      notice_draft: draft,
       sender_phone: ctx.conversation.phone,
       request: request
         ? {
             number: request.number,
             status: request.status,
+            run_date: request.run_date,
+            proposed_run_date: request.proposed_run_date,
             items: request.items.map((item) => ({
               kind: item.kind,
               description: item.description,
@@ -753,10 +769,23 @@ export class OpenAIPlanner implements Planner {
               role: party.role,
               name: party.name,
               settlement: party.settlement,
+              address: party.address,
+              floor: party.floor,
             })),
+            recipient: recipient
+              ? {
+                  role: recipient.role,
+                  name: recipient.name,
+                  settlement: recipient.settlement,
+                  address: recipient.address,
+                  floor: recipient.floor,
+                }
+              : null,
+            other_party: initiator
+              ? { role: initiator.role, name: initiator.name }
+              : null,
           }
         : null,
-      history: ctx.history,
     };
     const response = await this.client.responses.create({
       prompt: {
@@ -778,15 +807,17 @@ export class OpenAIPlanner implements Planner {
       payload = JSON.parse(response.output_text);
     } catch {
       return {
-        text: notice.text,
+        text: draft,
         metadata: { provider: "fallback_parse", ai_enabled: true },
       };
     }
     const parsed = agentFinalReplySchema.safeParse(payload);
+    const phrased = parsed.success ? parsed.data.reply : "";
+    const keepPhrasing = parsed.success && noticeKeepsRequiredFacts(draft, phrased);
     return {
-      text: parsed.success ? parsed.data.reply : notice.text,
+      text: keepPhrasing ? phrased : draft,
       metadata: {
-        provider: "openai_responses_notice",
+        provider: keepPhrasing ? "openai_responses_notice" : "notice_draft_guard",
         prompt_mode: "hosted",
         prompt_id: hosted.id,
         prompt_version: hosted.version,

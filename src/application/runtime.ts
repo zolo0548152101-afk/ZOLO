@@ -20,6 +20,7 @@ import {
   type Request,
 } from "../domain/types.js";
 import { localDate, statusText } from "../domain/policies.js";
+import { draftScheduleProposal } from "../domain/notices.js";
 import {
   integrationAdapters,
   IntegrationDeliveryError,
@@ -598,10 +599,10 @@ export class Runtime {
             if (!authorized) continue;
             const notice = {
               phone: p.phone,
-              text: JSON.stringify({
-                kind: "schedule_proposal",
-                request_number: r.number,
-                proposed_run_date: proposed,
+              text: draftScheduleProposal({
+                request: r,
+                recipient: p,
+                date: proposed,
               }),
             };
             await store.outbound(

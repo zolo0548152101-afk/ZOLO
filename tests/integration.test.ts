@@ -762,11 +762,15 @@ test("direct recipient verification repeats supplied destination details and ask
     contact: true,
   }]);
   const notice = (await outputs(contacted.id)).find((row) => row.phone === receiver)?.text ?? "";
+  assert.doesNotMatch(notice, /"kind"\s*:/);
   assert.match(notice, /טל/);
+  assert.match(notice, /מיטה/);
   assert.match(notice, /בית שאן/);
   assert.match(notice, /רחוב המלך 5/);
   assert.match(notice, /קומה 2/);
-  assert.match(notice, /נא לאשר/);
+  assert.match(notice, /שלישי/);
+  assert.match(notice, /16:00–20:00/);
+  assert.match(notice, /נא לאשר שהכתובת נכונה ושהיום מתאים/);
 
   const confirmed = await message(receiver, "כן, אני טל ומאשר לקבל את המיטה");
   assert.doesNotMatch(confirmed.row.reply ?? "", /לאיזה יישוב|כתובת/);
