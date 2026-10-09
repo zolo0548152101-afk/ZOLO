@@ -3,8 +3,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { Store, type Outbound } from "../infrastructure/store.js";
 import { Commands, type Outcome } from "./commands.js";
-import { selectDecodePlan, type Planner } from "../infrastructure/ai.js";
-import { rulePlan } from "./rule-planner.js";
+import { type Planner } from "../infrastructure/ai.js";
 import {
   DeliveryError,
   type Channel,
@@ -16,45 +15,73 @@ import {
   RetryableError,
   errorCode,
   planSchema,
+  type Command,
   type Plan,
   type Request,
   type Context,
   type Log,
   type Notice,
 } from "../domain/types.js";
+import { snapshotToolResult, type AgentToolResult } from "./agent-tools.js";
 import {
   isStatus,
   photoGate,
-  quickReply,
+  isQuickTopic,
   statusText,
-  PHOTO_THANKS,
-  PHOTO_FIRST,
-  SAME_DAY_WINDOW,
-  sameDayDemand,
-  HUMAN_REPLY,
+  PHOTO_STATUS,
   OUTSIDE,
   isOperationsAlert,
-  namedOutsideSettlement,
-  mentionedReviewSettlement,
-  customerCancelIntent,
-  grounded,
-  mutable,
+  customerInsistsAfterDenial,
   nextQuestion,
   nextTuesday,
   readyToProposeSchedule,
+  photoDeclined,
+  photoAskAlreadySent,
+  customerIntentClear,
 } from "../domain/policies.js";
 import {
-  applyClaimGuard,
-  CLARIFY_REPLY,
+  draftCoordinatedNotice,
+  draftScheduleProposal,
+} from "../domain/notices.js";
+import {
+  OUTAGE_REPLY,
+  GUARD_FALLBACK_REPLY,
   FAULT_REPLY,
-  probeReply,
+  isSelfIntroText,
+  stripRepeatedSelfIntro,
+  verifyClaims,
+  emptyClaims,
+  type ReplyClaims,
 } from "../domain/ai-guards.js";
+import { diffChangedFields, type ChangedField } from "../domain/field-map.js";
+import {
+  type ActionResultFact,
+  type BoundaryCode,
+  type NoticeFact,
+} from "../domain/turn-facts.js";
 import {
   conversationLanguage,
-  isCustomerClarify,
   localizeCustomer,
-  pressureCanonical,
 } from "../domain/customer-language.js";
+import {
+  insertTurnLog,
+  messageIdsForTurn,
+  modelIOFromMetadata,
+  observePolicies,
+  snapshotTurnState,
+  toolCallsFromPlan,
+  type TurnFate,
+} from "./turn-log.js";
+
+/** Drop the misleading «רק» from missing-detail wording (canonical or model). */
+export function stripRakOnlyClaims(text: string): string {
+  return text
+    .replaceAll("רק השם", "השם")
+    .replaceAll("רק הכתובת", "הכתובת")
+    .replaceAll("רק תיאור", "תיאור")
+    .replace(/חסרה\s+רק\s+/gu, "חסרה ")
+    .replace(/חסר\s+רק\s+/gu, "חסר ");
+}
 
 export class Engine {
   private readonly commands: Commands;
@@ -185,14 +212,13 @@ export class Engine {
   async processNext(triggerId: string, lastAiAttempt = false): Promise<void> {
     const trigger = await this.s.message(triggerId);
     if (!trigger.phone) return;
-    // WhatsApp users often split one thought across several bubbles. Wait for
-    // a real quiet window after the newest message before merging the burst.
+    // Rolling coalesce window: every new inbound from this phone resets the
+    // countdown. Reply only after quietMs with no newer unprocessed message,
+    // then merge the whole pending burst into one turn.
     const quietMs = this.s.config.MESSAGE_COALESCE_QUIET_MS;
     const maxMs = this.s.config.MESSAGE_COALESCE_MAX_MS;
     const started = Date.now();
     while (Date.now() - started < maxMs) {
-      const remaining = maxMs - (Date.now() - started);
-      await delay(Math.min(quietMs, remaining));
       const newest = await this.s.pool.query<{ age_ms: number }>(
         `SELECT GREATEST(0, (extract(epoch FROM clock_timestamp()-m.received_at)*1000))::int AS age_ms
            FROM messages m JOIN contacts c ON c.id=m.contact_id
@@ -202,6 +228,8 @@ export class Engine {
       );
       if (!newest.rows[0]) return;
       if (newest.rows[0].age_ms >= quietMs) break;
+      // Newest message is still inside the quiet window — wait out the
+      // remainder (a later arrival will show a younger age and reset again).
       const waitMore = quietMs - newest.rows[0].age_ms;
       const cap = maxMs - (Date.now() - started);
       if (cap <= 0) break;
@@ -224,6 +252,17 @@ export class Engine {
       [trigger.phone],
     );
     if (!pending.rows[0]) return;
+    // Simple rule: if more inbound text arrived before the previous reply was
+    // delivered, drop the unsent reply and answer once for the merged burst.
+    // A task must never stay frozen behind an old unsent outbox.
+    await this.s.pool.query(
+      `UPDATE outbox
+          SET state='cancelled', format_state='ready', error_code='awaiting_merged_reply'
+        WHERE phone=$1
+          AND state IN ('pending','sending','uncertain')
+          AND text NOT LIKE $2`,
+      [trigger.phone, "נדרשת בדיקת מערכת%"],
+    );
     // Admit the whole quiet-window candidate set durably before any text is
     // merged. This preserves the exact message sequence across worker restarts
     // and also records media/location messages that are intentionally processed
@@ -279,17 +318,21 @@ export class Engine {
       );
     });
     let next = pending.rows[0]!.id;
-    // Merge only a burst of plain text. Media remains separate so its durable
-    // capture and attachment semantics are never lost.
-    if (
-      pending.rows.length > 1 &&
-      pending.rows.every((m) => m.kind === "text" && m.media_state === "none")
-    ) {
-      const last = pending.rows.at(-1)!;
-      const parts = pending.rows.map((m) => m.text.trim()).filter(Boolean);
+    // Merge a quiet-window burst of text and contact cards into one answer.
+    // Images/voice/location stay separate so durable capture is never lost.
+    const burstable = pending.rows.filter(
+      (m) =>
+        (m.kind === "text" || m.kind === "contact") && m.media_state === "none",
+    );
+    const images = pending.rows.filter(
+      (m) => m.kind === "image" && m.media_state === "ready",
+    );
+    if (pending.rows.length > 1 && burstable.length === pending.rows.length) {
+      const last = burstable.at(-1)!;
+      const parts = burstable.map((m) => m.text.trim()).filter(Boolean);
       const shortBurst = parts.length > 1 && parts.every((part) => part.length <= 48);
       const mergedText = parts.join(shortBurst ? " " : "\n");
-      const mergedContacts = pending.rows.flatMap((m) => m.contacts);
+      const mergedContacts = burstable.flatMap((m) => m.contacts);
       await this.s.transaction(async (c) => {
         const current = await c.query<{ id: string }>(
           `SELECT m.id FROM messages m JOIN contacts co ON co.id=m.contact_id
@@ -302,18 +345,83 @@ export class Engine {
           current.rows.length === pending.rows.length &&
           current.rows.every((m, i) => m.id === pending.rows[i]!.id)
         ) {
-          await c.query("UPDATE messages SET text=$2,contacts=$3 WHERE id=$1", [
-            last.id,
-            mergedText,
-            JSON.stringify(mergedContacts),
-          ]);
+          await c.query(
+            "UPDATE messages SET text=$2,contacts=$3,kind=$4 WHERE id=$1",
+            [
+              last.id,
+              mergedText,
+              JSON.stringify(mergedContacts),
+              mergedContacts.length ? "contact" : "text",
+            ],
+          );
           await c.query(
             "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id = ANY($1::uuid[])",
-            [pending.rows.slice(0, -1).map((m) => m.id), `coalesced_into:${last.id}`],
+            [burstable.slice(0, -1).map((m) => m.id), `coalesced_into:${last.id}`],
           );
           next = last.id;
         }
       });
+      if (next === last.id && burstable.length > 1) {
+        for (const m of burstable.slice(0, -1)) {
+          void this.auditTurn(m.id, {
+            fate: "coalesced",
+            fate_detail: {
+              carried_to: last.id,
+              merged_text: mergedText,
+            },
+            reply_text: null,
+            error_code: `coalesced_into:${last.id}`,
+          });
+        }
+      }
+    } else if (burstable.length && images.length) {
+      const lastText =
+        [...burstable].reverse().find((m) => m.kind === "text") ??
+        burstable.at(-1)!;
+      const earlier = burstable.filter((m) => m.id !== lastText.id);
+      await this.s.transaction(async (c) => {
+        if (earlier.length || burstable.length > 1) {
+          const parts = burstable.map((m) => m.text.trim()).filter(Boolean);
+          const shortBurst =
+            parts.length > 1 && parts.every((part) => part.length <= 48);
+          await c.query(
+            "UPDATE messages SET text=$2,contacts=$3,kind=$4 WHERE id=$1",
+            [
+              lastText.id,
+              parts.join(shortBurst ? " " : "\n"),
+              JSON.stringify(burstable.flatMap((m) => m.contacts)),
+              burstable.some((m) => m.contacts.length) ? "contact" : "text",
+            ],
+          );
+          if (earlier.length) {
+            await c.query(
+              "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id = ANY($1::uuid[])",
+              [earlier.map((m) => m.id), `coalesced_into:${lastText.id}`],
+            );
+          }
+        }
+        await c.query(
+          "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id = ANY($1::uuid[])",
+          [images.map((m) => m.id), `attached_to:${lastText.id}`],
+        );
+      });
+      next = lastText.id;
+      for (const m of earlier) {
+        void this.auditTurn(m.id, {
+          fate: "coalesced",
+          fate_detail: { carried_to: lastText.id },
+          reply_text: null,
+          error_code: `coalesced_into:${lastText.id}`,
+        });
+      }
+      for (const m of images) {
+        void this.auditTurn(m.id, {
+          fate: "coalesced",
+          fate_detail: { carried_to: lastText.id, kind: "image_attached" },
+          reply_text: null,
+          error_code: `attached_to:${lastText.id}`,
+        });
+      }
     }
     await this.process(next, lastAiAttempt);
   }
@@ -367,26 +475,6 @@ export class Engine {
       }
     }
     const text = ctx.message.transcript ?? ctx.message.text;
-    const outsideTown = this.outsideTown(ctx, text);
-    if (outsideTown) {
-      await this.finishOutside(id, outsideTown);
-      return;
-    }
-    // Cancel and impossible-window pressure are rules, not model choices.
-    // They run before any planner so an AI plan cannot turn them into the
-    // next collection question or into "לא הבנתי".
-    if (customerCancelIntent(text)) {
-      const planned = rulePlan(ctx);
-      if (planned?.commands.some((command) => command.type === "cancel")) {
-        await this.finish(id, planned);
-        return;
-      }
-    }
-    const pressure = pressureCanonical(text);
-    if (pressure) {
-      await this.finishPressure(id, pressure);
-      return;
-    }
     if (
       ctx.message.kind === "image" ||
       ctx.message.kind === "location" ||
@@ -394,34 +482,6 @@ export class Engine {
       ctx.conversation.mode === "human"
     ) {
       await this.finish(id, null);
-      return;
-    }
-    // An unknown town after ב is a review, even when decode is not understood.
-    // Hard-reject towns are already finished above; allowed towns stay on the rules.
-    const reviewTown = await this.unknownReviewTown(text);
-    if (reviewTown) {
-      const planned = rulePlan(ctx);
-      const attached =
-        planned?.commands.some(
-          (command) =>
-            command.type === "escalate" ||
-            (command.type === "details" && command.settlement === reviewTown),
-        ) ?? false;
-      await this.finish(
-        id,
-        attached && planned
-          ? planned
-          : {
-              commands: [
-                {
-                  type: "escalate",
-                  request_number: null,
-                  reason: "borderline_area",
-                },
-              ],
-              evidence: text.slice(0, 2000),
-            },
-      );
       return;
     }
     let plan = ctx.message.ai_plan;
@@ -435,14 +495,13 @@ export class Engine {
         return;
       }
     }
-    let supersessionCheck = false;
     // Resolve cheap deterministic messages outside the AI error/retry block;
     // a transient DB ordering retry must not be mislabeled as an OpenAI error.
     // A bare כן/לא is not one of those: it may approve a party, confirm a
     // handoff, or answer the admin's capacity question. finish() decides.
     if (
       !plan &&
-      (quickReply(text) !== null ||
+      (isQuickTopic(text) ||
         isStatus(text) ||
         (ctx.conversation.phone === this.s.config.ADMIN_PHONE &&
           /^#פניות(?:\s+(?:ל)?חיים\s+יחד)?\s*$/.test(text.trim())))
@@ -451,67 +510,28 @@ export class Engine {
       return;
     }
     if (!plan) {
-      // A non-Hebrew donate/seek that the rules already understand must not
-      // wait for the model. A "not understood" decode used to fall through
-      // to the Hebrew clarify line.
-      const foreignOpening = this.foreignOpening(ctx);
-      if (foreignOpening) {
-        await this.finish(id, foreignOpening);
-        return;
-      }
       try {
-        // Free-form Hebrew is decoded by the AI. Hard limits stay in
-        // commands.apply / policies after the model returns commands.
-        const response = await this.ai.plan(ctx);
-        supersessionCheck = true;
-        const parsed = planSchema.parse(response.plan);
-        const selected = selectDecodePlan(
-          { understood: response.understood, plan: parsed },
-          rulePlan(ctx),
-          ctx,
-        );
-        plan = selected.plan;
-        if (selected.understood && selected.useAi && !grounded(plan, text))
-          throw new AppError("ungrounded_tool");
-        await this.s.pool.query(
-          `UPDATE messages SET ai_plan=$2,plan_versions=$3,ai_metadata=$4 WHERE id=$1 AND ai_plan IS NULL AND processed_at IS NULL`,
-          [
-            id,
-            JSON.stringify(plan),
-            JSON.stringify(this.versions(ctx)),
-            JSON.stringify(response.metadata),
-          ],
-        );
-        if (!selected.understood) {
-          if (this.holdingForPhoto(ctx, text)) {
-            await this.finishPhotoHold(id);
-            return;
-          }
-          await this.finishUnclear(id);
-          return;
-        }
+        // One agent turn: write via function tools, then phrase from results.
+        await this.finishWithAgentTools(id, lastAiAttempt);
+        return;
       } catch (e) {
-        if (e instanceof AppError && e.code === "ai_disabled") {
-          const deterministic = rulePlan(ctx);
-          if (!deterministic) {
-            if (this.holdingForPhoto(ctx, text)) {
-              await this.finishPhotoHold(id);
-              return;
-            }
-            await this.finishUnclear(id);
-            return;
-          }
-          plan = deterministic;
+        if (e instanceof RetryableError) throw e;
+        // Transient API failures retry once.
+        if (!lastAiAttempt && !(e instanceof AppError))
+          throw new RetryableError("openai_retry");
+        if (
+          e instanceof AppError &&
+          (e.code === "ai_disabled" || e.code === "action_manager_unclear")
+        ) {
+          plan = { commands: [{ type: "next" }], evidence: "" };
         } else {
-          if (!lastAiAttempt && !(e instanceof AppError))
-            throw new RetryableError("openai_retry");
           await this.finishFault(id, e);
           return;
         }
       }
     }
     try {
-      await this.finish(id, plan, undefined, supersessionCheck);
+      await this.finish(id, plan);
     } catch (e) {
       if (e instanceof RetryableError && e.code === "stale_plan")
         await this.s.pool.query(
@@ -519,6 +539,335 @@ export class Engine {
           [id],
         );
       throw e;
+    }
+  }
+
+  /**
+   * Bounded tool loop: model calls write tools (Commands.apply), sees results,
+   * then returns the customer reply. Schedule/coordinate still run in finish().
+   */
+  private async finishWithAgentTools(
+    id: string,
+    lastAiAttempt: boolean,
+  ): Promise<void> {
+    const ctx0 = await this.s.context(id);
+    if (ctx0.message.processed_at) return;
+    const rules = await this.s.loadRulesState();
+    const deferredToolNotices: {
+      outboxId: string;
+      notice: Notice;
+      requestId: string | null;
+    }[] = [];
+    const executedCommands: Command[] = [];
+    const toolResults: AgentToolResult[] = [];
+    const changedFromTools: ChangedField[] = [];
+    let humanReason: string | undefined;
+
+    const executeTool = async (command: Command): Promise<AgentToolResult> => {
+      return this.s.transaction(async (c) => {
+        const ctx = await this.s.context(id, c, true);
+        if (ctx.message.processed_at) {
+          return {
+            ok: false,
+            command,
+            changed_fields: [],
+            request_number: null,
+            request_status: null,
+            missing_required: null,
+            notices_queued: 0,
+            error: "already_processed",
+          };
+        }
+        const before =
+          structuredClone(
+            ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+              ctx.requests.find(
+                (r) =>
+                  !["coordinated", "closed", "cancelled", "rejected"].includes(
+                    r.status,
+                  ),
+              ) ??
+              null,
+          );
+        await c.query("SAVEPOINT agent_tool");
+        try {
+          const result: Outcome = await this.commands.apply(c, ctx, command);
+          if (result.request) await this.s.save(c, result.request);
+          if (result.humanReason) humanReason = result.humanReason;
+          await this.s.event(
+            c,
+            ctx.message,
+            ctx.conversation.phone,
+            `command.${command.type}`,
+            { command, via: "agent_tool" },
+            result.request?.id ?? null,
+          );
+          const noticeIndex = deferredToolNotices.length;
+          for (const [n, notice] of result.notices.entries()) {
+            const dedupeKey = `notice:${id}:tool:${noticeIndex + n}`;
+            const outboxId = await this.s.outbound(
+              c,
+              ctx.message,
+              notice,
+              dedupeKey,
+              result.request?.id ?? null,
+              "pending",
+            );
+            if (outboxId)
+              deferredToolNotices.push({
+                outboxId,
+                notice,
+                requestId: result.request?.id ?? null,
+              });
+          }
+          await c.query("RELEASE SAVEPOINT agent_tool");
+          const afterCtx = await this.s.context(id, c);
+          const after =
+            result.request ??
+            afterCtx.requests.find(
+              (r) => r.id === afterCtx.conversation.selected_request_id,
+            ) ??
+            null;
+          const changed = diffChangedFields({
+            beforeRequest: before,
+            afterRequest: after,
+            beforeSearch: null,
+            afterSearch: afterCtx.active_search ?? null,
+          });
+          executedCommands.push(command);
+          changedFromTools.push(...changed);
+          const snap = snapshotToolResult({
+            command,
+            before,
+            after,
+            changed,
+            notices: result.notices,
+            humanReason: result.humanReason,
+            phone: ctx.conversation.phone,
+          });
+          toolResults.push(snap);
+          return snap;
+        } catch (e) {
+          await c.query("ROLLBACK TO SAVEPOINT agent_tool");
+          if (!(e instanceof AppError)) throw e;
+          await this.s.event(c, ctx.message, ctx.conversation.phone, "tool_rejected", {
+            code: e.code,
+            via: "agent_tool",
+          });
+          const snap = snapshotToolResult({
+            command,
+            before,
+            after: before,
+            changed: [],
+            notices: [],
+            phone: ctx.conversation.phone,
+            error: e.code,
+          });
+          toolResults.push(snap);
+          return snap;
+        }
+      });
+    };
+
+    let agent;
+    try {
+      agent = await this.ai.agentTurn(ctx0, {
+        rules,
+        executeTool,
+        maxToolCalls: 5,
+      });
+    } catch (e) {
+      if (!lastAiAttempt && !(e instanceof AppError))
+        throw new RetryableError("openai_retry");
+      throw e;
+    }
+
+    // One claim-guard retry inside the agent when the first reply over-claims.
+    const changedPaths = (agent.changedFields.length
+      ? agent.changedFields
+      : changedFromTools
+    ).map((field) =>
+      field.role
+        ? `${field.table}.${field.column}:${field.role}`
+        : `${field.table}.${field.column}`,
+    );
+    const allToolResults =
+      toolResults.length > 0 ? toolResults : agent.toolResults;
+    const donateResult = allToolResults.find(
+      (r) => r.command.type === "donate" && r.ok && typeof r.request_number === "number",
+    );
+    const claimFacts = {
+      changedPaths,
+      openedRequestNumber: donateResult?.request_number ?? null,
+      contactedCounterparty: allToolResults.some(
+        (r) =>
+          r.command.type === "contact_counterparty" &&
+          r.ok &&
+          (r.notices_queued > 0 ||
+            (r.command.type === "contact_counterparty" &&
+              "contact" in r.command &&
+              (r.command as { contact?: boolean }).contact === true)),
+      ),
+      scheduleDate: null as string | null,
+      cancelled: allToolResults.some(
+        (r) => r.request_status === "cancelled" || r.command.type === "cancel",
+      ),
+      humanHandoff:
+        Boolean(humanReason) ||
+        allToolResults.some((r) => r.request_status === "human"),
+      knownRequestNumbers: (await this.s.context(id)).requests.map((r) => r.number),
+    };
+    let claims = agent.claims;
+    let replyText = agent.text;
+    let rejected = false;
+    let rejectedClaims: string[] = [];
+    let check = verifyClaims(claims, claimFacts);
+    if (!check.ok) {
+      rejected = true;
+      rejectedClaims = check.rejected;
+      try {
+        const retry = await this.ai.agentTurn(await this.s.context(id), {
+          rules,
+          executeTool: async (command) => {
+            // Guard retry is phrase-only — refuse further writes.
+            return snapshotToolResult({
+              command,
+              before: null,
+              after: null,
+              changed: [],
+              notices: [],
+              phone: ctx0.conversation.phone,
+              error: "guard_retry_writes_disabled",
+            });
+          },
+          guardFeedback: { rejected_claims: check.rejected },
+          maxToolCalls: 0,
+        });
+        claims = retry.claims;
+        replyText = retry.text;
+        agent = {
+          ...agent,
+          text: replyText,
+          claims,
+          metadata: { ...agent.metadata, guard_retry: retry.metadata },
+        };
+        check = verifyClaims(claims, claimFacts);
+        if (!check.ok) {
+          rejected = true;
+          rejectedClaims = check.rejected;
+          replyText = GUARD_FALLBACK_REPLY;
+          claims = emptyClaims();
+        } else {
+          rejected = false;
+          rejectedClaims = [];
+        }
+      } catch {
+        replyText = GUARD_FALLBACK_REPLY;
+        claims = emptyClaims();
+      }
+    }
+
+    const planCommands =
+      executedCommands.length > 0
+        ? executedCommands
+        : agent.commands.filter((c) => c.type !== "next").length
+          ? agent.commands
+          : ([{ type: "next" }] as Command[]);
+    // Persist next-only ai_plan so finish() does not re-apply tool writes.
+    // Real commands live in metadata for audit / turn-log.
+    const plan: Plan = {
+      commands: [{ type: "next" }],
+      evidence: "agent_tools",
+    };
+    // Refresh versions AFTER tool writes — pre-tool snapshots go stale and
+    // finish() would RetryableError("stale_plan"), re-enter agentTurn, and
+    // overwrite tool metadata with a no-write second attempt.
+    const ctxAfterTools = await this.s.context(id);
+    await this.s.pool.query(
+      `UPDATE messages SET ai_plan=$2,plan_versions=$3,ai_metadata=$4
+        WHERE id=$1 AND ai_plan IS NULL AND processed_at IS NULL`,
+      [
+        id,
+        JSON.stringify(plan),
+        JSON.stringify(this.versions(ctxAfterTools)),
+        JSON.stringify({
+          ...agent.metadata,
+          agent_reply: replyText,
+          agent_claims: claims,
+          agent_changed_fields: changedPaths,
+          agent_rejected: rejected,
+          agent_rejected_claims: rejectedClaims,
+          agent_commands: planCommands,
+          tool_results: allToolResults,
+          tools_already_applied: true,
+          human_reason: humanReason ?? null,
+          claim_facts: claimFacts,
+        }),
+      ],
+    );
+
+    if (humanReason) {
+      const reason = humanReason;
+      await this.s.transaction(async (c) => {
+        const ctx = await this.s.context(id, c, true);
+        const open =
+          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+          ctx.requests.find(
+            (r) =>
+              !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
+          ) ??
+          null;
+        if (open && open.status !== "human") {
+          open.status = "human";
+          open.human_reason = reason;
+          await this.s.save(c, open);
+        }
+        await this.alert(c, ctx, reason, replyText, open);
+      });
+    }
+
+    // finish() applies the `next` plan (no-op writes) then schedule/coordinate
+    // and uses agent_reply from ai_metadata instead of a second model call.
+    try {
+      await this.finish(id, plan);
+    } catch (e) {
+      if (e instanceof RetryableError && e.code === "stale_plan")
+        await this.s.pool.query(
+          "UPDATE messages SET ai_plan=NULL,plan_versions=NULL WHERE id=$1 AND processed_at IS NULL",
+          [id],
+        );
+      throw e;
+    }
+
+    // Format notices queued during tool applies (finish may also queue more).
+    if (deferredToolNotices.length) {
+      const ctx = await this.s.context(id);
+      for (const item of deferredToolNotices) {
+        let text = item.notice.text;
+        let state: "ready" | "failed" = "ready";
+        try {
+          const request = item.requestId
+            ? await this.s.request(item.requestId)
+            : null;
+          text = (await this.ai.phraseNotice(ctx, item.notice, request)).text;
+          text = text.trim() || item.notice.text;
+        } catch (e) {
+          state = "failed";
+          this.log.error({
+            code: errorCode(e),
+            outbox_id: item.outboxId,
+            stage: "notice_format_tool",
+          });
+        }
+        await this.s.transaction(async (c) => {
+          await c.query(
+            "UPDATE outbox SET text=$2,format_state=$3 WHERE id=$1 AND format_state='pending'",
+            [item.outboxId, text, state],
+          );
+          if (state === "ready")
+            await this.s.scheduleSendIfReady(c, item.outboxId);
+        });
+      }
     }
   }
 
@@ -544,6 +893,25 @@ export class Engine {
       request ??
       ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
       (ctx.requests.length === 1 ? ctx.requests[0] : null);
+    // One ops alert per request (or per phone when no request yet).
+    const dedupe = r?.id
+      ? `human-alert:${r.id}`
+      : `human-alert-phone:${ctx.conversation.phone}`;
+    const already = await c.query(
+      "SELECT 1 FROM outbox WHERE dedupe_key=$1 LIMIT 1",
+      [dedupe],
+    );
+    if (already.rowCount) {
+      await this.s.event(
+        c,
+        ctx.message,
+        "system",
+        "human_escalation_suppressed",
+        { reason, dedupe },
+        r?.id ?? null,
+      );
+      return;
+    }
     const d = r?.parties.find((p) => p.role === "donor"),
       v = r?.parties.find((p) => p.role === "receiver");
     await this.s.outbound(
@@ -553,7 +921,7 @@ export class Engine {
         phone: this.s.config.ADMIN_PHONE,
         text: `נדרש טיפול אנושי\nמספר פנייה: ${r?.number ?? "טרם נפתחה"}\nטלפון: ${ctx.conversation.phone}\nפריט: ${r?.items.map((i) => i.description).join(", ") ?? "לא ידוע"}\nמסלול: ${d?.settlement ?? "לא ידוע"} → ${v?.settlement ?? "לא ידוע"}\nסיבה: ${reason}\nהודעת הלקוח האחרונה: ${(ctx.message.transcript ?? ctx.message.text).slice(0, 1500)}\nתשובת הבוט: ${reply ?? "לא נשלחה תגובה אוטומטית"}\nנא לחזור ללקוח.`,
       },
-      `human:${ctx.message.id}`,
+      dedupe,
       r?.id ?? null,
     );
     await this.s.event(
@@ -586,23 +954,6 @@ export class Engine {
       else break;
     }
     return count;
-  }
-
-  private async unclearCount(
-    conversationId: string,
-    beforeSeq: string,
-    c: { query: Store["pool"]["query"] } = this.s.pool,
-  ): Promise<number> {
-    return this.consecutiveReplyCount(
-      conversationId,
-      beforeSeq,
-      (reply) =>
-        isCustomerClarify(reply) ||
-        /^(?:למי תרצה למסור|איזה פריט|מה תרצה לעשות|מה תרצה לקבל|מאיפה או ממי)/u.test(
-          reply,
-        ),
-      c,
-    );
   }
 
   private async faultCount(
@@ -649,6 +1000,71 @@ export class Engine {
     }
   }
 
+  /**
+   * Never freeze WhatsApp delivery for a phone. Cancel the failed/uncertain
+   * outbox row, release the send singleton, and queue the next pending reply.
+   */
+  async releaseFailedSend(outboxId: string, error: unknown): Promise<void> {
+    const code = errorCode(error);
+    try {
+      await this.s.transaction(async (c) => {
+        const row = await c.query<{ phone: string; state: string }>(
+          "SELECT phone, state FROM outbox WHERE id=$1 FOR UPDATE",
+          [outboxId],
+        );
+        const out = row.rows[0];
+        if (!out) return;
+        if (["sent", "shadow", "simulation", "cancelled"].includes(out.state)) {
+          await this.s.queue.releaseSingleton("send", out.phone, [
+            "failed",
+            "retry",
+          ]);
+          return;
+        }
+        await c.query(
+          `UPDATE outbox
+              SET state='cancelled', format_state='ready', error_code=$2
+            WHERE id=$1 AND state IN ('pending','sending','uncertain','failed')`,
+          [outboxId, code || "send_released"],
+        );
+        await this.s.queue.releaseSingleton("send", out.phone, [
+          "failed",
+          "retry",
+        ]);
+        const next = await c.query<{ id: string }>(
+          `SELECT id FROM outbox
+            WHERE phone=$1 AND state='pending' AND format_state='ready'
+            ORDER BY seq LIMIT 1`,
+          [out.phone],
+        );
+        if (next.rows[0]) {
+          const job = await this.s.queue.send(
+            c,
+            "send",
+            { id: next.rows[0].id },
+            out.phone,
+          );
+          await c.query("UPDATE outbox SET job_id=$2 WHERE id=$1", [
+            next.rows[0].id,
+            job,
+          ]);
+        }
+        this.log.error({
+          code: "send_released_without_freeze",
+          outbox_id: outboxId,
+          phone: out.phone,
+          cause: code,
+        });
+      });
+    } catch (e) {
+      this.log.error({
+        code: errorCode(e),
+        stage: "release_failed_send",
+        outbox_id: outboxId,
+      });
+    }
+  }
+
   async abandonIngest(messageId: string, error: unknown): Promise<void> {
     this.log.error({
       code: errorCode(error),
@@ -674,7 +1090,8 @@ export class Engine {
         code: errorCode(error),
         fault_count: next,
       });
-      // The first AI/API failure goes to a human. It does not count as unclear.
+      // The first AI/API failure goes to a human, even with no open request.
+      // It does not count as unclear.
       const open =
         ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
         ctx.requests.find(
@@ -696,6 +1113,18 @@ export class Engine {
         open?.id ?? null,
       );
       await c.query(
+        "INSERT INTO command_results(message_id,command,result) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
+        [
+          id,
+          JSON.stringify({ fault: true, code: errorCode(error) }),
+          JSON.stringify({
+            reply: faultReply,
+            intent: "fault",
+            code: errorCode(error),
+          }),
+        ],
+      );
+      await c.query(
         "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
         [id, faultReply, "openai_failure_escalated"],
       );
@@ -704,238 +1133,11 @@ export class Engine {
         [ctx.conversation.id],
       );
     });
-  }
-
-  private async finishUnclear(id: string): Promise<void> {
-    await this.s.transaction(async (c) => {
-      const ctx = await this.s.context(id, c, true);
-      if (ctx.message.processed_at) return;
-      const phone = ctx.conversation.phone;
-      const prior = await this.unclearCount(ctx.conversation.id, ctx.message.seq, c);
-      const next = prior + 1;
-      if (next >= 2) {
-        const open =
-          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-          ctx.requests.find(
-            (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
-          ) ??
-          null;
-        if (open) {
-          open.status = "human";
-          open.human_reason = "unclear_after_two_clarifications";
-          await this.s.save(c, open);
-        }
-        await this.alert(c, ctx, "unclear_after_two_clarifications", HUMAN_REPLY, open);
-        const handoff = this.voiced(ctx, HUMAN_REPLY);
-        await this.s.outbound(
-          c,
-          ctx.message,
-          { phone, text: handoff },
-          `reply:${id}`,
-          open?.id ?? null,
-        );
-        await this.s.event(c, ctx.message, phone, "unclear_escalated", {
-          unclear_count: next,
-        });
-        await c.query(
-          "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
-          [id, handoff, "unclear_escalated"],
-        );
-        await c.query(
-          "UPDATE conversations SET mode='human',version=version+1 WHERE id=$1",
-          [ctx.conversation.id],
-        );
-        return;
-      }
-      const reply = this.voiced(
-        ctx,
-        probeReply(ctx.message.transcript ?? ctx.message.text),
-      );
-      await this.s.outbound(
-        c,
-        ctx.message,
-        { phone, text: reply },
-        `reply:${id}`,
-        null,
-      );
-      await this.s.event(c, ctx.message, phone, "unclear_clarify", {
-        unclear_count: next,
-        probe: reply !== this.voiced(ctx, CLARIFY_REPLY),
-      });
-      await c.query(
-        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
-        [id, reply],
-      );
-    });
-  }
-
-  /** Open donation still missing its required photo, and this text is not a new request. */
-  private holdingForPhoto(ctx: Context, text: string): boolean {
-    if (!text.trim() || customerCancelIntent(text)) return false;
-    const waiting = ctx.requests.some(
-      (request) =>
-        photoGate(request) &&
-        ![
-          "coordinated",
-          "closed",
-          "cancelled",
-          "rejected",
-          "human",
-          "cancel_pending",
-        ].includes(request.status),
-    );
-    if (!waiting) return false;
-    const planned = rulePlan(ctx);
-    if (
-      planned?.commands.some((command) =>
-        command.type === "donate" || command.type === "seek" || command.type === "cancel",
-      )
-    )
-      return false;
-    return true;
-  }
-
-  private async finishPhotoHold(id: string): Promise<void> {
-    await this.s.transaction(async (c) => {
-      const ctx = await this.s.context(id, c, true);
-      if (ctx.message.processed_at) return;
-      const request =
-        ctx.requests.find(
-          (candidate) =>
-            candidate.id === ctx.conversation.selected_request_id &&
-            photoGate(candidate),
-        ) ??
-        ctx.requests.find((candidate) => photoGate(candidate)) ??
-        null;
-      const photoReply = this.voiced(ctx, PHOTO_FIRST);
-      await this.s.outbound(
-        c,
-        ctx.message,
-        { phone: ctx.conversation.phone, text: photoReply },
-        `reply:${id}`,
-        request?.id ?? null,
-      );
-      await c.query(
-        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
-        [id, photoReply],
-      );
-    });
-  }
-
-  /** Place after ב that service_locations does not list as allowed or outside. */
-  private async unknownReviewTown(text: string): Promise<string | null> {
-    const town = mentionedReviewSettlement(text);
-    if (!town) return null;
-    const region = await this.s.region(this.s.pool, town);
-    return region.decision === "review" ? town : null;
-  }
-
-  /** Named out-of-area town in the customer's own words, before any plan runs. */
-  private outsideTown(ctx: Context, text: string): string | null {
-    if (!text.trim() || customerCancelIntent(text)) return null;
-    const town = namedOutsideSettlement(text);
-    if (!town) return null;
-    if (/(?:תיקון|טעיתי)/u.test(text)) {
-      const own = ctx.requests
-        .flatMap((request) => request.parties)
-        .find((party) => party.phone === ctx.conversation.phone && party.settlement);
-      if (own?.settlement && !namedOutsideSettlement(own.settlement)) return null;
-    }
-    return town;
-  }
-
-  private async finishOutside(id: string, settlement: string): Promise<void> {
-    await this.s.transaction(async (c) => {
-      const ctx = await this.s.context(id, c, true);
-      if (ctx.message.processed_at) return;
-      const phone = ctx.conversation.phone;
-      const terminal = ["coordinated", "closed", "cancelled", "rejected", "cancel_pending"];
-      const open =
-        ctx.requests.find(
-          (request) =>
-            request.id === ctx.conversation.selected_request_id &&
-            !terminal.includes(request.status),
-        ) ??
-        ctx.requests.find((request) => !terminal.includes(request.status)) ??
-        null;
-      let request: Request | null = null;
-      if (open) {
-        request = await this.s.request(open.id, c, true);
-        if (!terminal.includes(request.status)) {
-          request.status = "rejected";
-          request.human_reason = null;
-          await this.s.save(c, request);
-        }
-      }
-      await this.s.event(
-        c,
-        ctx.message,
-        phone,
-        "outside_area_rejected",
-        { settlement },
-        request?.id ?? null,
-      );
-      const outsideReply = this.voiced(ctx, OUTSIDE);
-      await this.s.outbound(
-        c,
-        ctx.message,
-        { phone, text: outsideReply },
-        `reply:${id}`,
-        request?.id ?? null,
-      );
-      await c.query(
-        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
-        [id, outsideReply, "outside_area_rejected"],
-      );
-    });
-  }
-
-  /** Rules already opened a donate/seek in the customer's language. */
-  private foreignOpening(ctx: Context): Plan | null {
-    if (conversationLanguage(ctx) === "he") return null;
-    if (ctx.message.kind !== "text" && ctx.message.kind !== "voice") return null;
-    const planned = rulePlan(ctx);
-    if (
-      !planned?.commands.some(
-        (command) => command.type === "donate" || command.type === "seek",
-      )
-    )
-      return null;
-    return planned;
-  }
-
-  /** Polite limit or empathy, then the same next step. Not an unclear turn. */
-  private async finishPressure(id: string, canonical: string): Promise<void> {
-    await this.s.transaction(async (c) => {
-      const ctx = await this.s.context(id, c, true);
-      if (ctx.message.processed_at) return;
-      const terminal = ["coordinated", "closed", "cancelled", "rejected", "cancel_pending", "human"];
-      const open =
-        ctx.requests.find(
-          (request) =>
-            request.id === ctx.conversation.selected_request_id &&
-            !terminal.includes(request.status),
-        ) ??
-        ctx.requests.find((request) => !terminal.includes(request.status)) ??
-        null;
-      let body = canonical;
-      if (open && photoGate(open)) body = `${canonical}\n${PHOTO_FIRST}`;
-      else if (open) {
-        const question = nextQuestion(open, ctx.conversation.phone).text;
-        if (question) body = `${canonical}\n${question}`;
-      }
-      const text = this.voiced(ctx, body);
-      await this.s.outbound(
-        c,
-        ctx.message,
-        { phone: ctx.conversation.phone, text },
-        `reply:${id}`,
-        open?.id ?? null,
-      );
-      await c.query(
-        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2 WHERE id=$1 AND processed_at IS NULL",
-        [id, text],
-      );
+    await this.auditTurn(id, {
+      fate: "failed",
+      fate_detail: { path: "finishFault" },
+      error_code: "openai_failure_escalated",
+      intent: "fault",
     });
   }
 
@@ -943,12 +1145,115 @@ export class Engine {
     return localizeCustomer(text, conversationLanguage(ctx));
   }
 
+  /** Best-effort audit row — never throws into the turn path. */
+  private async recordTurnLogSafe(
+    row: Parameters<typeof insertTurnLog>[1],
+  ): Promise<void> {
+    try {
+      await insertTurnLog(this.s.pool, row);
+    } catch (e) {
+      this.log.error({
+        code: "turn_log_write_failed",
+        error: errorCode(e),
+        turn_fate: row.turn_fate,
+        phone: row.phone ?? null,
+      });
+    }
+  }
+
+  private async auditTurn(
+    id: string,
+    opts: {
+      fate: TurnFate;
+      fate_detail?: Record<string, unknown>;
+      state_before?: Record<string, unknown>;
+      reply_text?: string | null;
+      outbox_id?: string | null;
+      error_code?: string | null;
+      opened_at?: string | null;
+      intent?: string | null;
+      photoHold?: boolean;
+      introduced?: boolean;
+    },
+  ): Promise<void> {
+    try {
+      const ctx = await this.s.context(id);
+      const ids = await messageIdsForTurn(this.s.pool, id);
+      const extras = await this.s.pool.query<{
+        ai_metadata: Record<string, unknown> | null;
+        reply: string | null;
+        error_code: string | null;
+        ai_plan: Plan | null;
+      }>(
+        "SELECT ai_metadata, reply, error_code, ai_plan FROM messages WHERE id=$1",
+        [id],
+      );
+      const row = extras.rows[0];
+      const meta = row?.ai_metadata ?? null;
+      const { model_input, model_output } = modelIOFromMetadata(meta);
+      const replyMeta =
+        meta && meta.reply && typeof meta.reply === "object"
+          ? (meta.reply as Record<string, unknown>)
+          : null;
+      if (replyMeta) {
+        const replyIO = modelIOFromMetadata(replyMeta);
+        model_input.reply = replyIO.model_input;
+        model_output.reply = replyIO.model_output;
+      }
+      const planSource = row?.ai_plan ?? ctx.message.ai_plan;
+      const plan = planSource
+        ? planSchema.safeParse(planSource).success
+          ? planSchema.parse(planSource)
+          : null
+        : null;
+      const replyText = opts.reply_text ?? row?.reply ?? null;
+      await this.recordTurnLogSafe({
+        conversation_id: ctx.conversation.id,
+        turn_id: ids.turn_id,
+        phone: ctx.conversation.phone,
+        message_ids: ids.message_ids,
+        merged_text: ctx.message.transcript ?? ctx.message.text,
+        turn_fate: opts.fate,
+        fate_detail: opts.fate_detail ?? {},
+        state_before: opts.state_before ?? {},
+        state_after: snapshotTurnState(ctx),
+        model_input,
+        model_output,
+        tool_calls: toolCallsFromPlan(plan),
+        policies: observePolicies(ctx, {
+          reply: replyText,
+          intent: opts.intent,
+          text: ctx.message.transcript ?? ctx.message.text,
+          introduced: opts.introduced,
+          photoHold: opts.photoHold,
+        }),
+        reply_text: replyText,
+        outbox_id: opts.outbox_id ?? null,
+        error_code: opts.error_code ?? row?.error_code ?? null,
+        opened_at: opts.opened_at ?? null,
+        completed_at: new Date().toISOString(),
+      });
+    } catch (e) {
+      this.log.error({
+        code: "turn_log_audit_failed",
+        error: errorCode(e),
+        message_id: id,
+      });
+    }
+  }
+
   private async finish(
     id: string,
     proposed: Plan | null,
     technicalReason?: string,
-    supersessionCheck = false,
   ): Promise<void> {
+    const openedAt = new Date().toISOString();
+    let stateBefore: Record<string, unknown> = {};
+    try {
+      stateBefore = snapshotTurnState(await this.s.context(id));
+    } catch {
+      /* pre-snapshot is best-effort */
+    }
     const deferredNotices: {
       outboxId: string;
       notice: Notice;
@@ -967,45 +1272,139 @@ export class Engine {
       // AI may have been evaluating while a newer message arrived. The old
       // answer is no longer authoritative: close it without an outbox reply,
       // leave a durable audit trail, and let the newer turn own the response.
-      const newer = supersessionCheck
-        ? await c.query<{ id: string }>(
-            `SELECT m.id FROM messages m
-              WHERE m.conversation_id=$1 AND m.seq>$2 AND m.processed_at IS NULL
-              ORDER BY m.seq LIMIT 1`,
-            [ctx.conversation.id, ctx.message.seq],
-          )
-        : { rows: [] as { id: string }[] };
+      const newer = await c.query<{ id: string }>(
+        `SELECT m.id FROM messages m
+          WHERE m.conversation_id=$1 AND m.seq>$2 AND m.processed_at IS NULL
+          ORDER BY m.seq LIMIT 1`,
+        [ctx.conversation.id, ctx.message.seq],
+      );
       if (newer.rows[0]) {
-        const successor = newer.rows[0].id;
-        await c.query(
-          "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id=$1 AND processed_at IS NULL",
-          [id, `superseded_by:${successor}`],
+        const successorId = newer.rows[0].id;
+        const successor = await c.query<{
+          kind: string;
+          text: string;
+          contacts: { phone: string; name: string | null }[];
+        }>(
+          "SELECT kind,text,contacts FROM messages WHERE id=$1",
+          [successorId],
         );
-        await c.query(
-          `UPDATE conversation_turns SET status='superseded',completed_at=clock_timestamp()
-             WHERE id=(SELECT turn_id FROM messages WHERE id=$1)`,
-          [id],
-        );
-        await this.s.event(c, ctx.message, "system", "turn_superseded", {
-          successor_message_id: successor,
-        });
-        return {
-          trace_id: ctx.message.trace_id,
-          message_id: id,
-          mode: ctx.message.mode,
-          stage: "superseded",
-          request_number: null,
-          code: "turn_superseded",
-        };
+        const successorKind = successor.rows[0]?.kind ?? "text";
+        // A pending image/voice/location follow-up must not cancel the older
+        // text turn that opens the request. FIFO processes media after this
+        // commit. Newer text OR contact-card turns may supersede a stale plan
+        // so a burst never yields two customer replies for one thought.
+        if (successorKind === "text" || successorKind === "contact") {
+          // Keep donate handoff sticky when the abandoned plan already knew
+          // "רוצה למסור לטל" — otherwise the next short bubble re-asks path.
+          const abandoned = ctx.message.ai_plan as {
+            commands?: Array<{
+              type?: string;
+              counterparty_name?: string | null;
+              counterparty_phone?: string | null;
+            }>;
+          } | null;
+          for (const cmd of abandoned?.commands ?? []) {
+            if (
+              cmd.type === "donate" &&
+              (cmd.counterparty_name || cmd.counterparty_phone)
+            ) {
+              await c.query(
+                `UPDATE conversations
+                    SET pending_counterparty_name=COALESCE($2, pending_counterparty_name),
+                        pending_counterparty_phone=COALESCE($3, pending_counterparty_phone),
+                        version=version+1
+                  WHERE id=$1`,
+                [
+                  ctx.conversation.id,
+                  cmd.counterparty_name ?? null,
+                  cmd.counterparty_phone ?? null,
+                ],
+              );
+              if (cmd.counterparty_name)
+                ctx.conversation.pending_counterparty_name =
+                  ctx.conversation.pending_counterparty_name ??
+                  cmd.counterparty_name;
+              if (cmd.counterparty_phone)
+                ctx.conversation.pending_counterparty_phone =
+                  ctx.conversation.pending_counterparty_phone ??
+                  cmd.counterparty_phone;
+            }
+          }
+          // Fold the superseded bubble into the successor so decode still sees
+          // "רוצה למסור" / "לטל" when the user split them across messages.
+          const priorText = (ctx.message.transcript ?? ctx.message.text ?? "").trim();
+          const nextText = (successor.rows[0]?.text ?? "").trim();
+          if (priorText && nextText && !nextText.includes(priorText)) {
+            const merged = `${priorText} ${nextText}`.trim();
+            const mergedContacts = [
+              ...(ctx.message.contacts ?? []),
+              ...(successor.rows[0]?.contacts ?? []),
+            ];
+            await c.query(
+              "UPDATE messages SET text=$2,contacts=$3 WHERE id=$1",
+              [successorId, merged, JSON.stringify(mergedContacts)],
+            );
+          }
+          await c.query(
+            "UPDATE messages SET processed_at=clock_timestamp(),error_code=$2 WHERE id=$1 AND processed_at IS NULL",
+            [id, `superseded_by:${successorId}`],
+          );
+          await c.query(
+            `UPDATE conversation_turns SET status='superseded',completed_at=clock_timestamp()
+               WHERE id=(SELECT turn_id FROM messages WHERE id=$1)`,
+            [id],
+          );
+          await this.s.event(c, ctx.message, "system", "turn_superseded", {
+            successor_message_id: successorId,
+          });
+          return {
+            trace_id: ctx.message.trace_id,
+            message_id: id,
+            mode: ctx.message.mode,
+            stage: "superseded",
+            request_number: null,
+            code: "turn_superseded",
+          };
+        }
       }
       let reply: string | null = null,
         request: Request | null = null,
         reason: string | undefined = technicalReason,
         protectedReply = false,
         intent = "other";
+      const actionResults: ActionResultFact[] = [];
+      let turnBoundary: {
+        code: BoundaryCode;
+        details?: Record<string, unknown>;
+      } | null = null;
       const plan = ctx.message.ai_plan
         ? planSchema.parse(ctx.message.ai_plan)
         : proposed;
+      if (proposed && !ctx.message.ai_plan) {
+        await c.query(
+          `UPDATE messages SET ai_plan=$2,plan_versions=$3,
+            ai_metadata=coalesce(ai_metadata,'{}'::jsonb) || $4::jsonb
+           WHERE id=$1 AND ai_plan IS NULL AND processed_at IS NULL`,
+          [
+            id,
+            JSON.stringify(proposed),
+            JSON.stringify(this.versions(ctx)),
+            JSON.stringify({ action_source: "rules", provider: "rules" }),
+          ],
+        );
+      }
+      const beforeRequest = structuredClone(
+        ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+          ctx.requests.find(
+            (r) =>
+              !["coordinated", "closed", "cancelled", "rejected"].includes(
+                r.status,
+              ),
+          ) ??
+          null,
+      );
+      const beforeSearch = structuredClone(ctx.active_search ?? null);
+      let changedFields: ChangedField[] = [];
       let capacityDecision = /^(כן|לא)(?:\s+(\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4}))?\s*$/.exec(text.trim());
       // A bare "כן"/"לא" is ordinary conversation unless the configured
       // administrator actually has a pending capacity decision. A dated
@@ -1076,37 +1475,49 @@ export class Engine {
             await this.s.outbound(c, ctx.message, { phone, text: `תמונה שמורה מפנייה ${current.number}`, media_id: mediaId }, `admin-status-media:${id}:${current.id}:${mediaId}`, current.id);
       } else if (isStatus(text)) { reply = statusText(ctx.requests); intent = "other"; }
       else if (ctx.conversation.mode === "human") {
+        // Already handed off — Reply manager acknowledges; no template ask.
         intent = "human_escalation";
-        await this.alert(c, ctx, "human_followup", null, null);
+        reply = null;
+      } else if (
+        customerInsistsAfterDenial(text) &&
+        ctx.history.some(
+          (entry) =>
+            entry.role === "assistant" &&
+            (entry.content.includes(OUTSIDE) ||
+              /לא נוכל לסייע|מחוץ לאזור|לא במדיניות|אי אפשר/.test(entry.content)),
+        )
+      ) {
+        intent = "human_escalation";
+        const open =
+          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+          (ctx.requests.length === 1 ? ctx.requests[0] : null);
+        if (open && open.status !== "coordinated") {
+          open.status = "human";
+          open.human_reason = "customer_insisted";
+          await this.s.save(c, open);
+          request = open;
+        }
+        reply = null;
+        reason = "customer_insisted";
       } else if (technicalReason || ctx.message.media_state === "failed") {
         intent = technicalReason ? "clarification" : "human_escalation";
         const selected =
           ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
           (ctx.requests.length === 1 ? ctx.requests[0] : undefined);
         if (technicalReason === "openai_failure" || technicalReason === "voice_failure") {
-          reply = selected
-            ? `לא הצלחתי להבין את ההודעה. ${nextQuestion(selected, phone).text}`
-            : "לא הצלחתי להבין. אפשר לכתוב, למשל: אני רוצה למסור מיטה.";
-          // A final AI failure is a real human-handling event. Keep the safe
-          // fallback for the customer, but also create the durable admin alert.
+          reply = null;
           reason = technicalReason;
           await this.s.event(c, ctx.message, "system", "automatic_fallback", {
             technical_reason: technicalReason,
           }, selected?.id ?? null);
         } else {
-          reply =
-            "לא הצלחנו להשלים את הטיפול בהודעה. העברתי לבדיקה אנושית. נעדכן.";
+          reply = null;
           reason ??= "media_failure";
         }
-      } else if (quickReply(text) !== null) {
+      } else if (isQuickTopic(text)) {
+        // FAQ/greeting: no code sentence — Reply manager phrases from state.
         intent = "acknowledge";
-        const quick = quickReply(text)!;
-        const selected =
-          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-          (ctx.requests.length === 1 ? ctx.requests[0] : undefined);
-        reply = selected && quick.startsWith("שלום וברוכים")
-          ? nextQuestion(selected, phone).text
-          : quick;
+        reply = null;
       }
       else if (ctx.message.kind === "image") {
         intent = "ask_details";
@@ -1156,9 +1567,7 @@ export class Engine {
           await this.s.event(c, ctx.message, phone, "unassigned_photo", {
             media_id: ctx.message.media_id,
           });
-        reply = request
-          ? `${PHOTO_THANKS}\n${nextQuestion(request, phone).text}`
-          : PHOTO_THANKS;
+        reply = null;
       } else if (ctx.message.kind === "location") {
         intent = "ask_address";
         const selected =
@@ -1189,9 +1598,7 @@ export class Engine {
           { location: ctx.message.location },
           request?.id ?? ctx.conversation.selected_request_id,
         );
-        reply = request
-          ? `נקודת המיקום התקבלה. ${nextQuestion(request, phone).text}`
-          : "נקודת המיקום התקבלה. נא לציין גם את שם היישוב אם עדיין לא נמסר.";
+        reply = null;
       } else if (plan) {
         const stored = await c.query<{
           plan_versions: Record<string, number> | null;
@@ -1204,54 +1611,18 @@ export class Engine {
         }
         await c.query("SAVEPOINT business_commands");
         try {
-          // A clear outside endpoint takes precedence over all collection/escalation
-          // commands from this message. Never alert a human for this rejection.
-          const outside = [];
-          for (const cmd of plan.commands)
-            if (
-              cmd.type === "details" &&
-              cmd.settlement &&
-              !(
-                cmd.address &&
-                /^(?:רחוב|שיכון|שכונה|שכונת|שדרות|שד)/.test(cmd.address) &&
-                cmd.address.includes(cmd.settlement)
-              ) &&
-              (await this.s.region(c, cmd.settlement)).decision === "outside"
-            )
-              outside.push(cmd);
-          if (outside.length) {
-            const n = outside[0]!.request_number;
-            const r =
-              ctx.requests.find((r) =>
-                n
-                  ? r.number === n
-                  : r.id === ctx.conversation.selected_request_id,
-              ) ?? (ctx.requests.length === 1 ? ctx.requests[0] : undefined);
-            if (r) {
-              request = await this.s.request(r.id, c, true);
-              mutable(request);
-              request.status = "rejected";
-              await this.s.save(c, request);
-            }
-            reply = OUTSIDE;
-            await this.s.event(
-              c,
-              ctx.message,
-              phone,
-              "outside_area_rejected",
-              {},
-              request?.id ?? null,
-            );
-          } else {
+          {
             const handoffTransitionPlanned = plan.commands.some((candidate) =>
               candidate.type === "counterparty_candidate" ||
               candidate.type === "confirm_counterparty" ||
-              candidate.type === "counterparty"
+              candidate.type === "counterparty" ||
+              (candidate.type === "donate" &&
+                (candidate.direct === true ||
+                  Boolean(candidate.counterparty_name) ||
+                  Boolean(candidate.counterparty_phone)))
             );
-            // AI may return receiver details before the command that creates
-            // that receiver. Preserve the plan otherwise, but satisfy this
-            // explicit dependency for an already-open request so the whole
-            // transaction is not rolled back as forbidden_party.
+            // Run the action-manager plan in dependency order. Code only writes —
+            // program rules (area/capacity/window/duplicates) live in prompts.
             const orderedCommands = [...plan.commands];
             for (let detailsIndex = 0; detailsIndex < orderedCommands.length; detailsIndex++) {
               const detailsCommand = orderedCommands[detailsIndex]!;
@@ -1267,67 +1638,8 @@ export class Engine {
               orderedCommands.splice(detailsIndex, 0, counterpartyCommand!);
               detailsIndex++;
             }
-            const executableCommands = orderedCommands.filter((command) => {
-              if (command.type !== "details" || !command.role) return true;
-              const createsCounterparty = orderedCommands.some(
-                (candidate) =>
-                  candidate.type === "counterparty" &&
-                  candidate.request_number === command.request_number,
-              );
-              if (!createsCounterparty) return true;
-              const targetRequest = ctx.requests.find(
-                (candidate) => candidate.number === command.request_number,
-              );
-              const actorRole = targetRequest?.parties.find(
-                (candidate) => candidate.phone === phone,
-              )?.role;
-              // A donor may identify/link a receiver, but cannot assert that
-              // receiver's profile fields. Keep the valid counterparty
-              // transition and let the receiver provide their own details.
-              return !actorRole || actorRole === command.role;
-            });
             let index = 0;
-            const hasSameMessageDonorDetails = executableCommands.some(
-              (candidate) =>
-                candidate.type === "details" && candidate.role === "donor",
-            );
-            const waitingForPhoto = ctx.requests.some(
-              (candidate) =>
-                photoGate(candidate) &&
-                ![
-                  "coordinated",
-                  "closed",
-                  "cancelled",
-                  "rejected",
-                  "human",
-                  "cancel_pending",
-                ].includes(candidate.status),
-            );
-            for (const command of executableCommands) {
-              // Yes/no about condition or disassembly must not run before the
-              // required photo. A bare "כן" otherwise throws, and "לא" rejects
-              // the item. Details and a new donation still run.
-              if (
-                waitingForPhoto &&
-                !handoffTransitionPlanned &&
-                command.type === "item_facts"
-              ) {
-                reply = PHOTO_FIRST;
-                break;
-              }
-              // Once an open donation is created, PHOTO-FIRST blocks every
-              // later command in the same AI batch until an image arrives,
-              // except donor details extracted from that same opening message.
-              if (
-                request &&
-                photoGate(request) &&
-                !handoffTransitionPlanned &&
-                command.type !== "details" &&
-                command.type !== "clarify_duplicate"
-              ) {
-                reply = PHOTO_FIRST;
-                break;
-              }
+            for (const command of orderedCommands) {
               ctx = await this.s.context(id, c);
               const result: Outcome = await this.commands.apply(
                 c,
@@ -1340,13 +1652,23 @@ export class Engine {
               }
               reply = result.reply;
               reason = result.humanReason;
-              intent = command.type === "counterparty"
-                ? "ask_verification"
-                : command.type === "details"
-                  ? "ask_details"
-                  : command.type === "donate" && result.request?.origin !== "direct"
-                    ? "ask_photo"
-                    : "acknowledge";
+              actionResults.push({
+                command: command.type,
+                ok: true,
+                detail: result.humanReason
+                  ? { human_reason: result.humanReason }
+                  : undefined,
+              });
+              intent =
+                command.type === "counterparty" ||
+                command.type === "contact_counterparty"
+                  ? "ask_verification"
+                  : command.type === "details"
+                    ? "ask_details"
+                    : command.type === "donate" &&
+                        result.request?.origin !== "direct"
+                      ? "ask_photo"
+                      : "acknowledge";
               await this.s.event(
                 c,
                 ctx.message,
@@ -1355,18 +1677,6 @@ export class Engine {
                 { command },
                 result.request?.id ?? null,
               );
-              // Open donations are PHOTO-FIRST. Do not let a multi-command
-              // prompt collect names/addresses before the required photo.
-              if (
-                command.type === "donate" &&
-                result.request &&
-                photoGate(result.request) &&
-                !handoffTransitionPlanned &&
-                !hasSameMessageDonorDetails
-              ) {
-                reply = PHOTO_FIRST;
-                break;
-              }
               for (const [n, notice] of result.notices.entries()) {
                 const dedupeKey = `notice:${id}:${index}:${n}`;
                 const outboxId = await this.s.outbound(
@@ -1387,27 +1697,66 @@ export class Engine {
               index++;
               if (reason || request?.status === "rejected") break;
             }
-            // Donor facts extracted from the opening message are retained, but
-            // the first operational gate remains the photo request. A later
-            // details command must not replace PHOTO-FIRST with a condition
-            // or another detail question.
-            const explicitClarification = /כבר קיימת פנייה/.test(reply ?? "");
+            if (request) {
+              const attached = await c.query<{
+                id: string;
+                media_id: string | null;
+                phone: string | null;
+              }>(
+                `SELECT m.id,m.media_id,co.phone
+                   FROM messages m
+                   LEFT JOIN contacts co ON co.id=m.contact_id
+                  WHERE m.conversation_id=$1 AND m.error_code=$2 AND m.kind='image'`,
+                [ctx.conversation.id, `attached_to:${id}`],
+              );
+              for (const photo of attached.rows) {
+                if (!photo.media_id) continue;
+                try {
+                  await this.s.linkPhoto(c, request, {
+                    ...ctx.message,
+                    id: photo.id,
+                    kind: "image",
+                    media_id: photo.media_id,
+                    media_state: "ready",
+                    phone: photo.phone ?? ctx.message.phone,
+                  });
+                } catch {
+                  // Seeker photos or unauthorized images stay attached for audit
+                  // without blocking the text reply.
+                }
+              }
+              if (attached.rows.length && request.photo_ids.length) {
+                if (request.parties.length === 1 && request.origin === "donation")
+                  request.status = "available";
+                request.photo_status = PHOTO_STATUS.RECEIVED;
+                await this.s.save(c, request);
+                reply = null;
+              }
+            }
+            // Soft optional photo ask once. Persist status only; Reply phrases.
+            const photoAsked = photoAskAlreadySent(ctx.history);
+            const declinedPhoto = photoDeclined(text);
+            // Never auto-flip ASKED→NO_PHOTO on a non-image answer — only
+            // photoDeclined() marks «אין תמונה».
             if (
               request &&
               !reason &&
-              !explicitClarification &&
-              request.origin === "donation" &&
               photoGate(request) &&
-              !handoffTransitionPlanned &&
+              !ctx.conversation.pending_extra_item &&
               !["cancelled", "rejected", "human", "closed", "coordinated"].includes(
                 request.status,
               )
             ) {
-              reply = PHOTO_FIRST;
-              intent = "ask_photo";
+              void handoffTransitionPlanned;
+              if (!declinedPhoto && !photoAsked) {
+                // Photo nudge is owned by the reply manager.
+              } else if (declinedPhoto) {
+                request.photo_status = PHOTO_STATUS.NO_PHOTO;
+                await this.s.save(c, request);
+                intent = "ask_details";
+              }
+              // photoAsked && !declined: leave status as בוקשה — do not flip.
             }
-            if (reply === PHOTO_FIRST && sameDayDemand(text))
-              reply = `${SAME_DAY_WINDOW}\n${PHOTO_FIRST}`;
             if (
               request &&
               !reason &&
@@ -1419,15 +1768,11 @@ export class Engine {
               const proposed = await this.s.proposeScheduleDate(c, request, this.now());
               if (!proposed) {
                 request.status = "waiting_capacity";
-                const capacityApproval = await c.query<{ status: string }>(
-                  "SELECT status FROM transport_capacity_approvals WHERE request_id=$1 ORDER BY requested_at DESC LIMIT 1",
-                  [request.id],
-                );
-                reply = capacityApproval.rows[0]?.status === "pending"
-                  ? "מכסת ההובלות ליום שלישי מלאה. שלחתי למנהל בקשה לאשר הובלה נוספת. הפנייה ממתינה, ולא ייקבע מועד נוסף עד לאישור מפורש."
-                  : capacityApproval.rows[0]?.status === "denied"
-                    ? "המנהל לא אישר הובלה נוספת ליום שלישי זה. הפנייה נשארה בהמתנה ולא תואמה."
-                    : "אין כרגע מועד שניתן להציע. השארתי את הפנייה בהמתנה; לא תואם מועד נוסף.";
+                turnBoundary = {
+                  code: "capacity_full",
+                  details: { request_id: request.id },
+                };
+                reply = null;
                 await this.s.save(c, request);
               } else {
                 request.proposed_run_date = proposed;
@@ -1439,17 +1784,25 @@ export class Engine {
                     p.schedule_approved_at = null;
                   }
                 await this.s.save(c, request);
-                reply = nextQuestion(request, phone).text;
+                reply = null;
                 intent = "ask_schedule_approval";
                 for (const p of request.parties) {
-                  if (p.phone === phone || request.represents_both_parties) continue;
+                  if (!p.phone || p.phone === phone || request.represents_both_parties) continue;
                   const permission = await c.query<{ state: string }>(
                     "SELECT state FROM request_verifications WHERE request_id=$1 AND role=$2",
                     [request.id, p.role],
                   );
                   const authorized = ["consented", "queued", "provider_accepted", "delivered", "approved"].includes(permission.rows[0]?.state ?? "");
                   if (!authorized) continue;
-                  const notice = { phone: p.phone, text: nextQuestion(request, p.phone).text };
+                  // Draft facts only — phraseNotice owns wording.
+                  const notice = {
+                    phone: p.phone,
+                    text: draftScheduleProposal({
+                      request,
+                      recipient: p,
+                      date: proposed,
+                    }),
+                  };
                   const outboxId = await this.s.outbound(
                     c,
                     ctx.message,
@@ -1471,27 +1824,30 @@ export class Engine {
               );
               if (coordinated === "same_day") {
                 reason = "same_day_admin_approval";
-                reply = HUMAN_REPLY;
+                reply = null;
+                turnBoundary = { code: "schedule_window", details: { same_day: true } };
               }
               if (coordinated === "full") {
                 const fullDate = request.proposed_run_date!;
                 request.status = "waiting_capacity";
                 await this.s.save(c, request);
-                const approval = await c.query<{ status: string }>(
-                  "SELECT status FROM transport_capacity_approvals WHERE run_date=$1 ORDER BY requested_at DESC LIMIT 1",
-                  [fullDate],
-                );
-                reply = approval.rows[0]?.status === "pending"
-                  ? `הגענו למכסת ההובלות ליום שלישי ${fullDate}. שלחתי למנהל בקשה לאשר הובלה נוספת. הפנייה ממתינה; לא אעביר אותה אוטומטית לשבוע הבא ולא אתאם בלי אישור.`
-                  : `מכסת ההובלות ליום שלישי ${fullDate} מלאה ולא אושרה הובלה נוספת. הפנייה נשארה בהמתנה ללא תיאום.`;
+                reply = null;
+                turnBoundary = {
+                  code: "capacity_full",
+                  details: { date: fullDate },
+                };
               } else if (coordinated === "capacity_denied") {
                 request.status = "waiting_capacity";
                 await this.s.save(c, request);
-                reply = "המנהל לא אישר הובלה נוספת ליום שלישי הזה. הפנייה נשארה בהמתנה ולא תואמה.";
+                reply = null;
+                turnBoundary = {
+                  code: "capacity_full",
+                  details: { denied: true },
+                };
               }
               if (coordinated === "coordinated") {
                 await this.s.save(c, request);
-                reply = statusText([request]);
+                reply = null;
                 intent = "coordinated";
                 await this.s.event(
                   c,
@@ -1502,9 +1858,15 @@ export class Engine {
                   request.id,
                 );
                 for (const p of request.parties)
-                  if (p.phone !== phone)
+                  if (p.phone && p.phone !== phone)
                     {
-                    const notice = { phone: p.phone, text: reply };
+                    const notice = {
+                      phone: p.phone,
+                      text: draftCoordinatedNotice({
+                        request,
+                        date: request.run_date ?? "",
+                      }),
+                    };
                     const outboxId = await this.s.outbound(
                       c,
                       ctx.message,
@@ -1530,30 +1892,43 @@ export class Engine {
           await this.s.event(c, ctx.message, phone, "tool_rejected", {
             code: e.code,
           });
-          if (e.status === 403) {
-            reason = `tool_authorization:${e.code}`;
-            reply = HUMAN_REPLY;
-          }
+          actionResults.push({
+            command: "apply",
+            ok: false,
+            detail: { code: e.code, status: e.status },
+          });
+          // Never escalate leftover authz to human. Reply phrases from facts.
+          reply = null;
+          intent = "clarification";
         }
       } else {
-        reply = HUMAN_REPLY;
-        reason = "no_plan";
-        intent = "human_escalation";
+        // No plan: still let Reply manager speak (placeholder only).
+        reply = null;
+        intent = "acknowledge";
       }
-      // protectedReply still marks operational replies that must not be
-      // replaced by free model text; claim-guard handles phrasing instead.
+      const afterCtx = await this.s.context(id, c);
+      changedFields = diffChangedFields({
+        beforeRequest,
+        afterRequest: request,
+        beforeSearch,
+        afterSearch: afterCtx.active_search ?? null,
+      });
+      // The AI reply manager owns customer wording after commit. Code only
+      // keeps a pending placeholder here; boundaries already applied above.
       void protectedReply;
       if (reason) await this.alert(c, ctx, reason, reply, request);
+      // Placeholder until the reply manager writes the real text. Keep any
+      // structured command result only as an AI-disabled / outage fallback.
+      if (!reply?.trim()) reply = GUARD_FALLBACK_REPLY;
       let customerOutboxId: string | null = null;
-      if (reply)
-        customerOutboxId = await this.s.outbound(
-          c,
-          ctx.message,
-          { phone, text: reply },
-          `reply:${id}`,
-          request?.id ?? null,
-          "pending",
-        );
+      customerOutboxId = await this.s.outbound(
+        c,
+        ctx.message,
+        { phone, text: reply },
+        `reply:${id}`,
+        request?.id ?? null,
+        "pending",
+      );
       await c.query(
         "INSERT INTO command_results(message_id,command,result) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
         [
@@ -1592,12 +1967,32 @@ export class Engine {
         customerOutboxId,
         canonicalReply: reply,
         requestId: request?.id ?? null,
-        provenOperational:
-          request?.status === "coordinated" ||
-          deferredNotices.length > 0,
+        provenOperational: request?.status === "coordinated" || deferredNotices.length > 0,
+        operation: {
+          action_results: { intent, reason: reason ?? null },
+          request_status: request?.status ?? null,
+          request_number: request?.number ?? null,
+          persisted: !reason,
+          outbound_notices_queued: deferredNotices.length,
+          changed_fields: changedFields,
+          missing_required: request
+            ? nextQuestion(request, phone).missing
+            : null,
+          active_search: afterCtx.active_search ?? null,
+        },
+        changedFields,
+        planCommands: plan?.commands ?? [],
+        actionResultFacts: actionResults,
+        turnBoundary,
       };
     });
     if (committed) this.log.info(committed);
+    let auditedReply: string | null =
+      committed && "canonicalReply" in committed
+        ? (committed.canonicalReply as string | null)
+        : null;
+    let auditedIntroduced = false;
+    let auditedMergedInto: string | null = null;
     // Phrase the customer reply only after COMMIT. Claim-guard rejects any
     // invented save/send/approval wording.
     if (
@@ -1606,45 +2001,289 @@ export class Engine {
       committed.customerOutboxId &&
       committed.canonicalReply
     ) {
+      const newerText = await this.s.pool.query<{ id: string }>(
+        `SELECT m.id FROM messages m
+          WHERE m.conversation_id=(SELECT conversation_id FROM messages WHERE id=$1)
+            AND m.seq>(SELECT seq FROM messages WHERE id=$1)
+            AND m.processed_at IS NULL AND m.kind IN ('text','contact')
+            ORDER BY m.seq LIMIT 1`,
+        [id],
+      );
+      if (newerText.rows[0]) {
+        const successorId = newerText.rows[0].id;
+        auditedMergedInto = successorId;
+        await this.s.transaction(async (c) => {
+          await c.query(
+            "UPDATE outbox SET state='cancelled',format_state='ready',error_code='reply_merged_into_next_turn' WHERE id=$1",
+            [committed.customerOutboxId],
+          );
+          await c.query(
+            "UPDATE messages SET reply=NULL,error_code=$2 WHERE id=$1",
+            [id, `reply_merged_into:${successorId}`],
+          );
+          await this.s.event(
+            c,
+            await this.s.message(id, c),
+            "system",
+            "reply_merged_into_next_turn",
+            { successor_message_id: successorId },
+          );
+        });
+      } else {
       const ctx = await this.s.context(id);
-      let text = committed.canonicalReply;
+      const rules = await this.s.loadRulesState(this.s.pool);
+      let text = OUTAGE_REPLY;
       let rejected = false;
+      let rejectedClaims: string[] = [];
+      let replyMeta: Record<string, unknown> | null = null;
+      let claims: ReplyClaims = emptyClaims();
+      const changedPaths = (committed.changedFields ?? []).map((field) =>
+        field.role
+          ? `${field.table}.${field.column}:${field.role}`
+          : `${field.table}.${field.column}`,
+      );
+      const claimFacts = {
+        changedPaths,
+        openedRequestNumber:
+          typeof committed.operation?.request_number === "number" &&
+          committed.operation?.action_results?.intent === "donate"
+            ? (committed.operation.request_number as number)
+            : null,
+        contactedCounterparty:
+          (committed.operation?.outbound_notices_queued ?? 0) > 0,
+        scheduleDate:
+          typeof committed.operation?.changed_fields === "object"
+            ? ((ctx.requests.find((r) => r.id === committed.requestId)
+                ?.proposed_run_date as string | null) ?? null)
+            : null,
+        cancelled: committed.operation?.request_status === "cancelled",
+        humanHandoff: committed.operation?.request_status === "human",
+        knownRequestNumbers: ctx.requests.map((r) => r.number),
+      };
+      const replyInput = {
+        rules,
+        commands:
+          (committed as { planCommands?: unknown[] }).planCommands ?? [],
+        results:
+          ((committed as { actionResultFacts?: ActionResultFact[] })
+            .actionResultFacts ?? []) as ActionResultFact[],
+        changed: committed.changedFields ?? [],
+        boundary:
+          (
+            committed as {
+              turnBoundary?: {
+                code: BoundaryCode;
+                details?: Record<string, unknown>;
+              } | null;
+            }
+          ).turnBoundary ?? null,
+        notices: [] as NoticeFact[],
+        fallback: OUTAGE_REPLY,
+      };
       try {
-        const phrased = await this.ai.phraseReply(committed.canonicalReply, ctx);
-        const guarded = applyClaimGuard(
-          committed.canonicalReply,
-          phrased.text,
-          Boolean(committed.provenOperational),
-        );
-        text = guarded.text;
-        rejected = guarded.rejected;
+        const metaRow = await this.s.pool.query<{
+          ai_metadata: Record<string, unknown> | null;
+        }>("SELECT ai_metadata FROM messages WHERE id=$1", [id]);
+        const agentMeta = (metaRow.rows[0]?.ai_metadata ?? {}) as Record<
+          string,
+          unknown
+        >;
+        if (
+          agentMeta.tools_already_applied === true &&
+          typeof agentMeta.agent_reply === "string" &&
+          agentMeta.agent_reply.trim()
+        ) {
+          // Single agent turn already produced + claim-checked the reply.
+          text = agentMeta.agent_reply.trim();
+          claims =
+            agentMeta.agent_claims &&
+            typeof agentMeta.agent_claims === "object"
+              ? (agentMeta.agent_claims as ReplyClaims)
+              : emptyClaims();
+          rejected = agentMeta.agent_rejected === true;
+          rejectedClaims = Array.isArray(agentMeta.agent_rejected_claims)
+            ? (agentMeta.agent_rejected_claims as string[])
+            : [];
+          if (Array.isArray(agentMeta.agent_changed_fields)) {
+            claimFacts.changedPaths = agentMeta.agent_changed_fields.filter(
+              (path): path is string => typeof path === "string",
+            );
+          }
+          // Rebuild donate/contact facts from tool results — finish() only saw `next`.
+          const toolRows = Array.isArray(agentMeta.tool_results)
+            ? agentMeta.tool_results
+            : [];
+          const donate = toolRows.find(
+            (row) =>
+              row &&
+              typeof row === "object" &&
+              (row as { command?: { type?: string }; ok?: boolean; request_number?: number })
+                .command?.type === "donate" &&
+              (row as { ok?: boolean }).ok === true &&
+              typeof (row as { request_number?: number }).request_number === "number",
+          ) as { request_number: number } | undefined;
+          if (donate) claimFacts.openedRequestNumber = donate.request_number;
+          claimFacts.contactedCounterparty =
+            claimFacts.contactedCounterparty ||
+            toolRows.some(
+              (row) =>
+                row &&
+                typeof row === "object" &&
+                (row as { command?: { type?: string }; notices_queued?: number })
+                  .command?.type === "contact_counterparty" &&
+                ((row as { notices_queued?: number }).notices_queued ?? 0) > 0,
+            );
+          if (!rejected) {
+            const check = verifyClaims(claims, claimFacts);
+            if (!check.ok) {
+              rejected = true;
+              rejectedClaims = check.rejected;
+              text = GUARD_FALLBACK_REPLY;
+              claims = emptyClaims();
+            }
+          } else {
+            text = GUARD_FALLBACK_REPLY;
+            claims = emptyClaims();
+          }
+          replyMeta = {
+            provider: "openai_responses_agent",
+            prompt_id: agentMeta.prompt_id ?? null,
+            prompt_version: agentMeta.prompt_version ?? null,
+            response_id: agentMeta.response_id ?? null,
+            tools_already_applied: true,
+          };
+        } else {
+          let generated = await this.ai.reply(ctx, replyInput);
+          replyMeta = generated.metadata;
+          claims = generated.claims;
+          let check = verifyClaims(claims, claimFacts);
+          if (!check.ok) {
+            rejected = true;
+            rejectedClaims = check.rejected;
+            generated = await this.ai.reply(ctx, {
+              ...replyInput,
+              guardFeedback: { rejected_claims: check.rejected },
+            });
+            replyMeta = generated.metadata;
+            claims = generated.claims;
+            check = verifyClaims(claims, claimFacts);
+            if (!check.ok) {
+              rejected = true;
+              rejectedClaims = check.rejected;
+              text = GUARD_FALLBACK_REPLY;
+            } else {
+              rejected = false;
+              text = generated.text.trim() || GUARD_FALLBACK_REPLY;
+            }
+          } else {
+            text = generated.text.trim() || GUARD_FALLBACK_REPLY;
+          }
+        }
       } catch (e) {
         this.log.error({
           code: errorCode(e),
           outbox_id: committed.customerOutboxId,
-          stage: "customer_phrase",
+          stage: "customer_reply",
         });
+        text = OUTAGE_REPLY;
       }
-      const lang = conversationLanguage(ctx);
-      const fromTemplate = localizeCustomer(committed.canonicalReply, lang);
-      // A fixed template in the customer's language wins over a Hebrew paraphrase.
-      text = fromTemplate !== committed.canonicalReply
-        ? fromTemplate
-        : localizeCustomer(text, lang);
+      const priorOutbox = await this.s.pool.query<{ n: number; intro: number }>(
+        `SELECT count(*)::int AS n,
+                count(*) FILTER (
+                  WHERE o.text LIKE '%סוכן האוטומטי%' OR o.text LIKE '%בהרצה ניסיונית%'
+                )::int AS intro
+           FROM outbox o
+           JOIN messages current ON current.id=$2
+           LEFT JOIN conversation_resets cr ON cr.conversation_id=current.conversation_id
+          WHERE o.phone=$1
+            AND o.id <> $3
+            AND o.state IN ('sent','shadow','simulation')
+            AND o.created_at <= current.received_at
+            AND (cr.reset_at IS NULL OR o.created_at > cr.reset_at)`,
+        [ctx.conversation.phone, id, committed.customerOutboxId],
+      );
+      const introduced =
+        (priorOutbox.rows[0]?.n ?? 0) > 0 ||
+        (priorOutbox.rows[0]?.intro ?? 0) > 0 ||
+        ctx.history.some(
+          (entry) => entry.role === "assistant" && isSelfIntroText(entry.content),
+        );
+      auditedIntroduced = introduced;
+      const clearIntent =
+        customerIntentClear(ctx.message.transcript ?? ctx.message.text) ||
+        ctx.requests.length > 0;
+      const suppressIntro = introduced || clearIntent;
+      // Only strip a repeated intro — never rewrite or reinject sentences.
+      text = stripRepeatedSelfIntro(text, ctx.history, suppressIntro);
+      auditedReply = text;
       await this.s.transaction(async (c) => {
+        const stillNewer = await c.query<{ id: string }>(
+          `SELECT m.id FROM messages m
+            WHERE m.conversation_id=(SELECT conversation_id FROM messages WHERE id=$1)
+              AND m.seq>(SELECT seq FROM messages WHERE id=$1)
+              AND m.processed_at IS NULL AND m.kind IN ('text','contact')
+            ORDER BY m.seq LIMIT 1`,
+          [id],
+        );
+        if (stillNewer.rows[0]) {
+          auditedMergedInto = stillNewer.rows[0].id;
+          await c.query(
+            "UPDATE outbox SET state='cancelled',format_state='ready',error_code='reply_merged_into_next_turn' WHERE id=$1",
+            [committed.customerOutboxId],
+          );
+          await c.query(
+            "UPDATE messages SET reply=NULL,error_code=$2 WHERE id=$1",
+            [id, `reply_merged_into:${stillNewer.rows[0].id}`],
+          );
+          return;
+        }
         await c.query(
-          "UPDATE outbox SET text=$2,format_state='ready' WHERE id=$1 AND format_state='pending'",
+          "UPDATE outbox SET text=$2,format_state='ready' WHERE id=$1 AND state='pending'",
           [committed.customerOutboxId, text],
         );
+        await this.s.scheduleSendIfReady(c, committed.customerOutboxId!);
         await c.query(
           "UPDATE messages SET reply=$2 WHERE id=$1",
           [id, text],
         );
+        if (replyMeta) {
+          await c.query(
+            `UPDATE messages
+                SET ai_metadata = coalesce(ai_metadata, '{}'::jsonb) || jsonb_build_object('reply', $2::jsonb)
+              WHERE id=$1`,
+            [
+              id,
+              JSON.stringify({
+                ...replyMeta,
+                claims,
+                claim_rejected: rejected,
+                rejected_claims: rejectedClaims,
+              }),
+            ],
+          );
+          await this.s.event(
+            c,
+            ctx.message,
+            "system",
+            "reply_manager_completed",
+            {
+              provider: replyMeta.provider ?? null,
+              prompt_id: replyMeta.prompt_id ?? null,
+              prompt_version: replyMeta.prompt_version ?? null,
+              response_id: replyMeta.response_id ?? null,
+              rejected,
+              rejected_claims: rejectedClaims,
+            },
+            committed.requestId,
+          );
+        }
         if (rejected)
           await this.s.event(c, ctx.message, "system", "phrase_claim_rejected", {
+            rejected_claims: rejectedClaims,
             claim: text.slice(0, 500),
           }, committed.requestId);
       });
+      }
     }
     // Notice wording is AI-assisted, but it is never allowed to hold the
     // business transaction open. Outbox rows wait in format_state=pending;
@@ -1659,8 +2298,7 @@ export class Engine {
             ? await this.s.request(item.requestId)
             : null;
           text = (await this.ai.phraseNotice(ctx, item.notice, request)).text;
-          const guarded = applyClaimGuard(item.notice.text, text, true);
-          text = guarded.text;
+          text = text.trim() || item.notice.text;
         } catch (e) {
           state = "failed";
           this.log.error({ code: errorCode(e), outbox_id: item.outboxId, stage: "notice_format" });
@@ -1670,12 +2308,63 @@ export class Engine {
             "UPDATE outbox SET text=$2,format_state=$3 WHERE id=$1 AND format_state='pending'",
             [item.outboxId, text, state],
           );
+          if (state === "ready")
+            await this.s.scheduleSendIfReady(c, item.outboxId);
           await this.s.event(c, ctx.message, "system", "managed_notice_formatted", {
             outbox_id: item.outboxId,
             format_state: state,
           }, item.requestId);
         });
       }
+    }
+    if (committed) {
+      const stage =
+        "stage" in committed ? String(committed.stage) : "processed";
+      const fate: TurnFate =
+        stage === "superseded"
+          ? "superseded"
+          : auditedMergedInto
+            ? "superseded"
+            : technicalReason
+              ? "failed"
+              : "completed";
+      await this.auditTurn(id, {
+        fate,
+        fate_detail: {
+          stage,
+          code: "code" in committed ? committed.code : null,
+          carried_to: auditedMergedInto,
+          request_number:
+            "request_number" in committed ? committed.request_number : null,
+        },
+        state_before: stateBefore,
+        reply_text: auditedMergedInto ? null : auditedReply,
+        outbox_id:
+          "customerOutboxId" in committed
+            ? (committed.customerOutboxId as string | null)
+            : null,
+        error_code:
+          fate === "failed"
+            ? technicalReason ?? null
+            : auditedMergedInto
+              ? `reply_merged_into:${auditedMergedInto}`
+              : "code" in committed && committed.code !== "ok"
+                ? String(committed.code)
+                : null,
+        opened_at: openedAt,
+        intent:
+          committed &&
+          "operation" in committed &&
+          committed.operation &&
+          typeof committed.operation === "object" &&
+          "action_results" in committed.operation
+            ? String(
+                (committed.operation as { action_results?: { intent?: string } })
+                  .action_results?.intent ?? "",
+              ) || null
+            : null,
+        introduced: auditedIntroduced,
+      });
     }
   }
 
@@ -1703,21 +2392,53 @@ export class Engine {
         out.chat_id = `972${out.phone}@c.us`;
         await c.query("UPDATE outbox SET chat_id=$2 WHERE id=$1", [id, out.chat_id]);
       }
-      if (out.format_state === "pending")
-        throw new RetryableError("notice_format_pending");
       if (["sent", "shadow", "simulation", "cancelled"].includes(out.state))
         return null;
+      // Cancelled/sent rows must never block the send FIFO. Format pending is
+      // only meaningful for rows still waiting on reply/notice phrasing —
+      // do not retry with exponential backoff (that added 8–40s of delay).
+      // Leave the job; scheduleSendIfReady enqueues a fresh send when ready.
+      if (out.format_state === "pending") return null;
+      // Never freeze behind uncertain/failed older rows — abandon them and
+      // continue with the current reply.
+      await c.query(
+        `UPDATE outbox
+            SET state='cancelled', format_state='ready', error_code='stale_send_released'
+          WHERE phone=$1 AND seq<$2 AND state IN ('uncertain','failed')`,
+        [out.phone, out.seq],
+      );
       const older = await c.query(
-        "SELECT 1 FROM outbox WHERE phone=$1 AND seq<$2 AND state IN ($3,$4,$5,$6) LIMIT 1",
-        [out.phone, out.seq, "pending", "sending", "uncertain", "failed"],
+        "SELECT 1 FROM outbox WHERE phone=$1 AND seq<$2 AND state IN ($3,$4) LIMIT 1",
+        [out.phone, out.seq, "pending", "sending"],
       );
       if (older.rowCount) throw new RetryableError("earlier_send_pending");
       if (out.state === "sending" || out.state === "uncertain") {
+        // Do not park the phone on delivery_uncertain — cancel and move on.
         await c.query(
-          "UPDATE outbox SET state='uncertain',error_code='reconcile_required' WHERE id=$1",
+          `UPDATE outbox
+              SET state='cancelled', format_state='ready', error_code='delivery_uncertain_released'
+            WHERE id=$1`,
           [id],
         );
-        return { ...out, state: "uncertain" };
+        const next = await c.query<{ id: string }>(
+          `SELECT id FROM outbox
+            WHERE phone=$1 AND state='pending' AND format_state='ready'
+            ORDER BY seq LIMIT 1`,
+          [out.phone],
+        );
+        if (next.rows[0]) {
+          const job = await this.s.queue.send(
+            c,
+            "send",
+            { id: next.rows[0].id },
+            out.phone,
+          );
+          await c.query("UPDATE outbox SET job_id=$2 WHERE id=$1", [
+            next.rows[0].id,
+            job,
+          ]);
+        }
+        return null;
       }
       if (out.mode !== "live") {
         await c.query(
@@ -1745,8 +2466,6 @@ export class Engine {
       return out;
     });
     if (!claimed) return;
-    if (claimed.state === "uncertain")
-      throw new RetryableError("delivery_uncertain");
     let providerId: string;
     try {
       let media: { bytes: Buffer; mime: string; filename: string } | undefined;

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import subprocess
 import time
 import urllib.parse
@@ -30,7 +31,18 @@ TAL = "972536662043@c.us"
 ISRAEL = "584152101"
 SESSION = "HAIM_YAHAD"
 PHOTO_WORDS = ("תמונה", "צלם", "צילום", "שלח תמונה", "מצרף תמונה", "photo")
-CONSENT_CLAIM = ("נפנה", "פנינו", "יצרנו קשר", "שולחים הודעה", "נשלח הודעה")
+# Past-tense / assertive claims only. "האם תרצה שנפנה…" is a consent ASK, not a claim.
+CONSENT_CLAIM = ("פנינו", "יצרנו קשר", "שולחים הודעה", "נשלח הודעה", "נפנה לצד השני עכשיו")
+
+
+def invents_contact_before_consent(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    # Permission questions are the allowed consent prompt.
+    if re.search(r"(?:האם|תרצ[הי]|רוצה|אפשר).{0,30}נפנה", t):
+        return False
+    return contains_any(t, CONSENT_CLAIM)
 
 
 def db(sql: str) -> str:
@@ -67,18 +79,55 @@ def db(sql: str) -> str:
 
 
 def admin_clear():
+    """Reset disposable test DB between flows (authorized clear-all)."""
     body = json.dumps({"confirm": "מחק הכל"}).encode()
     req = urllib.request.Request(
         f"{BOT}/admin/database/clear-all",
         data=body,
         headers={"Content-Type": "application/json", "x-admin-token": ADMIN},
     )
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=120) as r:
         return json.load(r)
 
 
+def clear_phone(phone: str):
+    """Best-effort single-phone wipe; falls back to cancel-phone if clear-phone fails."""
+    try:
+        body = json.dumps({"phone": phone, "confirm": "מחק מספר"}).encode()
+        req = urllib.request.Request(
+            f"{BOT}/admin/database/clear-phone",
+            data=body,
+            headers={"Content-Type": "application/json", "x-admin-token": ADMIN},
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)
+    except Exception:
+        body = json.dumps({"phone": phone, "confirm": "בטל פניות"}).encode()
+        req = urllib.request.Request(
+            f"{BOT}/admin/requests/cancel-phone",
+            data=body,
+            headers={"Content-Type": "application/json", "x-admin-token": ADMIN},
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)
+
+
 def waha_send(text: str):
-    body = json.dumps({"session": "default", "chatId": BOT_CHAT, "text": text}).encode()
+    """Deliver as Israel (0584152101) → bot (0543414386).
+
+    Prefer a working Israel-side WAHA session if one exists; otherwise inject
+    the inbound webhook the bot would receive from WAHA. Never send from the
+    bot session to the bot chatId — that is the wrong direction.
+    """
+    # Live inbound path: signed webhook as if WhatsApp delivered Israel's text.
+    return signed_webhook(f"972{ISRAEL}@c.us", text, session=SESSION)
+
+
+def waha_bot_reply_probe(text: str):
+    """Optional outbound probe: bot session → Israel's WhatsApp."""
+    body = json.dumps(
+        {"session": SESSION, "chatId": f"972{ISRAEL}@c.us", "text": text}
+    ).encode()
     req = urllib.request.Request(
         f"{WAHA}/api/sendText",
         data=body,
@@ -112,6 +161,11 @@ def signed_webhook(phone_chat: str, text: str, session: str = SESSION):
         return r.status, json.load(r)
 
 
+def pg_bool(value: str | None) -> bool:
+    """Postgres bool::text is 'true'/'false'; some casts still yield 't'/'f'."""
+    return (value or "").strip().lower() in ("t", "true", "1", "yes")
+
+
 def latest_request():
     row = db(
         "SELECT number,status,origin,verification_contacted::text,"
@@ -125,8 +179,8 @@ def latest_request():
         "number": int(num),
         "status": status,
         "origin": origin,
-        "verification_contacted": vc == "t",
-        "represents_both_parties": both == "t",
+        "verification_contacted": pg_bool(vc),
+        "represents_both_parties": pg_bool(both),
         "proposed": proposed or None,
         "run_date": run_date or None,
     }
@@ -153,8 +207,8 @@ def parties(n: int):
                 "settlement": sett or None,
                 "address": addr or None,
                 "floor": int(floor) if floor.isdigit() else (None if floor == "" else floor),
-                "approved": appr == "t",
-                "schedule_approved": sched == "t",
+                "approved": pg_bool(appr),
+                "schedule_approved": pg_bool(sched),
             }
         )
     return out
@@ -191,12 +245,13 @@ def searches():
 
 def outbox_for(phone_suffix: str, limit=3):
     rows = db(
-        f"SELECT left(text,280),state,COALESCE(request_id::text,''),created_at::text "
+        f"SELECT replace(replace(left(text,280), E'\\n', ' '), '|', '/'),"
+        f"state,COALESCE(request_id::text,''),created_at::text "
         f"FROM outbox WHERE phone LIKE '%{phone_suffix}' ORDER BY created_at DESC LIMIT {limit}"
     )
     out = []
     for line in rows.splitlines():
-        if not line:
+        if not line or "|" not in line:
             continue
         text, status, rid, created = line.split("|", 3)
         out.append({"text": text, "status": status, "request_id": rid or None, "created_at": created})
@@ -205,12 +260,13 @@ def outbox_for(phone_suffix: str, limit=3):
 
 def last_ai():
     row = db(
-        "SELECT left(COALESCE(m.text,''),80), left(COALESCE(m.ai_plan::text,''),400) "
+        "SELECT replace(replace(left(COALESCE(m.text,''),80), E'\\n', ' '), '|', '/'),"
+        "replace(replace(left(COALESCE(m.ai_plan::text,''),400), E'\\n', ' '), '|', '/') "
         "FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id "
         "WHERE c.phone LIKE '%584152101' OR m.chat_id LIKE '%584152101%' "
         "ORDER BY m.seq DESC LIMIT 1"
     )
-    if not row:
+    if not row or "|" not in row:
         return None
     text, plan = row.split("|", 1)
     return {"text": text, "ai_plan": plan}
@@ -283,13 +339,39 @@ def snapshot(label: str):
     return snap
 
 
-def send_and_wait(text: str, wait=16):
+def wait_processed(marker_substr: str, timeout=50):
+    """Wait until the inbound message is processed (and ideally has a reply)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        row = db(
+            "SELECT id::text, coalesce(reply,''), coalesce(error_code,''), "
+            "(processed_at is not null)::text "
+            f"FROM messages WHERE text LIKE '%{marker_substr.replace('|','')}%' "
+            "ORDER BY seq DESC LIMIT 1"
+        )
+        if row and "|" in row:
+            mid, reply, err, processed = row.split("|", 3)
+            if pg_bool(processed):
+                return {"id": mid, "reply": reply or None, "error": err or None}
+        time.sleep(1.2)
+    return None
+
+
+def send_and_wait(text: str, wait=8):
     before = now_db()
     print(f"\n>>> SEND: {text}", flush=True)
     res = waha_send(text)
-    time.sleep(wait)
-    reply = wait_reply(ISRAEL, before, timeout=35)
+    # Prefer durable DB processing over outbox timing — reply-manager can lag.
+    marker = text[-40:] if len(text) > 40 else text
+    processed = wait_processed(marker, timeout=55)
+    reply = wait_reply(ISRAEL, before, timeout=20)
+    if not reply and processed and processed.get("reply"):
+        reply = {"text": processed["reply"], "status": "db", "request_id": None, "created_at": now_db()}
     print(f"<<< REPLY: {(reply or {}).get('text')}", flush=True)
+    if processed and processed.get("error"):
+        print(f"<<< ERROR_CODE: {processed['error']}", flush=True)
+    # small settle for request rows after commit
+    time.sleep(wait)
     return res, reply
 
 
@@ -333,7 +415,7 @@ check(
 )
 check(
     "direct: does not invent contact/send before consent",
-    reply1 is not None and not contains_any(reply1.get("text") or "", CONSENT_CLAIM),
+    reply1 is not None and not invents_contact_before_consent(reply1.get("text") or ""),
     (reply1 or {}).get("text"),
 )
 recv = next((p for p in snap1["parties"] if p["role"] == "receiver"), None)
@@ -510,6 +592,23 @@ check(
     reply4b is not None and not contains_any(reply4b.get("text") or "", PHOTO_WORDS),
     (reply4b or {}).get("text"),
 )
+check(
+    "request: seek follow-up does not escalate to human/fault",
+    (snap4b.get("conversation") or {}).get("mode") == "bot"
+    and not contains_any(reply4b.get("text") or "", ("תקלה זמנית", "טיפול אנושי"))
+    and not (snap4b.get("ai") or {}).get("error"),
+    {"mode": (snap4b.get("conversation") or {}).get("mode"), "reply": (reply4b or {}).get("text")},
+)
+# Also inspect last processed error for this marker
+err4 = db(
+    "SELECT coalesce(error_code,'') FROM messages "
+    "WHERE text LIKE '%עדיף רחוב העלייה%' ORDER BY seq DESC LIMIT 1"
+)
+check(
+    "request: seek follow-up has no openai_failure_escalated",
+    "openai_failure" not in (err4 or ""),
+    err4,
+)
 report["flows"]["open_request"] = flow
 
 # ---------- Recording review ----------
@@ -574,8 +673,10 @@ failed = [c for c in report["checks"] if not c["ok"]]
 report["summary"] = {"passed": passed, "failed": len(failed), "total": len(report["checks"]), "ok": len(failed) == 0}
 report["failures"] = failed
 
-out_path = "/tmp/live-four-flows-report.json"
+out_path = f"/tmp/live-four-flows-report-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
 json.dump(report, open(out_path, "w"), ensure_ascii=False, indent=2)
+# also refresh the stable alias used by operators
+json.dump(report, open("/tmp/live-four-flows-report.json", "w"), ensure_ascii=False, indent=2)
 print("\nSUMMARY", json.dumps(report["summary"], ensure_ascii=False), flush=True)
 for f in failed:
     print("FAIL", f["check"], f.get("detail"), flush=True)

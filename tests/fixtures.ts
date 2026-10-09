@@ -10,11 +10,89 @@ import type {
   Item,
   Notice,
 } from "../src/domain/types.js";
-import type { Planner } from "../src/infrastructure/ai.js";
+import type {
+  AgentTurnInput,
+  AgentTurnResult,
+  Planner,
+  ReplyInput,
+  ReplyResult,
+} from "../src/infrastructure/ai.js";
 import type { Channel, Delivery } from "../src/infrastructure/waha.js";
 import { asItem } from "../src/application/commands.js";
 import { rulePlan } from "../src/application/rule-planner.js";
+import { emptyClaims } from "../src/domain/ai-guards.js";
+import { defaultRulesState } from "../src/domain/turn-facts.js";
+import { OUTSIDE } from "../src/domain/policies.js";
 import { setTimeout as delay } from "node:timers/promises";
+import type { ChangedField } from "../src/domain/field-map.js";
+import type { AgentToolResult } from "../src/application/agent-tools.js";
+
+/** Historical customer lines — production no longer emits them; the test double does. */
+export const PHOTO_FIRST = "בשמחה. כדי להמשיך, נא לשלוח תמונה של הפריט.";
+export const PHOTO_THANKS = "תודה, התמונה התקבלה.";
+export const HUMAN_REPLY = "העברתי את הפנייה לטיפול אנושי. נעדכן.";
+
+function toolMissingField(results: AgentToolResult[]): string | undefined {
+  for (let i = results.length - 1; i >= 0; i--) {
+    const missing = results[i]?.missing_required;
+    if (
+      missing &&
+      typeof missing === "object" &&
+      "field" in missing &&
+      typeof (missing as { field: unknown }).field === "string"
+    )
+      return (missing as { field: string }).field;
+  }
+}
+
+/** Phrase the next structural ask so integration tests can assert durable flow. */
+function cannedAgentReply(
+  ctx: Context,
+  commands: Command[],
+  results: AgentToolResult[],
+): string | null {
+  if (ctx.message.kind === "image") return PHOTO_THANKS;
+  if (
+    commands.some((command) => command.type === "escalate") ||
+    results.some((result) => result.human_reason || result.request_status === "human")
+  )
+    return HUMAN_REPLY;
+  if (commands.some((command) => command.type === "counterparty_candidate"))
+    return "האם התכוונת למסור לאיש הקשר הזה?";
+  if (
+    commands.some((command) => command.type === "seek") &&
+    !results.some((result) => result.request_number)
+  )
+    return "לא נמצא פריט מתאים.";
+  if (commands.some((command) => command.type === "interest"))
+    return "קודם נציג התאמה. נבקש מהמוסר תמונה.";
+  if (results.some((result) => result.request_status === "rejected")) {
+    const facts = commands.find((command) => command.type === "item_facts");
+    if (facts && "needs_disassembly" in facts && facts.needs_disassembly === true)
+      return "אין אצלנו פירוק והרכבה של ארונות. אפשר להעביר רק ארון קטן שניתן להעביר שלם.";
+    if (facts && "quantity" in facts && Number(facts.quantity) > 2)
+      return "אפשר עד שני פריטים בפנייה.";
+    return OUTSIDE;
+  }
+  const notices = results.reduce((sum, result) => sum + (result.notices_queued ?? 0), 0);
+  const field = toolMissingField(results);
+  if (field === "counterparty")
+    return "נא לשלוח מספר הטלפון או כרטיס איש קשר של הצד השני.";
+  if (field === "contact_counterparty" || notices > 0)
+    return "אשלח הודעת אימות לצד השני. נפנה לצד השני.";
+  if (field === "schedule_approved_date")
+    return "יום שלישי 15/09/2026. נא לאשר את המועד.";
+  const donate = commands.find((command) => command.type === "donate");
+  if (
+    donate &&
+    donate.type === "donate" &&
+    !donate.direct &&
+    !donate.counterparty_phone &&
+    !donate.counterparty_name
+  )
+    return PHOTO_FIRST;
+  return null;
+}
 export const log = { info: () => {}, warn: () => {}, error: () => {} };
 export const JPEG = Buffer.from([
   255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 255, 217,
@@ -43,7 +121,10 @@ export function config(extra: Partial<Config> = {}): Config {
 export class FakePlanner implements Planner {
   readonly plans = new Map<string, Plan>();
   readonly understood = new Map<string, boolean>();
+  /** Counts action-manager / decode plan() calls only. */
   calls = 0;
+  /** Counts reply-manager / phrase invocations. */
+  replyCalls = 0;
   fail = false;
   planDelayMs = 0;
   phraseNoticePrefix = "";
@@ -56,11 +137,14 @@ export class FakePlanner implements Planner {
     plan: Plan;
     metadata: Record<string, unknown>;
   }> {
-    this.calls++;
     if (this.fail) throw new Error("simulated_openai_timeout");
     if (this.planDelayMs) await delay(this.planDelayMs);
     const explicit = this.plans.get(ctx.message.id);
     const deterministic = rulePlan(ctx);
+    // Scripted plans count as AI decode. Pure rulePlan bridging does not —
+    // integration tests assert "without calling the AI planner" for openings
+    // that the deterministic rules already own.
+    if (explicit) this.calls++;
     const plan =
       explicit ??
       deterministic ??
@@ -68,6 +152,7 @@ export class FakePlanner implements Planner {
         commands: [{ type: "next" }],
         evidence: (ctx.message.transcript ?? ctx.message.text).slice(0, 2000),
       } satisfies Plan);
+    if (!explicit && !deterministic) this.calls++;
     return {
       understood: this.understood.get(ctx.message.id) ?? true,
       plan,
@@ -82,11 +167,80 @@ export class FakePlanner implements Planner {
     canonical: string,
     _ctx: Context,
   ): Promise<{ text: string; metadata: Record<string, unknown> }> {
-    this.calls++;
+    this.replyCalls++;
     if (this.fail) throw new Error("simulated_openai_timeout");
     return {
       text: this.phraseReplyText || this.managedReply || canonical,
       metadata: { test_double: true },
+    };
+  }
+  async reply(
+    _ctx: Context,
+    input: ReplyInput,
+  ): Promise<ReplyResult> {
+    this.replyCalls++;
+    if (this.fail) throw new Error("simulated_openai_timeout");
+    return {
+      text: this.phraseReplyText || this.managedReply || input.fallback || "",
+      claims: emptyClaims(),
+      metadata: { test_double: true },
+    };
+  }
+  async agentTurn(
+    ctx: Context,
+    input: AgentTurnInput,
+  ): Promise<AgentTurnResult> {
+    if (this.fail) throw new Error("simulated_openai_timeout");
+    if (this.planDelayMs) await delay(this.planDelayMs);
+    const maxToolCalls = input.maxToolCalls ?? 5;
+    const commands: Command[] = [];
+    const toolResults: AgentToolResult[] = [];
+    const changedFields: ChangedField[] = [];
+    let decodedMeta: Record<string, unknown> = { test_double: true };
+    if (maxToolCalls > 0) {
+      const decoded = await this.plan(ctx);
+      decodedMeta = decoded.metadata;
+      for (const command of decoded.plan.commands) {
+        if (command.type === "next") {
+          commands.push(command);
+          continue;
+        }
+        if (toolResults.length >= maxToolCalls) break;
+        const result = await input.executeTool(command);
+        commands.push(command);
+        toolResults.push(result);
+        changedFields.push(...result.changed_fields);
+      }
+    }
+    if (!commands.length) commands.push({ type: "next" });
+    const canned = cannedAgentReply(ctx, commands, toolResults);
+    const reply = await this.reply(ctx, {
+      rules: input.rules ?? defaultRulesState(),
+      commands,
+      results: toolResults.map((result) => ({
+        command: result.command.type,
+        ok: result.ok,
+        detail: result.error ? { error: result.error } : undefined,
+      })),
+      changed: changedFields,
+      boundary: null,
+      notices: [],
+      fallback:
+        this.managedReply || this.phraseReplyText || canned || "קיבלתי.",
+      guardFeedback: input.guardFeedback,
+    });
+    return {
+      text: reply.text,
+      claims: reply.claims,
+      commands,
+      toolResults,
+      changedFields,
+      metadata: {
+        test_double: true,
+        provider: "fake_agent_tools",
+        action_source: "ai_agent_tools",
+        ...decodedMeta,
+      },
     };
   }
   async phraseNotice(
@@ -187,6 +341,7 @@ export function sampleRequest(): Request {
     ],
     parties: [p("donor", "501111111"), p("receiver", "502222222")],
     photo_ids: [randomUUID()],
+    photo_status: "התקבלה",
     run_date: null,
     proposed_run_date: "2026-09-15",
     earliest_run_date: null,

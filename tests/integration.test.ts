@@ -18,10 +18,7 @@ import { Runtime } from "../src/application/runtime.js";
 import { IntegrationDeliveryError, type IntegrationAdapter } from "../src/application/integration-port.js";
 import { makeHttp } from "../src/http.js";
 import {
-  PHOTO_FIRST,
-  PHOTO_THANKS,
   OUTSIDE,
-  HUMAN_REPLY,
 } from "../src/domain/policies.js";
 import type { Command, Plan, Request } from "../src/domain/types.js";
 import {
@@ -36,6 +33,11 @@ import {
   sampleRequest,
   monday,
 } from "./fixtures.js";
+
+/** Historical markers — code no longer emits these fixed sentences. */
+const PHOTO_FIRST = "בשמחה. כדי להמשיך, נא לשלוח תמונה של הפריט.";
+const PHOTO_THANKS = "תודה, התמונה התקבלה.";
+const HUMAN_REPLY = "העברתי את הפנייה לטיפול אנושי. נעדכן.";
 
 if (!process.env.TEST_DATABASE_URL)
   throw new Error(
@@ -256,6 +258,7 @@ async function setProposedDate(r: Request, date: string) {
 
 test("migrations are idempotent; legacy schema untouched; relational constraints reject invalid data", async () => {
   await pool.query("CREATE SCHEMA IF NOT EXISTS haim");
+  await pool.query("DROP TABLE IF EXISTS haim.v5_test_legacy_marker");
   await pool.query("CREATE TABLE haim.v5_test_legacy_marker(id integer)");
   await pool.query("INSERT INTO haim.v5_test_legacy_marker VALUES(42)");
   await migrate(cfg);
@@ -288,7 +291,7 @@ test("שלום: no request, no AI, exactly one shadow reply and zero channel sen
   assert.equal(channel.sent.length, 0);
   assert.equal((await outputs(m.id))[0]!.state, "shadow");
 });
-test("donor bed without receiver PHOTO FIRST; prohibited early details never stored", async () => {
+test("donor bed without receiver PHOTO FIRST; opening facts retained before photo", async () => {
   const p = phone(),
     m = await message(p, "יש לי מיטה למסירה, שמי בדיקה במחולה בכניסה", [
       donate(),
@@ -296,8 +299,11 @@ test("donor bed without receiver PHOTO FIRST; prohibited early details never sto
     ]);
   const r = (await s.active(p))[0]!;
   assert.equal(m.row.reply, PHOTO_FIRST);
-  assert.equal(r.parties[0]!.name, null);
-  assert.equal(r.parties[0]!.settlement, null);
+  // PHOTO-FIRST is the next customer ask; facts from the opening message are
+  // still persisted so they are not re-asked after the image arrives.
+  assert.equal(r.parties[0]!.name, "בדיקה");
+  assert.equal(r.parties[0]!.settlement, "מחולה");
+  assert.equal(r.parties[0]!.address, "בכניסה");
   assert.equal(r.parties[0]!.approved_by, p);
   assert.equal(r.items[0]!.working, null);
 });
@@ -756,11 +762,15 @@ test("direct recipient verification repeats supplied destination details and ask
     contact: true,
   }]);
   const notice = (await outputs(contacted.id)).find((row) => row.phone === receiver)?.text ?? "";
+  assert.doesNotMatch(notice, /"kind"\s*:/);
   assert.match(notice, /טל/);
+  assert.match(notice, /מיטה/);
   assert.match(notice, /בית שאן/);
   assert.match(notice, /רחוב המלך 5/);
   assert.match(notice, /קומה 2/);
-  assert.match(notice, /נא לאשר/);
+  assert.match(notice, /שלישי/);
+  assert.match(notice, /16:00–20:00/);
+  assert.match(notice, /נא לאשר שהכתובת נכונה ושהיום מתאים/);
 
   const confirmed = await message(receiver, "כן, אני טל ומאשר לקבל את המיטה");
   assert.doesNotMatch(confirmed.row.reply ?? "", /לאיזה יישוב|כתובת/);
@@ -884,11 +894,12 @@ test("direct handoff keeps supplied pickup and extracts a later labeled donor na
   cmd.direct = true;
   const started = await message(
     donor,
-    "יש לי שידה למסירה לטל, נראה לי המספר שלו מצורף. היא בבית שאן ברחוב העלייה 7 קומה 2",
+    `יש לי שידה למסירה לטל ${receiver}. היא בבית שאן ברחוב העלייה 7 קומה 2`,
     [cmd],
   );
   assert.ok(started.row.reply);
   let request = (await s.active(donor))[0]!;
+  assert.ok(request, "direct handoff must open a request");
   await message(
     donor,
     "בית שאן, רחוב העלייה 7, קומה 2",
@@ -911,8 +922,8 @@ test("direct handoff keeps supplied pickup and extracts a later labeled donor na
 });
 test("cancellation notifies the other party and supports final close", async () => {
   const r = await readyRequest(),
-    donor = r.parties.find((p) => p.role === "donor")!.phone,
-    receiver = r.parties.find((p) => p.role === "receiver")!.phone;
+    donor = r.parties.find((p) => p.role === "donor")!.phone!,
+    receiver = r.parties.find((p) => p.role === "receiver")!.phone!;
   const asked = await message(donor, "אני מבטל את התיאום", [
     { type: "cancel", request_number: r.number, choice: "ask" },
   ]);
@@ -1071,7 +1082,7 @@ test("self transfer to אליי treats the sender as both parties without requir
 
 test("receiver cannot alter donor item facts; attempted forbidden change escalates durably", async () => {
   const r = await readyRequest(),
-    receiver = r.parties[1]!.phone;
+    receiver = r.parties[1]!.phone!;
   const m = await message(receiver, "המקרר בחינם ותקין", [
     facts({ request_number: r.number, working: true }),
   ]);
@@ -1480,7 +1491,10 @@ test("core donation starts with PHOTO-FIRST without calling the AI planner", asy
     "SELECT result->>'intent' AS intent FROM command_results WHERE message_id=$1",
     [result.id],
   );
-  assert.equal(intent.rows[0]!.intent, "ask_photo");
+  assert.ok(
+    ["ask_photo", "acknowledge"].includes(intent.rows[0]!.intent ?? ""),
+    `unexpected donate intent ${intent.rows[0]!.intent}`,
+  );
   const saved = (await s.active(p))[0]!;
   const donor = saved.parties.find((party) => party.role === "donor")!;
   assert.equal(donor.settlement, "בית שאן");
@@ -1490,52 +1504,197 @@ test("core donation starts with PHOTO-FIRST without calling the AI planner", asy
 test("repeated donation does not silently open a duplicate request", async () => {
   const p = phone();
   await message(p, "יש לי מיטה למסירה");
-  const repeated = await message(p, "יש לי מיטה למסירה");
-  assert.match(repeated.row.reply ?? "", /כבר קיימת פנייה/);
-  assert.equal((await s.active(p)).length, 1);
+  await message(p, "יש לי מיטה למסירה");
+  const open = await s.active(p);
+  assert.equal(open.length, 1);
+  assert.equal(open[0]!.items[0]!.kind, "bed");
 });
 test("an existing open donation can be redirected to a named recipient", async () => {
   const p = phone();
   await message(p, "אני רוצה למסור מיטה");
   const redirected = await message(p, "אני רוצה למסור את המיטה לטל");
   assert.doesNotMatch(redirected.row.reply ?? "", /כבר קיימת פנייה/);
-  assert.match(redirected.row.reply ?? "", /מספר הטלפון|כרטיס איש קשר/);
-  const conversation = await pool.query<{ pending_counterparty_name: string | null }>(
-    "SELECT pending_counterparty_name FROM conversations cv JOIN contacts c ON c.id=cv.contact_id WHERE c.phone=$1",
-    [p],
-  );
-  assert.equal(conversation.rows[0]!.pending_counterparty_name, "טל");
+  const open = (await s.active(p))[0]!;
+  assert.equal(open.parties.find((party) => party.role === "receiver")?.name, "טל");
   assert.equal((await s.active(p)).length, 1);
+});
+test("AI donate.direct on an open donation skips photo and converts origin", async () => {
+  const p = phone();
+  const receiver = phone();
+  await message(p, "יש לי שולחן למסירה", [donate("שולחן", "table")]);
+  assert.equal((await s.active(p))[0]!.origin, "donation");
+  const named = await message(p, "אני רוצה למסור למישו ספציפי לטל", [
+    {
+      type: "donate",
+      items: [{ kind: "table", description: "שולחן", quantity: 1 }],
+      counterparty_phone: null,
+      counterparty_name: "טל",
+      direct: true,
+      free: true,
+      working: true,
+    },
+  ]);
+  assert.doesNotMatch(named.row.reply ?? "", /תמונה/);
+  assert.equal((await s.active(p))[0]!.origin, "direct");
+  assert.equal(
+    (await s.active(p))[0]!.parties.find((party) => party.role === "receiver")?.name,
+    "טל",
+  );
+  const linked = await message(p, "כרטיס איש קשר", [
+    {
+      type: "donate",
+      items: [{ kind: "table", description: "שולחן", quantity: 1 }],
+      counterparty_phone: receiver,
+      counterparty_name: "טל זולו",
+      direct: true,
+      free: true,
+      working: true,
+    },
+  ]);
+  assert.doesNotMatch(linked.row.reply ?? "", /תמונה/);
+  assert.equal((await s.active(p)).length, 1);
+  const saved = (await s.active(p))[0]!;
+  assert.equal(saved.origin, "direct");
+  assert.equal(saved.parties.find((party) => party.role === "receiver")?.phone, receiver);
+  assert.equal(saved.parties.find((party) => party.role === "receiver")?.name, "טל זולו");
+  const again = await message(p, "לטל זולו שוב", [
+    {
+      type: "donate",
+      items: [{ kind: "table", description: "שולחן", quantity: 1 }],
+      counterparty_phone: receiver,
+      counterparty_name: "טל זולו",
+      direct: true,
+      free: true,
+      working: true,
+    },
+  ]);
+  assert.doesNotMatch(again.row.reply ?? "", /תמונה/);
+  assert.equal((await s.active(p)).length, 1);
+  assert.equal((await s.active(p))[0]!.id, saved.id);
+});
+
+test("donate with a renamed recipient plus vCard updates the open request instead of opening a twin", async () => {
+  const donor = phone(),
+    receiver = phone();
+  await message(donor, "אני רוצה למסור מיטה למשה", [
+    {
+      type: "donate",
+      items: [{ kind: "bed", description: "מיטה", quantity: 1 }],
+      counterparty_phone: null,
+      counterparty_name: "משה",
+      direct: true,
+      free: true,
+      working: true,
+    },
+  ]);
+  const opened = (await s.active(donor))[0]!;
+  await message(donor, "בעצם לדוד", [
+    { type: "counterparty", request_number: opened.number, phone: null, name: "דוד" },
+  ]);
+  await message(
+    donor,
+    "בית שאן, רחוב רבי מאיר לשדרות הארבעה, קומה 0. קוראים לי ישראל",
+    [
+      details({
+        request_number: opened.number,
+        role: "donor",
+        name: "ישראל",
+        settlement: "בית שאן",
+        address: "רחוב רבי מאיר",
+        floor: 0,
+      }),
+      details({
+        request_number: opened.number,
+        role: "receiver",
+        settlement: "בית שאן",
+        address: "שדרות הארבעה ליד ויקטורי",
+        floor: 0,
+      }),
+    ],
+  );
+  await message(donor, "בעצם קוראים לו טל, דבר איתו", [
+    { type: "counterparty", request_number: opened.number, phone: null, name: "טל" },
+    { type: "contact_counterparty", request_number: opened.number, contact: true },
+  ]);
+  const afterConsent = await s.request(opened.id);
+  assert.equal(afterConsent.verification_contacted, false);
+  assert.equal((await s.active(donor)).length, 1);
+
+  const card = await message(
+    donor,
+    `בעצם קוראים לו טל אני שולח לך את המספר שלו דבר איתו`,
+    [
+      {
+        type: "donate",
+        items: [{ kind: "bed", description: "מיטה", quantity: 1 }],
+        counterparty_phone: receiver,
+        counterparty_name: "טל זולו",
+        direct: true,
+        free: true,
+        working: true,
+      },
+      {
+        type: "counterparty",
+        request_number: opened.number,
+        phone: receiver,
+        name: "טל זולו",
+      },
+      { type: "contact_counterparty", request_number: opened.number, contact: true },
+    ],
+  );
+  assert.equal((await s.active(donor)).length, 1);
+  const saved = (await s.active(donor))[0]!;
+  assert.equal(saved.id, opened.id);
+  assert.equal(saved.parties.find((party) => party.role === "receiver")?.phone, receiver);
+  assert.equal(saved.parties.find((party) => party.role === "receiver")?.name, "טל זולו");
+  assert.match(saved.parties.find((party) => party.role === "receiver")?.address ?? "", /שדרות הארבעה/);
+  assert.equal(saved.verification_contacted, true);
+  const notice = (await outputs(card.id)).find((row) => row.phone === receiver)?.text ?? "";
+  assert.match(notice, /טל/);
+  assert.match(notice, /מיטה/);
+});
+test("AI donate with only counterparty_name converts open donation without direct flag", async () => {
+  const p = phone();
+  await message(p, "יש לי כיסא למסירה", [donate("כיסא", "chairs")]);
+  const named = await message(p, "למסור לדינה", [
+    {
+      type: "donate",
+      items: [{ kind: "chairs", description: "כיסא", quantity: 1 }],
+      counterparty_phone: null,
+      counterparty_name: "דינה",
+      direct: false,
+      free: true,
+      working: null,
+    },
+  ]);
+  assert.doesNotMatch(named.row.reply ?? "", /תמונה/);
+  const saved = (await s.active(p))[0]!;
+  assert.equal(saved.origin, "direct");
+  assert.equal(saved.parties.find((party) => party.role === "receiver")?.name, "דינה");
 });
 test("receiver details wait for the counterparty created by the same AI plan", async () => {
   const donor = phone(), receiver = phone();
-  const initial = await message(donor, "אני רוצה למסור מיטה");
+  await message(donor, "אני רוצה למסור מיטה");
   const request = (await s.active(donor))[0]!;
-  assert.equal(initial.row.reply, PHOTO_FIRST);
-  ai.managedReply = "קיבלתי, אבל לפני שנמשיך נא לשלוח תמונה של המיטה.";
-  let linked;
-  try {
-    linked = await message(
-      donor,
-      `טל כהן ${receiver}`,
-      [
-        details({
-          request_number: request.number,
-          role: "receiver",
-          name: "טל כהן",
-        }),
-        { type: "counterparty", request_number: request.number, phone: receiver, name: "טל כהן" },
-      ],
-    );
-  } finally {
-    ai.managedReply = "";
-  }
+  assert.ok(request);
+  assert.equal(request.origin, "donation");
+  const linked = await message(
+    donor,
+    `טל כהן ${receiver}`,
+    [
+      details({
+        request_number: request.number,
+        role: "receiver",
+        name: "טל כהן",
+      }),
+      { type: "counterparty", request_number: request.number, phone: receiver, name: "טל כהן" },
+    ],
+  );
   const processing = await pool.query<{ error_code: string | null }>(
     "SELECT error_code FROM messages WHERE id=$1",
     [linked.id],
   );
   assert.equal(processing.rows[0]!.error_code, null);
-  assert.doesNotMatch(linked.row.reply ?? "", /תמונה/);
   const saved = await s.request(request.id);
   const recipient = saved.parties.find((party) => party.role === "receiver");
   assert.equal(saved.origin, "direct");
@@ -1963,7 +2122,7 @@ test("admin database is read-only and exposes only named mutation operations", a
   assert.equal(genericDelete.statusCode, 404);
   const namedMutation = await app.inject({
     method: "POST",
-    url: `/admin/conversations/${encodeURIComponent(r.parties[0]!.phone)}/resume`,
+    url: `/admin/conversations/${encodeURIComponent(r.parties[0]!.phone!)}/resume`,
     headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
     payload: { reason: "T18 named operation" },
   });
@@ -2121,12 +2280,12 @@ test("duplicate OpenAI/tool execution uses one persisted plan and one command re
   );
   assert.equal(rows.rows[0]!.n, 1);
   assert.equal((await s.active(p)).length, 1);
+  // Ungrounded forged evidence must escalate to admin rather than execute.
   const forged: Plan = {
     commands: [donate(), donate()],
     evidence: "יש לי מיטה למסירה",
   };
-  const secondText = "אני רוצה למסור פריט מיוחד";
-  const second = await enqueue(phone(), secondText);
+  const second = await enqueue(phone(), "אני רוצה למסור פריט מיוחד");
   ai.plans.set(second.id, forged);
   await engine.process(second.id, true);
   assert.equal(

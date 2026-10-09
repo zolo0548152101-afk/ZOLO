@@ -1,4 +1,10 @@
-import { existsSync, readFileSync } from "node:fs";
+/**
+ * OpenAI Responses client. Customer turns use one agent + write tools.
+ * Notices still use the hosted reply prompt. Code never invents customer
+ * sentences and never runs free SQL.
+ */
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import OpenAI from "openai";
@@ -14,24 +20,38 @@ import {
   type Plan,
   type Request,
 } from "../domain/types.js";
-import { nextQuestion } from "../domain/policies.js";
 import { conversationLanguage } from "../domain/customer-language.js";
-import { rulePlan } from "../application/rule-planner.js";
+import {
+  conversationAlreadyIntroduced,
+  emptyClaims,
+  type ReplyClaims,
+} from "../domain/ai-guards.js";
+import {
+  buildStage1Facts,
+  buildStage2Facts,
+  defaultRulesState,
+  renderWriteMapMarkdown,
+  type ActionResultFact,
+  type NoticeFact,
+  type RulesState,
+  type TurnFacts,
+} from "../domain/turn-facts.js";
+import { PROGRAM_RULES_HE } from "../domain/program-rules.js";
+import {
+  noticeKeepsRequiredFacts,
+  resolveNoticeDraft,
+} from "../domain/notices.js";
+import type { ChangedField } from "../domain/field-map.js";
+import {
+  AGENT_WRITE_TOOLS,
+  agentFinalReplySchema,
+  parseAgentToolCall,
+  type AgentToolResult,
+} from "../application/agent-tools.js";
 
-const here = dirname(fileURLToPath(import.meta.url));
-function loadPrompt(name: string): string {
-  const candidates = [
-    join(process.cwd(), "prompts", name),
-    join(here, "../../prompts", name),
-    join(here, "../../../prompts", name),
-  ];
-  for (const path of candidates) {
-    if (existsSync(path)) return readFileSync(path, "utf8");
-  }
-  throw new Error(`missing_prompt_file:${name}`);
+export function promptSha(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
 }
-const DECODE_PROMPT_TEXT = loadPrompt("decode.txt");
-const PHRASE_PROMPT_TEXT = loadPrompt("phrase.txt");
 
 export interface DecodeResult {
   understood: boolean;
@@ -39,287 +59,174 @@ export interface DecodeResult {
   metadata: Record<string, unknown>;
 }
 
+export interface ReplyResult {
+  text: string;
+  claims: ReplyClaims;
+  metadata: Record<string, unknown>;
+}
+
+export interface ReplyInput {
+  rules: RulesState;
+  commands: unknown[];
+  results: ActionResultFact[];
+  changed: ChangedField[];
+  boundary: TurnFacts["this_turn"]["boundary"];
+  notices: NoticeFact[];
+  /** Only used when AI is disabled — never a customer template under normal path. */
+  fallback?: string;
+  guardFeedback?: { rejected_claims: string[] };
+}
+
+export interface AgentTurnInput {
+  rules?: RulesState;
+  executeTool: (command: Command) => Promise<AgentToolResult>;
+  guardFeedback?: { rejected_claims: string[] };
+  maxToolCalls?: number;
+}
+
+export interface AgentTurnResult {
+  text: string;
+  claims: ReplyClaims;
+  commands: Command[];
+  toolResults: AgentToolResult[];
+  changedFields: ChangedField[];
+  metadata: Record<string, unknown>;
+}
+
 export interface Planner {
-  plan(context: Context): Promise<DecodeResult>;
-  phraseReply(
-    canonical: string,
-    context: Context,
-  ): Promise<{ text: string; metadata: Record<string, unknown> }>;
+  plan(context: Context, rules?: RulesState): Promise<DecodeResult>;
+  reply(context: Context, input: ReplyInput): Promise<ReplyResult>;
+  agentTurn(context: Context, input: AgentTurnInput): Promise<AgentTurnResult>;
   phraseNotice(
     context: Context,
     notice: Notice,
     request: Request | null,
+    facts?: Record<string, unknown>,
   ): Promise<{ text: string; metadata: Record<string, unknown> }>;
   close(): Promise<void>;
 }
 
-const decodeResponseSchema = z
-  .object({
-    understood: z.boolean().default(true),
-    commands: z.array(z.unknown()).default([]),
-    evidence: z.string().default(""),
-    reply: z.string().optional(),
-  })
-  .passthrough();
+const decodeResponseSchema = z.strictObject({
+  commands: z.array(z.unknown()).min(1).max(5),
+  evidence: z.string().max(2000),
+});
+const decodeSchemaSource = z.strictObject({
+  commands: z.array(commandSchema).min(1).max(5),
+  evidence: z.string().max(2000),
+});
 
-/** Legacy hosted-prompt shape still accepted while the decode prompt is rolled out. */
-const managedResponseSchema = z
-  .object({
-    reply: z.string().default(""),
-    service: z
-      .enum(["furniture_transport", "sukkah", "unclear"])
-      .default("unclear"),
-    intent: z
-      .enum([
-        "donate",
-        "request",
-        "transport",
-        "self_move",
-        "cancellation",
-        "unclear",
-      ])
-      .default("unclear"),
-    updates: z.record(z.string(), z.unknown()).default({}),
-    actions: z.record(z.string(), z.unknown()).default({}),
-    understood: z.boolean().optional(),
-    commands: z.array(z.unknown()).optional(),
-    evidence: z.string().optional(),
-  })
-  .passthrough();
+type JsonSchemaObject = Record<string, unknown>;
 
-const boolValue = (
-  updates: Record<string, unknown>,
-  key: string,
-): boolean | null => {
-  const value = updates[key];
-  if (typeof value === "boolean") return value;
-  if (typeof value !== "string") return null;
-  if (/^(?:כן|yes|true|1)$/i.test(value.trim())) return true;
-  if (/^(?:לא|no|false|0)$/i.test(value.trim())) return false;
-  return null;
-};
-
-const action = (actions: Record<string, unknown>, key: string): boolean =>
-  actions[key] === true || actions[key] === "true" || actions[key] === "כן";
-
-export function managedNeedsHuman(
-  actions: Record<string, unknown>,
-  updates: Record<string, unknown>,
-): boolean {
-  return (
-    action(actions, "needs_human") ||
-    boolValue(updates, "נדרש טיפול אנושי") === true
-  );
+/** Responses strict JSON Schema requires all object properties to be required. */
+function toResponsesStrictSchema(source: JsonSchemaObject): JsonSchemaObject {
+  const visit = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(visit);
+    if (!value || typeof value !== "object") return value;
+    const node = value as JsonSchemaObject;
+    const result: JsonSchemaObject = {};
+    for (const [key, child] of Object.entries(node)) {
+      if (key === "$schema") continue;
+      if (key === "oneOf") result.anyOf = visit(child);
+      else result[key] = visit(child);
+    }
+    if (result.type === "object" && result.properties && typeof result.properties === "object") {
+      const properties = result.properties as JsonSchemaObject;
+      const wasRequired = new Set(
+        Array.isArray(node.required)
+          ? node.required.filter((field): field is string => typeof field === "string")
+          : [],
+      );
+      for (const [key, property] of Object.entries(properties)) {
+        if (!wasRequired.has(key)) properties[key] = { anyOf: [property, { type: "null" }] };
+      }
+      result.required = Object.keys(properties);
+      result.additionalProperties = false;
+    }
+    return result;
+  };
+  return visit(source) as JsonSchemaObject;
 }
+
+const decodeOutputJsonSchema = toResponsesStrictSchema(
+  z.toJSONSchema(decodeSchemaSource) as JsonSchemaObject,
+);
+
+const agentFinalOutputJsonSchema = toResponsesStrictSchema(
+  z.toJSONSchema(agentFinalReplySchema) as JsonSchemaObject,
+);
 
 function asCommands(raw: unknown[]): Command[] {
   const out: Command[] = [];
   for (const entry of raw.slice(0, 5)) {
-    const parsed = commandSchema.safeParse(entry);
+    const parsed = commandSchema.safeParse(normalizeWireCommand(entry));
     if (parsed.success) out.push(parsed.data);
   }
   return out;
 }
 
-/**
- * Map a decode model payload into a validated Plan.
- * Prefer an explicit commands array. Fall back to legacy updates/actions only
- * for a few safe mappings while the hosted decode prompt is being published.
- */
+function normalizeWireCommand(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const command = { ...(raw as Record<string, unknown>) };
+  if (command.type === "donate") {
+    if (command.counterparty_name === null) delete command.counterparty_name;
+    if (command.direct === null) delete command.direct;
+  }
+  return command;
+}
+
 export function translate(
   payload: unknown,
-  ctx: Context,
+  _ctx: Context,
   text: string,
 ): { understood: boolean; plan: Plan } {
-  const decode = decodeResponseSchema.safeParse(payload);
-  if (decode.success && Array.isArray(decode.data.commands) && decode.data.commands.length) {
-    const commands = asCommands(decode.data.commands);
-    if (commands.length) {
-      return {
-        understood: decode.data.understood !== false,
-        plan: planSchema.parse({
-          commands,
-          evidence: (decode.data.evidence || text).slice(0, 2000),
-        }),
-      };
-    }
-  }
-
-  if (decode.success && decode.data.understood === false) {
-    return {
-      understood: false,
-      plan: { commands: [{ type: "next" }], evidence: text.slice(0, 2000) },
-    };
-  }
-
-  const managed = managedResponseSchema.safeParse(payload);
-  if (!managed.success) {
-    return {
-      understood: false,
-      plan: { commands: [{ type: "next" }], evidence: text.slice(0, 2000) },
-    };
-  }
-
-  if (managed.data.understood === false || managed.data.intent === "unclear") {
-    return {
-      understood: false,
-      plan: { commands: [{ type: "next" }], evidence: text.slice(0, 2000) },
-    };
-  }
-
-  if (managed.data.commands?.length) {
-    const commands = asCommands(managed.data.commands);
-    if (commands.length) {
-      return {
-        understood: true,
-        plan: planSchema.parse({
-          commands,
-          evidence: (managed.data.evidence || text).slice(0, 2000),
-        }),
-      };
-    }
-  }
-
-  const commands: Command[] = [];
-  const updates = managed.data.updates;
-  const actions = managed.data.actions;
-  const open = ctx.requests.find(
-    (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
-  );
-  const requestNumber = open?.number ?? null;
-
-  if (managedNeedsHuman(actions, updates)) {
-    commands.push({
-      type: "escalate",
-      request_number: requestNumber,
-      reason: "unclear",
-    });
-  } else if (action(actions, "approve_schedule") || updates["מועד"] || updates["proposed_run_date"]) {
-    const date =
-      (typeof updates["proposed_run_date"] === "string" &&
-        /^\d{4}-\d{2}-\d{2}$/.test(updates["proposed_run_date"])
-        ? updates["proposed_run_date"]
-        : null) ??
-      open?.proposed_run_date?.slice(0, 10) ??
-      null;
-    if (date && requestNumber)
-      commands.push({ type: "approve_schedule", request_number: requestNumber, date });
-  } else if (
-    action(actions, "approve_self") ||
-    boolValue(updates, "אישור") === true ||
-    /(?:מאשר|מאשרת)/u.test(text)
-  ) {
-    if (requestNumber)
-      commands.push({ type: "approve_self", request_number: requestNumber });
-  }
-
-  if (!commands.length) commands.push({ type: "next" });
+  const decoded = decodeResponseSchema.safeParse(payload);
+  if (!decoded.success) throw new AppError("invalid_action_plan");
+  const commands = asCommands(decoded.data.commands);
+  if (commands.length !== decoded.data.commands.length)
+    throw new AppError("invalid_action_plan");
   return {
     understood: true,
     plan: planSchema.parse({
       commands,
-      evidence: (managed.data.evidence || text).slice(0, 2000),
+      evidence: decoded.data.evidence || text.slice(0, 2000),
     }),
   };
 }
 
-function snapshotForDecode(ctx: Context) {
-  const open = ctx.requests.filter(
-    (r) => !["coordinated", "closed", "cancelled", "rejected"].includes(r.status),
-  );
-  const selected =
-    open.find((r) => r.id === ctx.conversation.selected_request_id) ?? open[0] ?? null;
-  return {
-    conversation: ctx.conversation,
-    selected_request: selected
-      ? {
-          number: selected.number,
-          status: selected.status,
-          origin: selected.origin,
-          proposed_run_date: selected.proposed_run_date,
-          verification_contacted: selected.verification_contacted,
-          parties: selected.parties,
-          items: selected.items,
-        }
-      : null,
-    open_requests: open.map((r) => ({
-      number: r.number,
-      status: r.status,
-      origin: r.origin,
-    })),
-    missing: selected
-      ? nextQuestion(selected, ctx.conversation.phone).text
-      : null,
-    history: ctx.history,
-  };
+function requireHosted(
+  id: string | undefined,
+  version: string | undefined,
+  kind: "action" | "reply" | "agent",
+): { id: string; version: string } {
+  if (!id?.trim() || !version?.trim())
+    throw new AppError(`missing_hosted_${kind}_prompt`);
+  return { id: id.trim(), version: version.trim() };
 }
 
-type PromptSource =
-  | { mode: "hosted"; id: string; version: string }
-  | { mode: "git"; instructions: string };
-
-function decodePromptSource(c: Config): PromptSource {
-  if (c.OPENAI_DECODE_PROMPT_ID)
-    return {
-      mode: "hosted",
-      id: c.OPENAI_DECODE_PROMPT_ID,
-      version: c.OPENAI_DECODE_PROMPT_VERSION || "1",
-    };
-  // Do not fall back to the legacy phrasing hosted prompt — it fights decode.
-  // OpenAI is also deprecating reusable prompt objects; git instructions are
-  // the supported production path.
-  return { mode: "git", instructions: DECODE_PROMPT_TEXT };
+function agentHosted(c: Config): { id: string; version: string } {
+  const id = c.OPENAI_AGENT_PROMPT_ID || c.OPENAI_ACTION_PROMPT_ID;
+  const version = c.OPENAI_AGENT_PROMPT_VERSION || c.OPENAI_ACTION_PROMPT_VERSION;
+  return requireHosted(id, version, "agent");
 }
 
-function phrasePromptSource(c: Config, canonical: string): PromptSource {
-  if (c.OPENAI_PHRASE_PROMPT_ID)
-    return {
-      mode: "hosted",
-      id: c.OPENAI_PHRASE_PROMPT_ID,
-      version: c.OPENAI_PHRASE_PROMPT_VERSION || "1",
-    };
-  return {
-    mode: "git",
-    instructions: PHRASE_PROMPT_TEXT.replace("{{canonical}}", canonical),
-  };
-}
-
-function extractPhraseText(raw: string, fallback: string): string {
-  const trimmed = raw.trim();
-  if (!trimmed) return fallback;
-  try {
-    const parsed = managedResponseSchema.safeParse(JSON.parse(trimmed));
-    if (parsed.success && parsed.data.reply.trim())
-      return parsed.data.reply.trim();
-    const loose = JSON.parse(trimmed) as { reply?: string; text?: string };
-    const fromLoose = (loose.reply ?? loose.text ?? "").trim();
-    if (fromLoose) return fromLoose;
-  } catch {
-    /* plain text from git phrase instructions */
+function loadAgentInstructions(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(process.cwd(), "prompts/haim-agent.he.md"),
+    join(here, "../../prompts/haim-agent.he.md"),
+    join(here, "../../../prompts/haim-agent.he.md"),
+  ];
+  for (const path of candidates) {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      /* try next */
+    }
   }
-  return trimmed;
+  throw new AppError("missing_agent_prompt_file");
 }
 
-function phraseUserContent(mode: PromptSource["mode"], canonical: string, ctx: Context): string {
-  const lang = conversationLanguage(ctx);
-  const languageLine =
-    lang === "he"
-      ? ""
-      : `\nCustomer language: ${lang}. Return the same meaning in that language only.`;
-  if (mode === "git")
-    return `נסח מחדש בלבד את המשפט המחייב. החזר טקסט בלבד, בלי JSON.${languageLine}`;
-  return JSON.stringify({
-    phrase_instructions: PHRASE_PROMPT_TEXT.replace("{{canonical}}", canonical),
-    customer_message: {
-      current_message: `נסח מחדש בלבד: ${canonical}${languageLine}`,
-      recent_history: ctx.history,
-      has_location: false,
-    },
-    sender_phone: ctx.conversation.phone,
-    existing_record: { canonical },
-    ...(lang === "he" ? {} : { customer_language: lang }),
-  });
-}
+const AGENT_INSTRUCTIONS = loadAgentInstructions();
 
 const OPENING_COMMANDS = new Set(["donate", "receive_from_donor", "seek"]);
 
@@ -332,11 +239,6 @@ function hasOpenRequest(ctx: Context): boolean {
   );
 }
 
-/**
- * AI decode is primary only when its commands can actually run.
- * Bare details/approvals with no open request are not actionable openings —
- * they must not override rulePlan's donate/seek for a new conversation.
- */
 export function actionableAiPlan(
   translated: { understood: boolean; plan: Plan },
   ctx: Context,
@@ -350,21 +252,35 @@ export function actionableAiPlan(
   return commands.some((command) => OPENING_COMMANDS.has(command.type));
 }
 
-/** Prefer rulePlan when it opens a flow and AI only returned follow-up facts. */
+/** Action manager owns the plan. No rule-planner bridge. */
 export function selectDecodePlan(
   translated: { understood: boolean; plan: Plan },
-  deterministic: Plan | null,
-  ctx: Context,
+  _deterministic: Plan | null,
+  _ctx: Context,
 ): { plan: Plan; useAi: boolean; understood: boolean } {
-  const useAi = actionableAiPlan(translated, ctx);
-  if (useAi) return { plan: translated.plan, useAi: true, understood: true };
-  if (deterministic)
-    return { plan: deterministic, useAi: false, understood: true };
   return {
     plan: translated.plan,
-    useAi: false,
+    useAi: translated.understood,
     understood: translated.understood,
   };
+}
+
+function collectFunctionCalls(
+  output: Array<{ type: string; [key: string]: unknown }>,
+): Array<{ call_id: string; name: string; arguments: string }> {
+  const calls: Array<{ call_id: string; name: string; arguments: string }> = [];
+  for (const item of output) {
+    if (item.type !== "function_call") continue;
+    const callId = typeof item.call_id === "string" ? item.call_id : "";
+    const name = typeof item.name === "string" ? item.name : "";
+    const args =
+      typeof item.arguments === "string"
+        ? item.arguments
+        : JSON.stringify(item.arguments ?? {});
+    if (!callId || !name) continue;
+    calls.push({ call_id: callId, name, arguments: args });
+  }
+  return calls;
 }
 
 export class OpenAIPlanner implements Planner {
@@ -381,20 +297,237 @@ export class OpenAIPlanner implements Planner {
     // The OpenAI client has no lifecycle resources that need explicit shutdown.
   }
 
-  async plan(ctx: Context): Promise<DecodeResult> {
+  async agentTurn(ctx: Context, input: AgentTurnInput): Promise<AgentTurnResult> {
     const text = ctx.message.transcript ?? ctx.message.text;
     if (!this.c.AI_ENABLED) {
-      const deterministic = rulePlan(ctx);
-      if (deterministic)
-        return {
-          understood: true,
-          plan: deterministic,
-          metadata: {
-            provider: "rules",
-            ai_enabled: false,
-            action_source: "rules_ai_disabled",
+      return {
+        text: "קיבלתי.",
+        claims: emptyClaims(),
+        commands: [{ type: "next" }],
+        toolResults: [],
+        changedFields: [],
+        metadata: {
+          provider: "rules",
+          ai_enabled: false,
+          action_source: "unclear_ai_disabled",
+        },
+      };
+    }
+    const started = Date.now();
+    const hosted = agentHosted(this.c);
+    const rulesState = input.rules ?? defaultRulesState(this.c.TRANSPORT_CAPACITY);
+    const facts = buildStage1Facts({
+      ctx,
+      rules: rulesState,
+      alreadyIntroduced: conversationAlreadyIntroduced(ctx.history),
+      customerLanguage: conversationLanguage(ctx),
+    });
+    const allowedSaved: string[] = [];
+    const userPayload: Record<string, unknown> = {
+      history: facts.history,
+      current_message: facts.current_message,
+      sender_phone: facts.sender_phone,
+      contacts: facts.contacts,
+      has_location: facts.has_location,
+      media_kind: facts.media_kind,
+      customer_language: facts.customer_language,
+      already_introduced: facts.already_introduced,
+      state: facts.state,
+      rules: facts.rules,
+      program_rules: PROGRAM_RULES_HE,
+      completeness: facts.this_turn.completeness,
+      data_map: facts.data_map || renderWriteMapMarkdown(),
+      allowed_saved: allowedSaved,
+      ...(input.guardFeedback
+        ? { guard_feedback: input.guardFeedback }
+        : {}),
+    };
+
+    const maxToolCalls = Math.min(Math.max(input.maxToolCalls ?? 5, 0), 5);
+    const commands: Command[] = [];
+    const toolResults: AgentToolResult[] = [];
+    const changedFields: ChangedField[] = [];
+    const rounds: unknown[] = [];
+    const tools = maxToolCalls > 0 ? AGENT_WRITE_TOOLS : undefined;
+
+    // The published Agent prompt is the source of truth. Keep the local full
+    // prompt as a safe fallback while AGENT_PROMPT_ID is not configured.
+    const agentInstructions = this.c.OPENAI_AGENT_PROMPT_ID
+      ? undefined
+      : AGENT_INSTRUCTIONS;
+    let response = await this.client.responses.create({
+      prompt: {
+        id: hosted.id,
+        version: hosted.version,
+      },
+      ...(agentInstructions ? { instructions: agentInstructions } : {}),
+      ...(tools ? { tools } : {}),
+      text: {
+        format: {
+          type: "json_schema",
+          name: "haim_agent_reply",
+          strict: true,
+          schema: agentFinalOutputJsonSchema,
+        },
+      },
+      input: [
+        {
+          role: "user",
+          content: JSON.stringify(userPayload),
+        },
+      ],
+    });
+    rounds.push({
+      response_id: response.id,
+      output_text: response.output_text,
+      output_types: response.output.map((item) => item.type),
+    });
+
+    let toolCalls = 0;
+    while (toolCalls < maxToolCalls) {
+      const calls = collectFunctionCalls(
+        response.output as unknown as Array<{
+          type: string;
+          [key: string]: unknown;
+        }>,
+      );
+      if (!calls.length) break;
+
+      const toolOutputs: Array<{
+        type: "function_call_output";
+        call_id: string;
+        output: string;
+      }> = [];
+
+      for (const call of calls) {
+        if (toolCalls >= maxToolCalls) break;
+        toolCalls += 1;
+        let command: Command;
+        let result: AgentToolResult;
+        try {
+          command = parseAgentToolCall(call.name, call.arguments);
+          if (command.type === "next") {
+            result = {
+              ok: true,
+              command,
+              changed_fields: [],
+              request_number: null,
+              request_status: null,
+              missing_required: null,
+              notices_queued: 0,
+            };
+          } else {
+            result = await input.executeTool(command);
+          }
+        } catch (error) {
+          command = {
+            type: "next",
+          };
+          result = {
+            ok: false,
+            command: { type: call.name as Command["type"] } as Command,
+            changed_fields: [],
+            request_number: null,
+            request_status: null,
+            missing_required: null,
+            notices_queued: 0,
+            error:
+              error instanceof Error
+                ? error.message.slice(0, 200)
+                : "tool_failed",
+          };
+        }
+        commands.push(command);
+        toolResults.push(result);
+        for (const field of result.changed_fields) {
+          changedFields.push(field);
+          const path = field.role
+            ? `${field.table}.${field.column}:${field.role}`
+            : `${field.table}.${field.column}`;
+          if (!allowedSaved.includes(path)) allowedSaved.push(path);
+        }
+        toolOutputs.push({
+          type: "function_call_output",
+          call_id: call.call_id,
+          output: JSON.stringify(result),
+        });
+      }
+
+      response = await this.client.responses.create({
+        previous_response_id: response.id,
+        prompt: {
+          id: hosted.id,
+          version: hosted.version,
+        },
+        ...(agentInstructions ? { instructions: agentInstructions } : {}),
+        ...(tools ? { tools } : {}),
+        text: {
+          format: {
+            type: "json_schema",
+            name: "haim_agent_reply",
+            strict: true,
+            schema: agentFinalOutputJsonSchema,
           },
-        };
+        },
+        input: toolOutputs,
+      });
+      rounds.push({
+        response_id: response.id,
+        output_text: response.output_text,
+        output_types: response.output.map((item) => item.type),
+        tool_calls_so_far: toolCalls,
+      });
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(response.output_text);
+    } catch {
+      throw new AppError("invalid_agent_response");
+    }
+    const parsed = agentFinalReplySchema.safeParse(payload);
+    if (!parsed.success) throw new AppError("invalid_agent_response");
+
+    if (!commands.length) commands.push({ type: "next" });
+
+    return {
+      text: parsed.data.reply,
+      claims: parsed.data.claims,
+      commands,
+      toolResults,
+      changedFields,
+      metadata: {
+        provider: "openai_responses_agent",
+        prompt_mode: "hosted",
+        prompt_id: hosted.id,
+        prompt_version: hosted.version,
+        model: response.model ?? this.c.OPENAI_MODEL,
+        action_source: "ai_agent_tools",
+        response_id: response.id,
+        elapsed_ms: Date.now() - started,
+        usage: response.usage,
+        tool_call_count: toolCalls,
+        claims: parsed.data.claims,
+        model_input: {
+          prompt_mode: "hosted",
+          prompt_id: hosted.id,
+          prompt_version: hosted.version,
+          payload: userPayload,
+        },
+        model_output: {
+          raw: response.output_text,
+          parsed: payload,
+          rounds,
+        },
+        raw_output: response.output_text,
+        customer_message: text.slice(0, 500),
+      },
+    };
+  }
+
+  async plan(ctx: Context, rules?: RulesState): Promise<DecodeResult> {
+    const text = ctx.message.transcript ?? ctx.message.text;
+    if (!this.c.AI_ENABLED) {
       return {
         understood: false,
         plan: { commands: [{ type: "next" }], evidence: text.slice(0, 2000) },
@@ -406,39 +539,54 @@ export class OpenAIPlanner implements Planner {
       };
     }
     const started = Date.now();
-    const snapshot = snapshotForDecode(ctx);
-    const source = decodePromptSource(this.c);
+    const hosted = requireHosted(
+      this.c.OPENAI_ACTION_PROMPT_ID,
+      this.c.OPENAI_ACTION_PROMPT_VERSION,
+      "action",
+    );
+    const rulesState = rules ?? defaultRulesState(this.c.TRANSPORT_CAPACITY);
+    const facts = buildStage1Facts({
+      ctx,
+      rules: rulesState,
+      alreadyIntroduced: conversationAlreadyIntroduced(ctx.history),
+      customerLanguage: conversationLanguage(ctx),
+    });
+    // Facts travel in the user JSON payload. Prompt variables are only sent
+    // after they are declared on the hosted prompt (dashboard); undeclared
+    // variables cause a 400 from the Responses API.
     const userPayload = {
-      customer_message: {
-        current_message: text,
-        recent_history: ctx.history,
-        contacts: ctx.message.contacts,
-        has_location: ctx.message.location !== null,
-      },
-      sender_phone: ctx.conversation.phone,
-      existing_record: snapshot,
+      history: facts.history,
+      current_message: facts.current_message,
+      sender_phone: facts.sender_phone,
+      contacts: facts.contacts,
+      has_location: facts.has_location,
+      media_kind: facts.media_kind,
+      customer_language: facts.customer_language,
+      state: facts.state,
+      rules: facts.rules,
+      program_rules: PROGRAM_RULES_HE,
+      completeness: facts.this_turn.completeness,
+      data_map: facts.data_map || renderWriteMapMarkdown(),
     };
     const response = await this.client.responses.create({
-      model: this.c.OPENAI_MODEL,
-      ...(source.mode === "hosted"
-        ? { prompt: { id: source.id, version: source.version } }
-        : {
-            instructions: source.instructions,
-            text: { format: { type: "json_object" as const } },
-          }),
+      prompt: {
+        id: hosted.id,
+        version: hosted.version,
+      },
+      text: {
+        format: {
+          type: "json_schema",
+          name: "haim_action_plan",
+          strict: true,
+          schema: decodeOutputJsonSchema,
+        },
+      },
       input: [
         {
           role: "user",
-          content:
-            source.mode === "git"
-              ? `Return JSON only for this decode request:\n${JSON.stringify(userPayload)}`
-              : JSON.stringify({
-                  decode_instructions: DECODE_PROMPT_TEXT,
-                  ...userPayload,
-                }),
+          content: JSON.stringify(userPayload),
         },
       ],
-      reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },
     });
     let payload: unknown;
     try {
@@ -447,74 +595,131 @@ export class OpenAIPlanner implements Planner {
       throw new AppError("invalid_managed_prompt_response");
     }
     const translated = translate(payload, ctx, text);
-    // AI decode is primary when it returns runnable commands. rulePlan remains
-    // the safety net for unclear/empty AI output and for opening turns where
-    // the model returned only details without donate/seek.
-    const deterministic = rulePlan(ctx);
-    const selected = selectDecodePlan(translated, deterministic, ctx);
-    const { plan, useAi, understood } = selected;
     return {
-      understood,
-      plan,
+      understood: translated.understood,
+      plan: translated.plan,
       metadata: {
         provider: "openai_responses_decode",
-        prompt_mode: source.mode,
-        prompt_id: source.mode === "hosted" ? source.id : "git:prompts/decode.txt",
-        prompt_version: source.mode === "hosted" ? source.version : "git",
-        model: this.c.OPENAI_MODEL,
-        action_source: useAi
-          ? "ai_decode"
-          : deterministic
-            ? "ai_decode_bridged_rules"
-            : translated.understood === false
-              ? "ai_decode_unclear"
-              : "ai_decode",
-        understood,
-        bridged_rules: !useAi && Boolean(deterministic),
+        prompt_mode: "hosted",
+        prompt_id: hosted.id,
+        prompt_version: hosted.version,
+        model: response.model ?? this.c.OPENAI_MODEL,
+        action_source: "ai_action_manager",
+        understood: translated.understood,
+        bridged_rules: false,
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,
+        model_input: {
+          prompt_mode: "hosted",
+          prompt_id: hosted.id,
+          prompt_version: hosted.version,
+          payload: userPayload,
+        },
+        model_output: {
+          raw: response.output_text,
+          parsed: payload,
+        },
+        raw_output: response.output_text,
       },
     };
   }
 
-  async phraseReply(
-    canonical: string,
-    ctx: Context,
-  ): Promise<{ text: string; metadata: Record<string, unknown> }> {
-    if (!this.c.AI_ENABLED)
+  async reply(ctx: Context, input: ReplyInput): Promise<ReplyResult> {
+    if (!this.c.AI_ENABLED) {
       return {
-        text: canonical,
-        metadata: { provider: "rules", ai_enabled: false, action_source: "canonical" },
+        text: input.fallback?.trim() || "קיבלתי.",
+        claims: emptyClaims(),
+        metadata: { provider: "fallback", ai_enabled: false },
       };
+    }
     const started = Date.now();
-    const source = phrasePromptSource(this.c, canonical);
+    const hosted = agentHosted(this.c);
+    const facts = buildStage2Facts({
+      ctx,
+      rules: input.rules,
+      alreadyIntroduced: conversationAlreadyIntroduced(ctx.history),
+      customerLanguage: conversationLanguage(ctx),
+      commands: input.commands,
+      results: input.results,
+      changed: input.changed,
+      boundary: input.boundary,
+      notices: input.notices,
+    });
+    const allowedSaved = input.changed.map((field) =>
+      field.role
+        ? `${field.table}.${field.column}:${field.role}`
+        : `${field.table}.${field.column}`,
+    );
+    const userPayload = {
+      history: facts.history,
+      current_message: facts.current_message,
+      customer_language: facts.customer_language,
+      already_introduced: facts.already_introduced,
+      sender_phone: facts.sender_phone,
+      state: facts.state,
+      rules: facts.rules,
+      program_rules: PROGRAM_RULES_HE,
+      this_turn: facts.this_turn,
+      /** Exact strings allowed in claims.saved this turn (subset or empty). */
+      allowed_saved: allowedSaved,
+      data_map: facts.data_map,
+      ...(input.guardFeedback
+        ? { guard_feedback: input.guardFeedback }
+        : {}),
+    };
     const response = await this.client.responses.create({
-      model: this.c.OPENAI_MODEL,
-      ...(source.mode === "hosted"
-        ? { prompt: { id: source.id, version: source.version } }
-        : { instructions: source.instructions }),
+      prompt: {
+        id: hosted.id,
+        version: hosted.version,
+      },
+      text: {
+        format: {
+          type: "json_schema",
+          name: "haim_agent_reply",
+          strict: true,
+          schema: agentFinalOutputJsonSchema,
+        },
+      },
       input: [
         {
           role: "user",
-          content: phraseUserContent(source.mode, canonical, ctx),
+          content: JSON.stringify(userPayload),
         },
       ],
-      reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },
     });
-    const text = extractPhraseText(response.output_text, canonical);
+    let payload: unknown;
+    try {
+      payload = JSON.parse(response.output_text);
+    } catch {
+      throw new AppError("invalid_reply_manager_response");
+    }
+    const parsed = agentFinalReplySchema.safeParse(payload);
+    if (!parsed.success) throw new AppError("invalid_reply_manager_response");
     return {
-      text,
+      text: parsed.data.reply,
+      claims: parsed.data.claims,
       metadata: {
-        provider: "openai_responses_phrase",
-        prompt_mode: source.mode,
-        prompt_id:
-          source.mode === "hosted" ? source.id : "git:prompts/phrase.txt",
-        prompt_version: source.mode === "hosted" ? source.version : "git",
-        model: this.c.OPENAI_MODEL,
+        provider: "openai_responses_agent_reply",
+        prompt_mode: "hosted",
+        prompt_id: hosted.id,
+        prompt_version: hosted.version,
+        model: response.model ?? this.c.OPENAI_MODEL,
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,
+        claims: parsed.data.claims,
+        model_input: {
+          prompt_mode: "hosted",
+          prompt_id: hosted.id,
+          prompt_version: hosted.version,
+          payload: userPayload,
+        },
+        model_output: {
+          raw: response.output_text,
+          parsed: payload,
+        },
+        raw_output: response.output_text,
       },
     };
   }
@@ -523,58 +728,100 @@ export class OpenAIPlanner implements Planner {
     ctx: Context,
     notice: Notice,
     request: Request | null,
+    facts: Record<string, unknown> = {},
   ): Promise<{ text: string; metadata: Record<string, unknown> }> {
+    // Notices use the same unified hosted Agent prompt. There are no tools on
+    // this request because counterparty notice phrasing is write-free.
+    const draft = resolveNoticeDraft(
+      notice.text,
+      request,
+      notice.phone,
+      new Date(),
+    );
     if (!this.c.AI_ENABLED)
       return {
-        text: notice.text,
-        metadata: { provider: "rules", ai_enabled: false, action_source: "canonical" },
+        text: draft,
+        metadata: { provider: "fallback", ai_enabled: false },
       };
+    const hosted = agentHosted(this.c);
     const started = Date.now();
-    const source = phrasePromptSource(this.c, notice.text);
+    const recipient =
+      request?.parties.find((party) => party.phone === notice.phone) ?? null;
+    const initiator =
+      request?.parties.find((party) => party.phone !== notice.phone) ?? null;
+    const userPayload = {
+      mode: "notice_to_counterparty",
+      notice_recipient_phone: notice.phone,
+      notice_facts: facts,
+      notice_draft: draft,
+      sender_phone: ctx.conversation.phone,
+      request: request
+        ? {
+            number: request.number,
+            status: request.status,
+            run_date: request.run_date,
+            proposed_run_date: request.proposed_run_date,
+            items: request.items.map((item) => ({
+              kind: item.kind,
+              description: item.description,
+            })),
+            parties: request.parties.map((party) => ({
+              role: party.role,
+              name: party.name,
+              settlement: party.settlement,
+              address: party.address,
+              floor: party.floor,
+            })),
+            recipient: recipient
+              ? {
+                  role: recipient.role,
+                  name: recipient.name,
+                  settlement: recipient.settlement,
+                  address: recipient.address,
+                  floor: recipient.floor,
+                }
+              : null,
+            other_party: initiator
+              ? { role: initiator.role, name: initiator.name }
+              : null,
+          }
+        : null,
+    };
     const response = await this.client.responses.create({
-      model: this.c.OPENAI_MODEL,
-      ...(source.mode === "hosted"
-        ? { prompt: { id: source.id, version: source.version } }
-        : { instructions: source.instructions }),
-      input: [
-        {
-          role: "user",
-          content:
-            source.mode === "git"
-              ? `נסח הודעת WhatsApp קצרה ואנושית לצד השני מהמשפט המחייב. החזר טקסט בלבד, בלי JSON.\nנמען: ${notice.phone}`
-              : JSON.stringify({
-                  phrase_instructions: PHRASE_PROMPT_TEXT.replace(
-                    "{{canonical}}",
-                    notice.text,
-                  ),
-                  customer_message: {
-                    current_message: `נסח הודעת WhatsApp קצרה ואנושית לצד השני. טיוטת המערכת: ${notice.text}`,
-                    recent_history: ctx.history,
-                    notice_recipient_phone: notice.phone,
-                    notice_kind: "system_notice",
-                    has_location: false,
-                  },
-                  sender_phone: ctx.conversation.phone,
-                  existing_record: {
-                    conversation: ctx.conversation,
-                    request,
-                    notice,
-                  },
-                }),
+      prompt: {
+        id: hosted.id,
+        version: hosted.version,
+      },
+      text: {
+        format: {
+          type: "json_schema",
+          name: "haim_agent_reply",
+          strict: true,
+          schema: agentFinalOutputJsonSchema,
         },
-      ],
-      reasoning: { effort: this.c.OPENAI_REASONING_EFFORT },
+      },
+      input: [{ role: "user", content: JSON.stringify(userPayload) }],
     });
-    const text = extractPhraseText(response.output_text, notice.text);
+    let payload: unknown;
+    try {
+      payload = JSON.parse(response.output_text);
+    } catch {
+      return {
+        text: draft,
+        metadata: { provider: "fallback_parse", ai_enabled: true },
+      };
+    }
+    const parsed = agentFinalReplySchema.safeParse(payload);
+    const phrased = parsed.success ? parsed.data.reply : "";
+    const keepPhrasing = parsed.success && noticeKeepsRequiredFacts(draft, phrased);
     return {
-      text,
+      text: keepPhrasing ? phrased : draft,
       metadata: {
-        provider: "openai_responses_phrase",
-        prompt_mode: source.mode,
-        prompt_id:
-          source.mode === "hosted" ? source.id : "git:prompts/phrase.txt",
-        prompt_version: source.mode === "hosted" ? source.version : "git",
-        model: this.c.OPENAI_MODEL,
+        provider: keepPhrasing ? "openai_responses_notice" : "notice_draft_guard",
+        prompt_mode: "hosted",
+        prompt_id: hosted.id,
+        prompt_version: hosted.version,
+        model: response.model ?? this.c.OPENAI_MODEL,
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,

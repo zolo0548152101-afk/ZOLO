@@ -23,6 +23,10 @@ import { parseWebhook, verifyHmac } from "./infrastructure/webhook.js";
 import { QUEUES } from "./infrastructure/queue.js";
 import { buildOperationalSignals, type OperationalSnapshot } from "./application/observability.js";
 import { redactDiagnosticText } from "./application/security.js";
+import {
+  listSchemaTables,
+  readTableRows,
+} from "./application/admin-database.js";
 const uuid = z.uuid();
 const reason = z.string().trim().min(3).max(500);
 const isTuesdayDate = (value: string) => {
@@ -31,13 +35,19 @@ const isTuesdayDate = (value: string) => {
 };
 const number = z.coerce.number().int().positive();
 const paramsNumber = z.object({ number });
-const databaseTable = z.enum([
-  "requests",
-  "contacts",
-  "conversations",
-  "messages",
-  "outbox",
-]);
+/** Any app/jobs table name or friendly alias (parties, items, jobs, …). */
+const databaseTable = z
+  .string()
+  .trim()
+  .regex(/^[a-z][a-z0-9_]{0,63}$/, "שם טבלה לא תקין");
+const databaseFilterQuery = z.object({
+  table: databaseTable,
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+  phone: z.string().trim().min(1).max(32).optional(),
+  since: z.string().trim().min(4).max(40).optional(),
+  until: z.string().trim().min(4).max(40).optional(),
+  view: z.enum(["joined", "raw"]).default("joined"),
+});
 const adminStatusLabel: Record<string, string> = {
   collecting: "בהשלמת פרטים",
   available: "ממתינה למקבל",
@@ -124,14 +134,14 @@ export async function makeHttp(
   });
   app.get("/health", async () => ({
     ok: true,
-    version: "0.5.2",
+    version: "0.7.0",
     mode: c.BOT_MODE,
   }));
   app.get("/ready", async () => {
     await runtime.check();
     return {
       ok: true,
-      version: "0.5.2",
+      version: "0.7.0",
       mode: c.BOT_MODE,
       schema: c.DB_SCHEMA,
       simulation_ready: simulation?.ready ?? false,
@@ -149,7 +159,7 @@ export async function makeHttp(
 <section class="two"><div class="card"><h2>רשומות הובלות</h2><div class="hint">כל הובלה נשמרת במסד הנתונים ומופיעה כאן.</div><div class="table"><table><thead><tr><th>#</th><th>סטטוס</th><th>פריטים</th><th>מוסר ← מקבל</th><th>תאריך</th></tr></thead><tbody id="requests"><tr><td colspan="5">התחבר כדי לטעון נתונים</td></tr></tbody></table></div></div><div class="card"><h2>תור הודעות לא ודאיות</h2><div class="table"><table><thead><tr><th>טלפון</th><th>מצב</th><th>שגיאה</th></tr></thead><tbody id="outbox"><tr><td colspan="3">—</td></tr></tbody></table></div></div></section>
 <section class="two"><div class="card"><h2>סימולציית צ׳אט</h2><div class="hint">ההודעות רצות בסביבה נפרדת, ולא נשלחות ל־WhatsApp.</div><div id="chat" class="chat"><div class="hint">כתוב הודעה כדי לדבר עם הבוט.</div></div><form id="simulate" class="form"><input id="phone" inputmode="numeric" placeholder="טלפון לדוגמה, למשל 584152101" required><textarea id="text" rows="3" placeholder="כתוב הודעה לבוט…" required></textarea><button>שלח לבוט</button></form></div><div class="card"><h2>גישת בוט</h2><div class="radios"><label><input type="radio" name="access" value="open" checked> פתוח לכולם</label><label><input type="radio" name="access" value="allowlist"> פתוח רק למספרים שאגדיר</label></div><label>מספרים מורשים<textarea id="allowlist" rows="5" placeholder="מספר אחד בכל שורה או מופרד בפסיקים"></textarea></label><div class="hint">מספר חסום אינו מקבל תגובה מהבוט.</div><div class="actions"><button id="save-access" type="button">שמור הגדרת גישה</button></div><hr><h2>איפוס שיחה</h2><input id="reset-phone" inputmode="numeric" placeholder="מספר טלפון לאיפוס"><div class="actions"><button id="reset-one" class="secondary" type="button">אפס שיחה למספר</button><button id="reset-all" class="danger" type="button">אפס את כל זיכרון הבוט</button></div><div class="hint">הפעולה מתחילה שיחה חדשה; רשומות ההובלות וההיסטוריה נשמרות.</div></div></section>
 <section class="two"><div class="card"><h2>תורים שנכשלו</h2><div class="table"><table><thead><tr><th>תור</th><th>ניסיונות</th><th>מזהה</th></tr></thead><tbody id="failed"><tr><td colspan="3">—</td></tr></tbody></table></div></div></section>
-<section class="card" style="margin-top:14px"><h2>מסד הנתונים</h2><div class="hint">צפייה, עריכה ומחיקה של רשומות. סיסמאות ומסוף SQL אינם חשופים בדף.</div><div class="actions"><select id="db-table"><option value="requests">פניות והובלות</option><option value="contacts">אנשי קשר</option><option value="conversations">שיחות</option><option value="messages">הודעות נכנסות</option><option value="outbox">הודעות יוצאות</option></select><button id="db-load" type="button">טען רשומות</button></div><div class="table db-table-wrap"><table><thead id="db-head"></thead><tbody id="db-rows"><tr><td>בחר טבלה וטען נתונים</td></tr></tbody></table></div><div id="db-pages" class="actions" aria-label="דפדוף בין עמודים"></div>${c.BOT_MODE === "live" ? "" : '<hr><h2>ניקוי סביבת בדיקות</h2><div class="hint">מוחק לצמיתות את כל הנתונים התפעוליים: פניות, הודעות, שיחות, אנשי קשר, קבצים מקושרים, תורים ואירועים. הגדרות מערכת ורשימות יישובים נשארות.</div><div class="actions"><button id="db-clear-all" class="danger" type="button">מחק את כל הרשומות</button></div>'}</section></main>
+<section class="card" style="margin-top:14px"><h2>מסד הנתונים</h2><div class="hint">צפייה, עריכה ומחיקה של רשומות. סיסמאות ומסוף SQL אינם חשופים בדף.</div><div class="actions"><select id="db-table"><option value="requests">פניות והובלות</option><option value="contacts">אנשי קשר</option><option value="conversations">שיחות</option><option value="messages">הודעות נכנסות</option><option value="outbox">הודעות יוצאות</option><option value="turn_logs">לוג תורים</option><option value="parties">צדדים (parties)</option><option value="items">פריטים (items)</option><option value="media">מדיה</option><option value="locations">מיקומים</option><option value="events">אירועים</option><option value="jobs">משימות</option><option value="allowlist">allowlist</option></select><button id="db-load" type="button">טען רשומות</button></div><div class="table db-table-wrap"><table><thead id="db-head"></thead><tbody id="db-rows"><tr><td>בחר טבלה וטען נתונים</td></tr></tbody></table></div><div id="db-pages" class="actions" aria-label="דפדוף בין עמודים"></div>${c.BOT_MODE === "live" ? "" : '<hr><h2>ניקוי סביבת בדיקות</h2><div class="hint">מוחק לצמיתות את כל הנתונים התפעוליים: פניות, הודעות, שיחות, אנשי קשר, קבצים מקושרים, תורים ואירועים. הגדרות מערכת ורשימות יישובים נשארות.</div><div class="actions"><button id="db-clear-all" class="danger" type="button">מחק את כל הרשומות</button></div>'}</section></main>
 <script>
 const token=document.querySelector('#token'),msg=document.querySelector('#message'),chat=document.querySelector('#chat');token.value=sessionStorage.getItem('haim-admin-token')||'';
 function say(text,kind){msg.textContent=text;msg.className='notice '+(kind||'')}function esc(value){const s=String(value??'');return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}function rows(id,html,span){document.querySelector(id).innerHTML=html||'<tr><td colspan="'+span+'">אין נתונים</td></tr>'}function header(extra){return Object.assign({'x-admin-token':token.value.trim()},extra||{})}async function api(path,options){if(!token.value.trim())throw new Error('יש להזין סיסמת ניהול');const o=Object.assign({},options||{});o.headers=header(o.headers);const r=await fetch('/admin/'+path,o);const j=await r.json();if(!r.ok)throw new Error(j.error?.message||j.error?.code||'הפעולה נכשלה');return j}function bubble(text,kind){if(chat.querySelector('.hint'))chat.innerHTML='';const d=document.createElement('div');d.className='bubble '+kind;d.textContent=text;chat.appendChild(d);chat.scrollTop=chat.scrollHeight}function party(x,role){const p=(x.parties||[]).find(v=>v.role===role);return p?(p.name||p.phone||'—'):'—'}
@@ -480,39 +490,115 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           })),
         };
       });
-      admin.get("/database", async (req) => {
+      admin.get("/database/tables", async () => {
+        const s = runtime.requireStore();
+        const tables = await listSchemaTables(s.pool, c.DB_SCHEMA);
+        return { ok: true, schema: c.DB_SCHEMA, tables };
+      });
+      admin.get("/turn-logs", async (req) => {
         const q = z
-          .object({ table: databaseTable, limit: z.coerce.number().int().min(1).max(100).default(100) })
+          .object({
+            limit: z.coerce.number().int().min(1).max(500).default(50),
+            phone: z.string().trim().min(1).max(32).optional(),
+            since: z.string().optional(),
+            until: z.string().optional(),
+            id: uuid.optional(),
+          })
           .parse(req.query);
-        const views = {
+        const s = runtime.requireStore();
+        if (q.id) {
+          const row = await s.pool.query("SELECT * FROM turn_logs WHERE id=$1", [q.id]);
+          if (!row.rows[0]) throw new AppError("turn_log_not_found", 404, "רשומת התור לא נמצאה.");
+          return { ok: true, row: row.rows[0] };
+        }
+        const result = await readTableRows(s.pool, c.DB_SCHEMA, {
+          table: "turn_logs",
+          limit: q.limit,
+          phone: q.phone,
+          since: q.since,
+          until: q.until,
+        });
+        return {
+          ok: true,
+          table: "turn_logs",
+          columns: result.columns,
+          rows: result.rows,
+        };
+      });
+      admin.get("/database", async (req) => {
+        const q = databaseFilterQuery.parse(req.query);
+        const s = runtime.requireStore();
+        const joinedViews: Record<
+          string,
+          { columns: string[]; editableFields: string[]; sql: string; phoneSql?: string }
+        > = {
           requests: {
-            columns: ["number","status","donor_phone","donor_name","pickup_city","pickup_address","pickup_floor","receiver_phone","receiver_name","destination_city","destination_address","destination_floor","items","quantity","needs_disassembly","requested_date","preferred_time","proposed_run_date","donor_schedule_approved_date","receiver_schedule_approved_date","run_date","represents_both_parties","closed_at","human_reason","donor_approved","receiver_approved","photos","media_ids","locations","created_at","updated_at"],
+            columns: ["number","status","photo_status","donor_phone","donor_name","pickup_city","pickup_address","pickup_floor","receiver_phone","receiver_name","destination_city","destination_address","destination_floor","items","quantity","needs_disassembly","requested_date","preferred_time","proposed_run_date","donor_schedule_approved_date","receiver_schedule_approved_date","run_date","represents_both_parties","closed_at","human_reason","donor_approved","receiver_approved","photos","media_ids","locations","created_at","updated_at"],
             editableFields: [],
-            sql: `SELECT r.id,r.number,r.status,dc.phone AS donor_phone,d.name AS donor_name,d.settlement AS pickup_city,d.address AS pickup_address,d.floor AS pickup_floor,rc.phone AS receiver_phone,v.name AS receiver_name,v.settlement AS destination_city,v.address AS destination_address,v.floor AS destination_floor,string_agg(i.description, ', ' ORDER BY i.position) AS items,coalesce(sum(i.quantity),0)::int AS quantity,bool_or(i.needs_disassembly) AS needs_disassembly,r.earliest_run_date AS requested_date,r.preferred_time,r.proposed_run_date,d.schedule_approved_date AS donor_schedule_approved_date,v.schedule_approved_date AS receiver_schedule_approved_date,r.run_date,r.represents_both_parties,r.closed_at,r.human_reason,d.approved_at IS NOT NULL AS donor_approved,v.approved_at IS NOT NULL AS receiver_approved,(SELECT count(*)::int FROM request_media rm WHERE rm.request_id=r.id) AS photos,(SELECT coalesce(json_agg(rm.media_id ORDER BY rm.media_id),'[]'::json) FROM request_media rm WHERE rm.request_id=r.id) AS media_ids,(SELECT coalesce(json_agg(json_build_object('role',rl.role,'latitude',rl.latitude,'longitude',rl.longitude) ORDER BY rl.role),'[]'::json) FROM request_locations rl WHERE rl.request_id=r.id) AS locations,r.created_at,r.updated_at FROM requests r LEFT JOIN request_parties d ON d.request_id=r.id AND d.role='donor' LEFT JOIN contacts dc ON dc.id=d.contact_id LEFT JOIN request_parties v ON v.request_id=r.id AND v.role='receiver' LEFT JOIN contacts rc ON rc.id=v.contact_id LEFT JOIN request_items i ON i.request_id=r.id GROUP BY r.id,dc.phone,d.name,d.settlement,d.address,d.floor,d.approved_at,d.schedule_approved_date,rc.phone,v.name,v.settlement,v.address,v.floor,v.approved_at,v.schedule_approved_date ORDER BY r.number DESC LIMIT $1`,
+            sql: `SELECT r.id,r.number,r.status,r.photo_status,dc.phone AS donor_phone,d.name AS donor_name,d.settlement AS pickup_city,d.address AS pickup_address,d.floor AS pickup_floor,rc.phone AS receiver_phone,v.name AS receiver_name,v.settlement AS destination_city,v.address AS destination_address,v.floor AS destination_floor,string_agg(i.description, ', ' ORDER BY i.position) AS items,coalesce(sum(i.quantity),0)::int AS quantity,bool_or(i.needs_disassembly) AS needs_disassembly,r.earliest_run_date AS requested_date,r.preferred_time,r.proposed_run_date,d.schedule_approved_date AS donor_schedule_approved_date,v.schedule_approved_date AS receiver_schedule_approved_date,r.run_date,r.represents_both_parties,r.closed_at,r.human_reason,d.approved_at IS NOT NULL AS donor_approved,v.approved_at IS NOT NULL AS receiver_approved,(SELECT count(*)::int FROM request_media rm WHERE rm.request_id=r.id) AS photos,(SELECT coalesce(json_agg(rm.media_id ORDER BY rm.media_id),'[]'::json) FROM request_media rm WHERE rm.request_id=r.id) AS media_ids,(SELECT coalesce(json_agg(json_build_object('role',rl.role,'latitude',rl.latitude,'longitude',rl.longitude) ORDER BY rl.role),'[]'::json) FROM request_locations rl WHERE rl.request_id=r.id) AS locations,r.created_at,r.updated_at FROM requests r LEFT JOIN request_parties d ON d.request_id=r.id AND d.role='donor' LEFT JOIN contacts dc ON dc.id=d.contact_id LEFT JOIN request_parties v ON v.request_id=r.id AND v.role='receiver' LEFT JOIN contacts rc ON rc.id=v.contact_id LEFT JOIN request_items i ON i.request_id=r.id GROUP BY r.id,dc.phone,d.name,d.settlement,d.address,d.floor,d.approved_at,d.schedule_approved_date,rc.phone,v.name,v.settlement,v.address,v.floor,v.approved_at,v.schedule_approved_date ORDER BY r.number DESC LIMIT $1`,
+            phoneSql: `SELECT r.id,r.number,r.status,r.photo_status,dc.phone AS donor_phone,d.name AS donor_name,d.settlement AS pickup_city,d.address AS pickup_address,d.floor AS pickup_floor,rc.phone AS receiver_phone,v.name AS receiver_name,v.settlement AS destination_city,v.address AS destination_address,v.floor AS destination_floor,string_agg(i.description, ', ' ORDER BY i.position) AS items,coalesce(sum(i.quantity),0)::int AS quantity,bool_or(i.needs_disassembly) AS needs_disassembly,r.earliest_run_date AS requested_date,r.preferred_time,r.proposed_run_date,d.schedule_approved_date AS donor_schedule_approved_date,v.schedule_approved_date AS receiver_schedule_approved_date,r.run_date,r.represents_both_parties,r.closed_at,r.human_reason,d.approved_at IS NOT NULL AS donor_approved,v.approved_at IS NOT NULL AS receiver_approved,(SELECT count(*)::int FROM request_media rm WHERE rm.request_id=r.id) AS photos,(SELECT coalesce(json_agg(rm.media_id ORDER BY rm.media_id),'[]'::json) FROM request_media rm WHERE rm.request_id=r.id) AS media_ids,(SELECT coalesce(json_agg(json_build_object('role',rl.role,'latitude',rl.latitude,'longitude',rl.longitude) ORDER BY rl.role),'[]'::json) FROM request_locations rl WHERE rl.request_id=r.id) AS locations,r.created_at,r.updated_at FROM requests r LEFT JOIN request_parties d ON d.request_id=r.id AND d.role='donor' LEFT JOIN contacts dc ON dc.id=d.contact_id LEFT JOIN request_parties v ON v.request_id=r.id AND v.role='receiver' LEFT JOIN contacts rc ON rc.id=v.contact_id LEFT JOIN request_items i ON i.request_id=r.id WHERE EXISTS (SELECT 1 FROM request_parties rp JOIN contacts c ON c.id=rp.contact_id WHERE rp.request_id=r.id AND c.phone=$2) GROUP BY r.id,dc.phone,d.name,d.settlement,d.address,d.floor,d.approved_at,d.schedule_approved_date,rc.phone,v.name,v.settlement,v.address,v.floor,v.approved_at,v.schedule_approved_date ORDER BY r.number DESC LIMIT $1`,
           },
           contacts: {
             columns: ["phone", "created_at"],
             editableFields: [],
             sql: "SELECT id,phone,created_at FROM contacts ORDER BY created_at DESC LIMIT $1",
+            phoneSql: "SELECT id,phone,created_at FROM contacts WHERE phone=$2 ORDER BY created_at DESC LIMIT $1",
           },
           conversations: {
             columns: ["phone", "mode", "session", "chat_id", "selected_request_id", "version"],
             editableFields: [],
             sql: "SELECT cv.id,co.phone,cv.mode,cv.session,cv.chat_id,cv.selected_request_id,cv.version FROM conversations cv JOIN contacts co ON co.id=cv.contact_id ORDER BY cv.id DESC LIMIT $1",
+            phoneSql: "SELECT cv.id,co.phone,cv.mode,cv.session,cv.chat_id,cv.selected_request_id,cv.version FROM conversations cv JOIN contacts co ON co.id=cv.contact_id WHERE co.phone=$2 ORDER BY cv.id DESC LIMIT $1",
           },
           messages: {
             columns: ["seq", "phone", "kind", "text", "reply", "error_code", "received_at"],
             editableFields: [],
             sql: "SELECT m.id,m.seq,co.phone,m.kind,m.text,m.reply,m.error_code,m.received_at FROM messages m LEFT JOIN contacts co ON co.id=m.contact_id ORDER BY m.seq DESC LIMIT $1",
+            phoneSql: "SELECT m.id,m.seq,co.phone,m.kind,m.text,m.reply,m.error_code,m.received_at FROM messages m LEFT JOIN contacts co ON co.id=m.contact_id WHERE co.phone=$2 ORDER BY m.seq DESC LIMIT $1",
           },
           outbox: {
             columns: ["seq", "phone", "state", "text", "error_code", "created_at"],
             editableFields: [],
             sql: "SELECT id,seq,phone,state,text,error_code,created_at FROM outbox ORDER BY seq DESC LIMIT $1",
+            phoneSql: "SELECT id,seq,phone,state,text,error_code,created_at FROM outbox WHERE phone=$2 ORDER BY seq DESC LIMIT $1",
           },
-        }[q.table];
-        const rows = await runtime.requireStore().pool.query(views.sql, [q.limit]);
-        return { ok: true, table: q.table, columns: views.columns, editable_fields: views.editableFields, rows: rows.rows };
+        };
+        const useJoined =
+          q.view === "joined" &&
+          joinedViews[q.table] &&
+          !q.since &&
+          !q.until;
+        if (useJoined) {
+          const views = joinedViews[q.table]!;
+          const phone = q.phone ? canonicalPhone(q.phone) : null;
+          const rows = phone && views.phoneSql
+            ? await s.pool.query(views.phoneSql, [q.limit, phone])
+            : await s.pool.query(views.sql, [q.limit]);
+          return {
+            ok: true,
+            table: q.table,
+            columns: views.columns,
+            editable_fields: views.editableFields,
+            rows: rows.rows,
+            source: "joined_view",
+          };
+        }
+        const result = await readTableRows(s.pool, c.DB_SCHEMA, {
+          table: q.table,
+          limit: q.limit,
+          phone: q.phone,
+          since: q.since,
+          until: q.until,
+        });
+        return {
+          ok: true,
+          table: result.table,
+          resolved: result.resolved,
+          columns: result.columns,
+          editable_fields: [],
+          rows: result.rows,
+          source: "raw_table",
+        };
       });
       admin.patch("/database/requests/:id/full", async (req) => {
         const p = z.object({ id: uuid }).parse(req.params);
@@ -595,8 +681,10 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           conversations: z.strictObject({ mode: z.enum(["bot", "human"]).optional(), selected_request_id: uuid.nullable().optional() }),
           messages: z.strictObject({ text: z.string().max(16000).optional(), reply: z.string().max(16000).nullable().optional(), error_code: z.string().max(160).nullable().optional() }),
           outbox: z.strictObject({ text: z.string().min(1).max(16000).optional(), state: z.enum(["pending","sending","sent","shadow","simulation","uncertain","failed","cancelled"]).optional(), error_code: z.string().max(160).nullable().optional() }),
-        };
-        const parsed = schemas[p.table].parse(body.changes);
+        } as const;
+        if (!(p.table in schemas))
+          throw new AppError("database_table_readonly", 403, "הטבלה זמינה לקריאה בלבד.");
+        const parsed = schemas[p.table as keyof typeof schemas].parse(body.changes);
         if (!Object.keys(parsed).length) throw new AppError("database_empty_update", 400, "לא נבחרו שדות לעדכון.");
         const contactChanges = parsed as { phone?: string };
         if (p.table === "contacts" && contactChanges.phone)
@@ -694,6 +782,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
           await client.query("UPDATE messages SET media_id=NULL");
           await remove("media", "DELETE FROM media");
           await client.query("UPDATE messages SET turn_id=NULL");
+          await remove("turn_logs", "DELETE FROM turn_logs");
           await remove("turn_messages", "DELETE FROM turn_messages");
           await remove("conversation_turns", "DELETE FROM conversation_turns");
           await remove("messages", "DELETE FROM messages");
@@ -763,6 +852,11 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             deleted[name] = (await client.query(sql, values)).rowCount ?? 0;
           };
           if (requestIds.length) {
+            // Drop conversation pointers before deleting requests.
+            await client.query(
+              "UPDATE conversations SET selected_request_id=NULL WHERE selected_request_id=ANY($1::uuid[])",
+              [requestIds],
+            );
             await remove("integration_outbox", "DELETE FROM integration_outbox WHERE event_id IN (SELECT id FROM request_events WHERE request_id=ANY($1::uuid[]))", [requestIds]);
             await remove("request_events", "DELETE FROM request_events WHERE request_id=ANY($1::uuid[])", [requestIds]);
             await remove("request_verifications", "DELETE FROM request_verifications WHERE request_id=ANY($1::uuid[])", [requestIds]);
@@ -770,27 +864,40 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             await remove("request_media", "DELETE FROM request_media WHERE request_id=ANY($1::uuid[])", [requestIds]);
             await remove("request_locations", "DELETE FROM request_locations WHERE request_id=ANY($1::uuid[])", [requestIds]);
             await remove("matches", "DELETE FROM matches WHERE request_id=ANY($1::uuid[])", [requestIds]);
+            await remove("outbox", "DELETE FROM outbox WHERE request_id=ANY($1::uuid[])", [requestIds]);
             await remove("request_parties", "DELETE FROM request_parties WHERE request_id=ANY($1::uuid[])", [requestIds]);
             await remove("request_items", "DELETE FROM request_items WHERE request_id=ANY($1::uuid[])", [requestIds]);
             await remove("requests", "DELETE FROM requests WHERE id=ANY($1::uuid[])", [requestIds]);
           }
           if (messageIds.length) {
+            await remove("integration_outbox", "DELETE FROM integration_outbox WHERE event_id IN (SELECT id FROM request_events WHERE message_id=ANY($1::uuid[]))", [messageIds]);
+            await remove("request_events", "DELETE FROM request_events WHERE message_id=ANY($1::uuid[])", [messageIds]);
             await remove("command_results", "DELETE FROM command_results WHERE message_id=ANY($1::uuid[])", [messageIds]);
             await remove("outbox", "DELETE FROM outbox WHERE message_id=ANY($1::uuid[]) OR phone=$2", [messageIds, phone]);
             await remove("media", "DELETE FROM media WHERE message_id=ANY($1::uuid[])", [messageIds]);
+            // Detach turn links before deleting messages.
+            await client.query(
+              "UPDATE messages SET turn_id=NULL, media_id=NULL WHERE id=ANY($1::uuid[])",
+              [messageIds],
+            );
+            await remove("turn_messages", "DELETE FROM turn_messages WHERE message_id=ANY($1::uuid[])", [messageIds]);
             await remove("messages", "DELETE FROM messages WHERE id=ANY($1::uuid[])", [messageIds]);
           } else {
             await remove("outbox", "DELETE FROM outbox WHERE phone=$1", [phone]);
           }
           if (conversationIds.length) {
             await remove("conversation_resets", "DELETE FROM conversation_resets WHERE conversation_id=ANY($1::uuid[])", [conversationIds]);
+            await remove("turn_logs", "DELETE FROM turn_logs WHERE conversation_id=ANY($1::uuid[]) OR phone=$2", [conversationIds, phone]);
             await remove("turn_messages", "DELETE FROM turn_messages WHERE turn_id IN (SELECT id FROM conversation_turns WHERE conversation_id=ANY($1::uuid[]))", [conversationIds]);
             await remove("conversation_turns", "DELETE FROM conversation_turns WHERE conversation_id=ANY($1::uuid[])", [conversationIds]);
             await remove("conversations", "DELETE FROM conversations WHERE id=ANY($1::uuid[])", [conversationIds]);
+          } else {
+            await remove("turn_logs", "DELETE FROM turn_logs WHERE phone=$1", [phone]);
           }
           await remove("contact_identities", "DELETE FROM contact_identities WHERE contact_id=ANY($1::uuid[])", [ids]);
           await remove("searches", "DELETE FROM searches WHERE contact_id=ANY($1::uuid[])", [ids]);
           await remove("contacts", "DELETE FROM contacts WHERE id=ANY($1::uuid[])", [ids]);
+          // Audit after wipe — do not attach to deleted contact/message rows.
           await s.event(client, { trace_id: req.id }, "admin", "admin_test_phone_data_cleared", adminAuditRecord(req, "clear_test_phone_data", `phone:${phone}`, "success", { deleted }));
         });
         runtime.log.warn({ trace_id: req.id, phone, deleted }, "admin_phone_data_cleared");
@@ -834,7 +941,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
               [conversation.id],
             );
             await client.query(
-              "UPDATE conversations SET mode='bot',selected_request_id=NULL,version=version+1 WHERE id=$1",
+              "UPDATE conversations SET mode='bot',selected_request_id=NULL,pending_counterparty_name=NULL,pending_counterparty_phone=NULL,pending_extra_item=NULL,version=version+1 WHERE id=$1",
               [conversation.id],
             );
           }
@@ -871,7 +978,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
               [conversation.id],
             );
           await client.query(
-            "UPDATE conversations SET mode='bot',selected_request_id=NULL,version=version+1",
+            "UPDATE conversations SET mode='bot',selected_request_id=NULL,pending_counterparty_name=NULL,pending_counterparty_phone=NULL,pending_extra_item=NULL,version=version+1",
           );
           await s.event(client, { trace_id: req.id }, "admin", "all_conversations_reset", adminAuditRecord(req, "reset_all_conversations", "all_conversations", "success", { conversations: result.rowCount }));
         });
@@ -1152,7 +1259,8 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
             adminAuditRecord(req, "coordinate_request", `request:${r.id}`, "success", { date: r.run_date, reason: b.reason }),
             r.id,
           );
-          for (const party of r.parties)
+          for (const party of r.parties) {
+            if (!party.phone) continue;
             await s.outbound(
               client,
               { trace_id: req.id, mode: c.BOT_MODE },
@@ -1160,6 +1268,7 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
               `coordination:${r.id}:${r.run_date}:${party.phone}`,
               r.id,
             );
+          }
           return { ok: true, request: r };
         });
       });

@@ -14,7 +14,7 @@ import { Runtime } from "../src/application/runtime.js";
 import { makeHttp } from "../src/http.js";
 import { canonicalPhone } from "../src/domain/policies.js";
 import { AppError, type Command, type Context, type Party, type Plan } from "../src/domain/types.js";
-import { HUMAN_REPLY, OUTSIDE, PHOTO_FIRST, PHOTO_THANKS } from "../src/domain/policies.js";
+import { OUTSIDE } from "../src/domain/policies.js";
 import { CLARIFY_REPLY, FAULT_REPLY } from "../src/domain/ai-guards.js";
 import { OpenAIPlanner } from "../src/infrastructure/ai.js";
 import { asItem } from "../src/application/commands.js";
@@ -26,6 +26,11 @@ import {
   FakeChannel,
   monday,
 } from "./fixtures.js";
+
+/** Historical markers — code no longer emits these fixed sentences. */
+const PHOTO_FIRST = "בשמחה. כדי להמשיך, נא לשלוח תמונה של הפריט.";
+const PHOTO_THANKS = "תודה, התמונה התקבלה.";
+const HUMAN_REPLY = "העברתי את הפנייה לטיפול אנושי. נעדכן.";
 
 const DATABASE_URL =
   process.env.TEST_DATABASE_URL ??

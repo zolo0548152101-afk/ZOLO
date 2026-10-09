@@ -1,36 +1,11 @@
 import type { Context } from "./types.js";
-import {
-  CONDITION_QUESTION,
-  HUMAN_REPLY,
-  OUTSIDE,
-  PHOTO_FIRST,
-  PHOTO_THANKS,
-  norm,
-} from "./policies.js";
+import { OUTSIDE, norm } from "./policies.js";
 import { CLARIFY_REPLY, FAULT_REPLY } from "./ai-guards.js";
 
 export type CustomerLang = "he" | "en" | "ar" | "ru";
 
-export const EMPATHY = "אני מבין, נעזור לך לטפל בזה.";
-export const IMPOSSIBLE =
-  "אי אפשר לקבוע הובלה מחוץ לחלון. ההובלות רק ביום שלישי בין 16:00 ל־20:00, בלי חריגים, ואי אפשר לעקוף את הכללים.";
-
+/** Minimal translations for the only fixed customer lines still allowed. */
 const LINES: Record<string, Record<Exclude<CustomerLang, "he">, string>> = {
-  [PHOTO_FIRST]: {
-    en: "Happy to help. To continue, please send a photo of the item.",
-    ar: "بكل سرور. للمتابعة، أرسل صورة الغرض.",
-    ru: "Хорошо. Чтобы продолжить, пришлите фото предмета.",
-  },
-  [PHOTO_THANKS]: {
-    en: "Thanks, the photo was received.",
-    ar: "شكرًا، تم استلام الصورة.",
-    ru: "Спасибо, фото получено.",
-  },
-  [CONDITION_QUESTION]: {
-    en: "Is the item fully working and usable?",
-    ar: "هل الغرض سليم وقابل للاستخدام بالكامل؟",
-    ru: "Предмет полностью исправен и пригоден к использованию?",
-  },
   [OUTSIDE]: {
     en: "We only operate in Beit She'an, Mesilot, Yardena, Beit Alfa, Tirat Zvi, Kfar Ruppin and Mechola. We can't help with this delivery.",
     ar: "نعمل فقط في بيت شان، مسيلوت، يردينا، بيت ألفا، تيرات تسفي، كفار روبين وماحولا. لا يمكننا المساعدة في هذا التوصيل.",
@@ -41,25 +16,10 @@ const LINES: Record<string, Record<Exclude<CustomerLang, "he">, string>> = {
     ar: "لم أفهم المقصود. هل يمكنك كتابته مرة أخرى؟",
     ru: "Я не понял. Напишите, пожалуйста, ещё раз.",
   },
-  [HUMAN_REPLY]: {
-    en: "I passed this to a person. We'll update you.",
-    ar: "حوّلت الطلب لمتابعة بشرية. سنحدّثك.",
-    ru: "Я передал обращение человеку. Мы сообщим.",
-  },
   [FAULT_REPLY]: {
     en: "There's a temporary fault. We'll get back to you.",
     ar: "هناك عطل مؤقت. سنعود إليك.",
     ru: "Временный сбой. Мы свяжемся с вами.",
-  },
-  [EMPATHY]: {
-    en: "I understand, and we'll help you sort this out.",
-    ar: "أفهمك، وسنساعدك في معالجة هذا.",
-    ru: "Я понимаю, и мы поможем с этим разобраться.",
-  },
-  [IMPOSSIBLE]: {
-    en: "A delivery can't be set outside the window. Deliveries are only on Tuesday between 16:00 and 20:00, with no exceptions, and I can't bypass the rules.",
-    ar: "لا يمكن تحديد توصيل خارج النافذة. التوصيل فقط يوم الثلاثاء بين 16:00 و20:00، بلا استثناءات، ولا يمكن تجاوز القواعد.",
-    ru: "Доставку нельзя назначить вне окна. Доставки только во вторник с 16:00 до 20:00, без исключений, и правила обойти нельзя.",
   },
 };
 
@@ -119,8 +79,13 @@ export function localizeCustomer(text: string, lang: CustomerLang): string {
   return text;
 }
 
-/** Angry or impossible scheduling pressure. Not an unclear message. */
-export function pressureCanonical(text: string): string | null {
+/** @deprecated Code no longer injects pressure sentences — Reply manager owns wording. */
+export function pressureCanonical(_text: string): string | null {
+  return null;
+}
+
+/** Kept for tests that still import detection helpers via this module. */
+export function pressureSignals(text: string): { angry: boolean; impossible: boolean } {
   const t = norm(text);
   const angry = /(?:דיי עם השטויות|די עם השטויות|נמאס|מספיק עם|עצבנ)/u.test(t);
   const bypass =
@@ -136,9 +101,5 @@ export function pressureCanonical(text: string): string | null {
   const englishManager =
     /manager said/i.test(text) && /\b(?:sunday|friday|allowed|exception)\b/i.test(text);
   const impossible = bypass || schedulePressure || manager || englishDay || englishManager;
-  if (!angry && !impossible) return null;
-  const parts: string[] = [];
-  if (angry) parts.push(EMPATHY);
-  if (impossible) parts.push(IMPOSSIBLE);
-  return parts.join("\n");
+  return { angry, impossible };
 }
