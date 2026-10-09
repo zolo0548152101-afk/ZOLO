@@ -1549,6 +1549,7 @@ test("AI donate.direct on an open donation skips photo and converts origin", asy
     },
   ]);
   assert.doesNotMatch(linked.row.reply ?? "", /תמונה/);
+  assert.equal((await s.active(p)).length, 1);
   const saved = (await s.active(p))[0]!;
   assert.equal(saved.origin, "direct");
   assert.equal(saved.parties.find((party) => party.role === "receiver")?.phone, receiver);
@@ -1566,6 +1567,88 @@ test("AI donate.direct on an open donation skips photo and converts origin", asy
   ]);
   assert.doesNotMatch(again.row.reply ?? "", /תמונה/);
   assert.match(again.row.reply ?? "", /כבר רשומים|נפנה/);
+  assert.equal((await s.active(p)).length, 1);
+});
+
+test("donate with a renamed recipient plus vCard updates the open request instead of opening a twin", async () => {
+  const donor = phone(),
+    receiver = phone();
+  await message(donor, "אני רוצה למסור מיטה למשה", [
+    {
+      type: "donate",
+      items: [{ kind: "bed", description: "מיטה", quantity: 1 }],
+      counterparty_phone: null,
+      counterparty_name: "משה",
+      direct: true,
+      free: true,
+      working: true,
+    },
+  ]);
+  const opened = (await s.active(donor))[0]!;
+  await message(donor, "בעצם לדוד", [
+    { type: "counterparty", request_number: opened.number, phone: null, name: "דוד" },
+  ]);
+  await message(
+    donor,
+    "בית שאן, רחוב רבי מאיר לשדרות הארבעה, קומה 0. קוראים לי ישראל",
+    [
+      details({
+        request_number: opened.number,
+        role: "donor",
+        name: "ישראל",
+        settlement: "בית שאן",
+        address: "רחוב רבי מאיר",
+        floor: 0,
+      }),
+      details({
+        request_number: opened.number,
+        role: "receiver",
+        settlement: "בית שאן",
+        address: "שדרות הארבעה ליד ויקטורי",
+        floor: 0,
+      }),
+    ],
+  );
+  await message(donor, "בעצם קוראים לו טל, דבר איתו", [
+    { type: "counterparty", request_number: opened.number, phone: null, name: "טל" },
+    { type: "contact_counterparty", request_number: opened.number, contact: true },
+  ]);
+  const afterConsent = await s.request(opened.id);
+  assert.equal(afterConsent.verification_contacted, false);
+  assert.equal((await s.active(donor)).length, 1);
+
+  const card = await message(
+    donor,
+    `בעצם קוראים לו טל אני שולח לך את המספר שלו דבר איתו`,
+    [
+      {
+        type: "donate",
+        items: [{ kind: "bed", description: "מיטה", quantity: 1 }],
+        counterparty_phone: receiver,
+        counterparty_name: "טל זולו",
+        direct: true,
+        free: true,
+        working: true,
+      },
+      {
+        type: "counterparty",
+        request_number: opened.number,
+        phone: receiver,
+        name: "טל זולו",
+      },
+      { type: "contact_counterparty", request_number: opened.number, contact: true },
+    ],
+  );
+  assert.equal((await s.active(donor)).length, 1);
+  const saved = (await s.active(donor))[0]!;
+  assert.equal(saved.id, opened.id);
+  assert.equal(saved.parties.find((party) => party.role === "receiver")?.phone, receiver);
+  assert.equal(saved.parties.find((party) => party.role === "receiver")?.name, "טל זולו");
+  assert.match(saved.parties.find((party) => party.role === "receiver")?.address ?? "", /שדרות הארבעה/);
+  assert.equal(saved.verification_contacted, true);
+  const notice = (await outputs(card.id)).find((row) => row.phone === receiver)?.text ?? "";
+  assert.match(notice, /טל/);
+  assert.match(notice, /מיטה/);
 });
 test("AI donate with only counterparty_name converts open donation without direct flag", async () => {
   const p = phone();

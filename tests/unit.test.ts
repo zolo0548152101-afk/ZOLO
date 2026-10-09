@@ -1042,6 +1042,7 @@ test("canonical phones reject LID and malformed identities", () => {
     assert.equal(canonicalPhone(p), "501111111");
   for (const p of ["12345@lid", "123", "phone:501111111", "972050111111100"])
     assert.throws(() => canonicalPhone(p));
+  assert.equal(canonicalPhone("\u2066+972 53-666-2043\u2069"), "536662043");
 });
 test("donor without receiver can continue without photo", () => {
   const r = sampleRequest();
@@ -1433,6 +1434,24 @@ test("contact-counterparty ask waits until own details and item rules are ready"
   donor.address = "רחוב אילת 4";
   assert.equal(nextQuestion(r, donor.phone!).missing?.field, "contact_counterparty");
 });
+test("name-only recipient asks for a phone before contact consent", () => {
+  const r = sampleRequest();
+  r.origin = "direct";
+  r.verification_contacted = false;
+  r.proposed_run_date = null;
+  const donor = r.parties[0]!;
+  const receiver = r.parties[1]!;
+  receiver.phone = null;
+  receiver.name = "דוד";
+  receiver.approved_at = null;
+  receiver.approved_by = null;
+  for (const party of r.parties) {
+    party.schedule_approved = false;
+    party.schedule_approved_date = null;
+    party.schedule_approved_at = null;
+  }
+  assert.equal(nextQuestion(r, donor.phone!).missing?.field, "counterparty");
+});
 test("named recipient who wants the item bypasses the photo gate", () => {
   const context: Context = {
     conversation: { id: "c", phone: "501111111", chat_id: "972501111111@c.us", mode: "bot", selected_request_id: null, version: 1, pending_counterparty_name: null },
@@ -1796,6 +1815,24 @@ test("contact card accepts WhatsApp grouped TEL fields", () => {
   assert.deepEqual(m?.contacts, [
     { phone: "536662043", name: "אא טל" },
   ]);
+});
+
+test("contact card parses WhatsApp bidi TEL values via waid", () => {
+  const m = parseWebhook(
+    {
+      event: "message",
+      session: "HAIM_YAHAD",
+      payload: {
+        id: "bidi-card",
+        from: "972501111111@c.us",
+        body:
+          "BEGIN:VCARD\nVERSION:3.0\nN:;טל זולו;;;\nFN:טל זולו\nTEL;type=CELL;waid=972536662043:\u2066+972 53-666-2043\u2069\nEND:VCARD",
+      },
+    },
+    "HAIM_YAHAD",
+  );
+  assert.equal(m?.kind, "contact");
+  assert.deepEqual(m?.contacts, [{ phone: "536662043", name: "טל זולו" }]);
 });
 test("@lid resolution uses configured session API and does not treat LID as phone", async () => {
   let path = "";

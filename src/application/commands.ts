@@ -76,11 +76,6 @@ function recentSelfName(ctx: Context, text: string): string | null {
   return name;
 }
 
-function describeItems(items: Array<Pick<Item, "description">>): string {
-  return items.map((i) => i.description).join(", ");
-}
-
-
 function bareYes(text: string): boolean {
   return /^(?:כן|בטח|בוודאי|נכון|מאשר|מאשרת)(?:[\s,!.]|$)/u.test(norm(text));
 }
@@ -121,12 +116,6 @@ function itemDescriptionsMatch(
   });
 }
 
-function receiverKey(p: Party | undefined): string | null {
-  if (!p) return null;
-  if (p.phone) return `p:${p.phone}`;
-  if (p.name) return `n:${norm(p.name)}`;
-  return null;
-}
 const party = (
   role: Party["role"],
   phone: string | null,
@@ -214,6 +203,90 @@ export class Commands {
 
   private async clearPendingExtra(c: pg.PoolClient, ctx: Context): Promise<void> {
     await this.setPendingExtra(c, ctx, null);
+  }
+
+  private async noticeAlreadyQueued(
+    c: pg.PoolClient,
+    requestId: string,
+    targetPhone: string,
+  ): Promise<boolean> {
+    const row = await c.query(
+      `SELECT 1 FROM outbox
+        WHERE request_id=$1 AND phone=$2 AND state <> 'cancelled'
+        LIMIT 1`,
+      [requestId, targetPhone],
+    );
+    return Boolean(row.rowCount);
+  }
+
+  private async persistContactConsent(
+    c: pg.PoolClient,
+    r: Request,
+    other: Party,
+    contact: boolean,
+  ): Promise<void> {
+    await c.query(
+      `INSERT INTO request_verifications(request_id,role,state,consented_at,updated_at,last_error)
+       VALUES($1,$2,$3,$4,clock_timestamp(),$5)
+       ON CONFLICT(request_id,role) DO UPDATE SET state=EXCLUDED.state,consented_at=EXCLUDED.consented_at,updated_at=clock_timestamp(),last_error=EXCLUDED.last_error`,
+      [
+        r.id,
+        other.role,
+        contact ? "consented" : "declined",
+        contact ? new Date() : null,
+        contact ? null : "user_declined_contact",
+      ],
+    );
+  }
+
+  private queueCounterpartyNotice(
+    r: Request,
+    other: Party,
+    notices: Notice[],
+  ): void {
+    if (!other.phone) return;
+    notices.push({
+      phone: other.phone,
+      text: draftCounterpartyVerification({
+        request: r,
+        recipient: other,
+        now: this.now(),
+      }),
+    });
+    r.verification_contacted = true;
+  }
+
+  /** Send the verification notice once a phone exists and the donor already consented. */
+  private async maybeQueuePendingVerification(
+    c: pg.PoolClient,
+    speakerPhone: string,
+    r: Request,
+    notices: Notice[],
+  ): Promise<void> {
+    if (r.origin !== "direct" || r.represents_both_parties) return;
+    const speaker = ownParty(r, speakerPhone);
+    const other = r.parties.find((p) => p.role !== speaker.role);
+    if (!other?.phone) return;
+    if (await this.noticeAlreadyQueued(c, r.id, other.phone)) {
+      r.verification_contacted = true;
+      return;
+    }
+    const verification = await c.query<{ state: string }>(
+      "SELECT state FROM request_verifications WHERE request_id=$1 AND role=$2",
+      [r.id, other.role],
+    );
+    const state = verification.rows[0]?.state ?? "";
+    const consented =
+      r.verification_contacted ||
+      ["consented", "offered"].includes(state);
+    if (!consented) return;
+    this.queueCounterpartyNotice(r, other, notices);
+    await this.persistContactConsent(c, r, other, true);
+    await c.query(
+      `UPDATE conversations SET selected_request_id=$2,version=version+1
+         WHERE contact_id=(SELECT id FROM contacts WHERE phone=$1)`,
+      [other.phone, r.id],
+    );
   }
 
   async apply(c: pg.PoolClient, ctx: Context, cmd: Command): Promise<Outcome> {
@@ -420,10 +493,10 @@ export class Commands {
         parties.push(receiver);
       }
       // Soft photo ask is prompt/reply-manager owned.
-      // Hard boundary #4 — duplicate request (donor+receiver+item[+date]):
-      // incomplete fields → update existing; full triple+date → update only;
-      // full triple without date → ask before opening a twin; different
-      // known receiver → new request allowed.
+      // Hard boundary #4 — duplicate request (donor+item):
+      // while collecting, update the open request (rename / attach phone).
+      // A different known receiver phone may open a new request. An explicit
+      // second delivery (confirm_another_delivery + yes) may open a twin.
       const sameItemShape = (existing: Request) =>
         existing.parties.some((p) => p.role === "donor" && p.phone === phone) &&
         itemDescriptionsMatch(existing.items, items);
@@ -434,7 +507,7 @@ export class Commands {
           ) && sameItemShape(existing),
       );
       const incomingReceiver = parties.find((p) => p.role === "receiver");
-      const incomingReceiverKey = receiverKey(incomingReceiver);
+      const incomingReceiverPhone = incomingReceiver?.phone ?? null;
       const pendingAnother = this.pendingExtra(ctx);
       const confirmedAnother =
         pendingAnother?.stage === "confirm_another_delivery" &&
@@ -458,55 +531,42 @@ export class Commands {
       }
       let sameOpenRequest: Request | undefined;
       if (!confirmedAnother && openSameItem.length) {
-        const withRecv = openSameItem.map((existing) => {
-          const existingRecv = existing.parties.find((p) => p.role === "receiver");
-          const existingKey = receiverKey(existingRecv);
-          const incomplete = !existingKey || !incomingReceiverKey;
-          const match =
-            Boolean(existingKey && incomingReceiverKey && existingKey === incomingReceiverKey);
-          const different =
-            Boolean(existingKey && incomingReceiverKey && existingKey !== incomingReceiverKey);
-          const existingDate =
-            existing.proposed_run_date?.slice(0, 10) ??
-            existing.run_date?.slice(0, 10) ??
-            existing.earliest_run_date?.slice(0, 10) ??
-            null;
-          // Donate has no date field; date is complete only when existing has one
-          // and the customer restated the same date in this turn.
-          const dateInText = existingDate && text.includes(existingDate);
-          const dateMatch = Boolean(existingDate && dateInText);
-          const dateIncomplete = !existingDate || !dateInText;
-          return { existing, incomplete, match, different, dateMatch, dateIncomplete };
+        // Same donor+item stays one request while collecting. A new request is
+        // allowed only when both sides already have phones and they differ, or
+        // the customer explicitly confirmed another delivery.
+        const compatible = openSameItem.filter((existing) => {
+          const existingPhone =
+            existing.parties.find((p) => p.role === "receiver")?.phone ?? null;
+          return !(
+            existingPhone &&
+            incomingReceiverPhone &&
+            existingPhone !== incomingReceiverPhone
+          );
         });
-        // Prefer updating when incomplete or date-certain match.
-        const updateCandidate =
-          withRecv.find((x) => x.incomplete) ??
-          withRecv.find((x) => x.match && x.dateMatch) ??
-          withRecv.find((x) => x.match && x.dateIncomplete);
-        if (updateCandidate?.incomplete || updateCandidate?.dateMatch) {
-          sameOpenRequest = updateCandidate.existing;
-        } else if (updateCandidate?.match && updateCandidate.dateIncomplete) {
-          // Full donor+receiver+item match, date unknown → ask; do not create.
-          await this.setPendingExtra(c, ctx, {
-            stage: "confirm_another_delivery",
-            request_id: updateCandidate.existing.id,
-            request_number: updateCandidate.existing.number,
-            existing_description: describeItems(updateCandidate.existing.items),
-            items: cmd.type === "donate" ? cmd.items : items,
-            free: cmd.type === "donate" ? (cmd.free ?? null) : null,
-            working: cmd.type === "donate" ? (cmd.working ?? null) : null,
-            direct: Boolean(direct),
-            counterparty_phone: other ?? null,
-            counterparty_name:
-              cmd.type === "donate" ? (cmd.counterparty_name ?? null) : null,
-          });
-          return output(null, updateCandidate.existing);
-        } else if (!withRecv.some((x) => x.different)) {
-          // Same item, no differing receiver → default update (covers empty #1 + vCard).
-          sameOpenRequest = openSameItem[0];
-        }
-        // else: known different receiver → allow create below
+        const ranked = [...compatible].sort((a, b) => {
+          const completeness = (request: Request) => {
+            const recv = request.parties.find((p) => p.role === "receiver");
+            return (
+              (recv?.phone ? 4 : 0) +
+              (recv?.address ? 2 : 0) +
+              (recv?.settlement ? 1 : 0) +
+              (recv?.name ? 1 : 0)
+            );
+          };
+          const delta = completeness(b) - completeness(a);
+          if (delta) return delta;
+          const selected = ctx.conversation.selected_request_id;
+          if (a.id === selected) return -1;
+          if (b.id === selected) return 1;
+          return a.number - b.number;
+        });
+        sameOpenRequest = ranked[0];
       }
+      if (
+        !confirmedAnother &&
+        this.pendingExtra(ctx)?.stage === "confirm_another_delivery"
+      )
+        await this.clearPendingExtra(c, ctx);
       if (!sameOpenRequest && !confirmedAnother) {
         const rejectedOutside = await c.query<{ id: string }>(
           `SELECT r.id FROM requests r
@@ -634,6 +694,7 @@ export class Commands {
           beforePendingName === ctx.conversation.pending_counterparty_name;
         // Same facts again: keep the conversation moving with the next missing
         // detail instead of looping on the opening photo ask.
+        await this.maybeQueuePendingVerification(c, phone, existing, notices);
         if (unchangedDirect && existing.origin === "direct")
           return output(null, existing);
         return output(null, existing);
@@ -941,50 +1002,29 @@ export class Commands {
       return output(null, r);
     }
     if (cmd.type === "contact_counterparty") {
-      const other = r.parties.find((p) => p.phone !== phone);
+      const speaker = ownParty(r, phone);
+      const other = r.parties.find((p) => p.role !== speaker.role);
       if (r.origin !== "direct" || !other) return output(null, r);
-      const verification = await c.query<{ state: string }>(
-        "SELECT state FROM request_verifications WHERE request_id=$1 AND role=$2",
-        [r.id, other.role],
-      );
-      if (
-        r.verification_contacted ||
-        ["consented", "queued", "provider_accepted", "delivered", "approved"].includes(
-          verification.rows[0]?.state ?? "",
-        )
-      )
+      if (!cmd.contact) {
+        r.verification_contacted = false;
+        await this.persistContactConsent(c, r, other, false);
+        invalidateProposal(r);
         return output(null, r);
-      // AI owns when to contact. Soft progress gates must not block the write.
-      r.verification_contacted = cmd.contact;
+      }
+      // Record consent even when the phone is still missing. Do not mark
+      // contacted until a notice is actually queued.
+      await this.persistContactConsent(c, r, other, true);
+      if (!other.phone) return output(null, r);
+      if (await this.noticeAlreadyQueued(c, r.id, other.phone)) {
+        r.verification_contacted = true;
+        return output(null, r);
+      }
+      this.queueCounterpartyNotice(r, other, notices);
       await c.query(
-        `INSERT INTO request_verifications(request_id,role,state,consented_at,updated_at,last_error)
-         VALUES($1,$2,$3,$4,clock_timestamp(),$5)
-         ON CONFLICT(request_id,role) DO UPDATE SET state=EXCLUDED.state,consented_at=EXCLUDED.consented_at,updated_at=clock_timestamp(),last_error=EXCLUDED.last_error`,
-        [
-          r.id,
-          other.role,
-          cmd.contact ? "consented" : "declined",
-          cmd.contact ? new Date() : null,
-          cmd.contact ? null : "user_declined_contact",
-        ],
+        `UPDATE conversations SET selected_request_id=$2,version=version+1
+           WHERE contact_id=(SELECT id FROM contacts WHERE phone=$1)`,
+        [other.phone, r.id],
       );
-      if (cmd.contact) {
-        if (other.phone) {
-          notices.push({
-            phone: other.phone,
-            text: draftCounterpartyVerification({
-              request: r,
-              recipient: other,
-              now: this.now(),
-            }),
-          });
-          await c.query(
-            `UPDATE conversations SET selected_request_id=$2,version=version+1
-               WHERE contact_id=(SELECT id FROM contacts WHERE phone=$1)`,
-            [other.phone, r.id],
-          );
-        }
-      } else invalidateProposal(r);
       return output(null, r);
     }
     if (cmd.type === "escalate") {
@@ -1308,9 +1348,9 @@ export class Commands {
           r.parties[0]!.phone === r.parties[1]!.phone
         )
           r.represents_both_parties = true;
-        // In a direct handoff, receiving a phone number is not permission to
-        // contact that person. The initiating party must explicitly choose the
-        // verification-message option first.
+        // A contact card is identity, not consent — unless the donor already
+        // consented, in which case attaching the phone should send now.
+        await this.maybeQueuePendingVerification(c, phone, r, notices);
       }
     } else if (cmd.type === "approve_self") {
       // Trust action-manager approval command; do not re-litigate wording.

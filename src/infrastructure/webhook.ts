@@ -35,6 +35,22 @@ const record = (x: unknown): Record<string, unknown> =>
   x && typeof x === "object" && !Array.isArray(x)
     ? (x as Record<string, unknown>)
     : {};
+/** Prefer waid=, then the TEL value. Ignore cards whose numbers cannot canonicalize. */
+function parseVcardPhone(card: string): string | null {
+  const telLine = card.match(/^(?:[A-Za-z0-9_-]+\.)?TEL[^\r\n]*/im)?.[0];
+  if (!telLine) return null;
+  const waid = telLine.match(/waid=(\d+)/i)?.[1];
+  const value = telLine.match(/:([^\r\n]+)/)?.[1];
+  for (const raw of [waid, value]) {
+    if (!raw) continue;
+    try {
+      return canonicalPhone(raw);
+    } catch {
+      /* Try the next candidate; never infer a phone from a LID. */
+    }
+  }
+  return null;
+}
 export function parseWebhook(
   body: unknown,
   session: string,
@@ -81,19 +97,13 @@ export function parseWebhook(
   for (const value of cards.slice(0, 10)) {
     const card =
       typeof value === "string" ? value : string(record(value).vcard);
-    // WhatsApp contact cards may use a grouped vCard property such as
-    // `item1.TEL;waid=...`, not only the plain `TEL;CELL:...` form.
-    const phone = card.match(/^(?:[A-Za-z0-9_-]+\.)?TEL[^:]*:([^\r\n]+)/im)?.[1];
     const name = card.match(/^FN:([^\r\n]+)/im)?.[1] ?? null;
+    const phone = parseVcardPhone(card);
     if (phone) {
-      try {
-        contacts.push({
-          phone: canonicalPhone(phone),
-          name: name?.slice(0, 160) ?? null,
-        });
-      } catch {
-        /* Ignore invalid cards, never infer a phone from a LID. */
-      }
+      contacts.push({
+        phone,
+        name: name?.slice(0, 160) ?? null,
+      });
     }
   }
   let loc: ParsedMessage["location"] = null;

@@ -49,7 +49,7 @@ function toStrictToolParameters(source: JsonSchemaObject): JsonSchemaObject {
 }
 
 const COMMAND_DESCRIPTIONS: Record<string, string> = {
-  donate: "Open or update a donation / direct handoff request with items.",
+  donate: "Open a donation / direct handoff, or update the open same-item request. Never open a second request for the same donor+item while collecting — attach a recipient name/phone with this tool or counterparty on the existing request_number.",
   receive_from_donor: "Receiver opens a request linked to a known donor phone.",
   seek: "Start a seeker search for an item kind.",
   interest: "Seeker expresses interest in a presented match by request number.",
@@ -58,7 +58,7 @@ const COMMAND_DESCRIPTIONS: Record<string, string> = {
   counterparty: "Link or update the other party name/phone on a request.",
   counterparty_candidate: "Store a pending contact-card candidate for confirmation.",
   confirm_counterparty: "Accept or reject the pending counterparty candidate.",
-  contact_counterparty: "Record consent to message the other party (true/false).",
+  contact_counterparty: "Record consent to message the other party (true/false). Call again after a phone/vCard is attached if notices_queued was 0. Do not claim the other party was contacted unless notices_queued > 0.",
   approve_self: "Speaker approves their own participation.",
   approve_schedule: "Speaker approves the proposed run date.",
   select: "Select which open request is active.",

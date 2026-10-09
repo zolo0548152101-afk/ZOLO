@@ -102,10 +102,13 @@ export const ACTIVE = [
   "cancel_pending",
 ] as const;
 export function canonicalPhone(value: string): string {
-  if (value.includes("@lid")) throw new AppError("lid_is_not_phone");
-  if (!/^[+\d\s().-]+(?:@c\.us|@s\.whatsapp\.net)?$/.test(value))
+  const cleaned = value
+    .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+    .trim();
+  if (cleaned.includes("@lid")) throw new AppError("lid_is_not_phone");
+  if (!/^[+\d\s().-]+(?:@c\.us|@s\.whatsapp\.net)?$/.test(cleaned))
     throw new AppError("invalid_phone");
-  let s = value.split("@")[0]!.replace(/\D/g, "");
+  let s = cleaned.split("@")[0]!.replace(/\D/g, "");
   if (s.startsWith("00972")) s = s.slice(5);
   else if (s.startsWith("972")) s = s.slice(3);
   if (s.startsWith("0")) s = s.slice(1);
@@ -678,12 +681,25 @@ export function nextQuestion(
       floorNote: false,
       missing: missingOf(r, "free", "donor"),
     };
+  const counterpart = r.parties.find((x) => x.role !== p.role);
+  // A name-only recipient is not contactable yet — ask for the phone first.
+  if (
+    r.origin === "direct" &&
+    !r.represents_both_parties &&
+    counterpart &&
+    !counterpart.phone
+  )
+    return {
+      text: "",
+      floorNote: false,
+      missing: missingOf(r, "counterparty", p.role),
+    };
   // Contact / counterparty only after own details + item rules above.
   if (
     r.origin === "direct" &&
     !r.represents_both_parties &&
     !r.verification_contacted &&
-    r.parties.some((x) => x.role !== p.role) &&
+    counterpart &&
     itemsReadyForHandoff(r)
   )
     return {
@@ -691,7 +707,7 @@ export function nextQuestion(
       floorNote: false,
       missing: missingOf(r, "contact_counterparty", p.role),
     };
-  if (!r.parties.some((x) => x.role !== p.role))
+  if (!counterpart)
     return {
       text: "",
       floorNote: false,
