@@ -30,7 +30,7 @@ import {
   pressureSignals,
 } from "../src/domain/customer-language.js";
 import { CLARIFY_REPLY, verifyClaims, emptyClaims } from "../src/domain/ai-guards.js";
-import { Commands } from "../src/application/commands.js";
+import { Commands, validTransportPreference } from "../src/application/commands.js";
 import type { Store } from "../src/infrastructure/store.js";
 import type { Command, Context } from "../src/domain/types.js";
 import { planSchema, commandSchema } from "../src/domain/types.js";
@@ -2979,4 +2979,11 @@ test("config accepts agent prompt falling back to action prompt", () => {
   assert.equal(c.OPENAI_AGENT_PROMPT_ID, "");
   assert.equal(c.OPENAI_ACTION_PROMPT_ID, "pmpt_action");
   assert.equal(c.OPENAI_REPLY_PROMPT_ID, "pmpt_reply");
+});
+
+test("transport preference rejects a non-Tuesday or out-of-window request", () => {
+  assert.equal(validTransportPreference("רביעי אחרי 18:00"), false);
+  assert.equal(validTransportPreference("יום שלישי ב-15:00"), false);
+  assert.equal(validTransportPreference("Tuesday 20:00"), false);
+  assert.equal(validTransportPreference("יום שלישי אחרי 18:00"), true);
 });

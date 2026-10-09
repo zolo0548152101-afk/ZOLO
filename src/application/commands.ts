@@ -34,6 +34,24 @@ export interface Outcome {
   humanReason?: string;
 }
 
+/**
+ * A preference may express a time within the Tuesday delivery window, but it
+ * must never turn another weekday or an impossible hour into stored request
+ * state. The agent explains the constraint; this guard prevents a bad tool
+ * call from persisting it anyway while preserving all other details writes.
+ */
+export function validTransportPreference(value: string): boolean {
+  const text = norm(value);
+  const nonTuesday =
+    /(?:יום\s*)?(?:ראשון|שני|רביעי|חמישי|שישי|שבת|sunday|monday|wednesday|thursday|friday|saturday)/iu;
+  if (nonTuesday.test(text)) return false;
+  for (const rawHour of text.matchAll(/\b([01]?\d|2[0-3])(?::\d{2})?\b/g)) {
+    const hour = Number(rawHour[1]);
+    if (hour < 16 || hour >= 20) return false;
+  }
+  return true;
+}
+
 /** Pull "קוראים לי X" / "שמי X" from recent user turns when opening a request. */
 function recentSelfName(ctx: Context, text: string): string | null {
   const blob = [
@@ -1170,7 +1188,8 @@ export class Commands {
       if (cmd.address) p.address = cmd.address.trim();
       // Never invent floor=0 — only store a floor the customer actually gave.
       if (cmd.floor !== null) p.floor = cmd.floor;
-      if (cmd.preferred_time) r.preferred_time = cmd.preferred_time;
+      if (cmd.preferred_time && validTransportPreference(cmd.preferred_time))
+        r.preferred_time = cmd.preferred_time;
     } else if (cmd.type === "item_facts") {
       invalidateProposal(r);
       ownParty(r, phone, "donor");
