@@ -436,6 +436,24 @@ export class Commands {
     if (cmd.type === "donate" || cmd.type === "receive_from_donor") {
       const items = cmd.items.map(asItem);
       const isDonor = cmd.type === "donate";
+      // A verification recipient can mention the item while approving it.
+      // Do not let an accidental `donate` tool call turn that acknowledgement
+      // into a second request. A new donation remains allowed when the sender
+      // explicitly expresses a donation intent in this message.
+      const activeDirectForSpeaker = ctx.requests.find(
+        (request) =>
+          request.origin === "direct" &&
+          !["coordinated", "closed", "cancelled", "rejected", "cancel_pending"].includes(
+            request.status,
+          ) &&
+          request.parties.some((party) => party.phone === phone),
+      );
+      if (isDonor && activeDirectForSpeaker && !donationIntent(text))
+        throw new AppError(
+          "donation_not_explicit",
+          409,
+          "הפנייה הקיימת נשארה פעילה; לא נפתחה מסירה חדשה.",
+        );
       // Contact cards often arrive in the same coalesced turn as the item.
       // Enrich missing counterparty phone/name from the vCard before write.
       const card = ctx.message.contacts[0];
@@ -1021,9 +1039,13 @@ export class Commands {
       }
       this.queueCounterpartyNotice(r, other, notices);
       await c.query(
-        `UPDATE conversations SET selected_request_id=$2,version=version+1
-           WHERE contact_id=(SELECT id FROM contacts WHERE phone=$1)`,
-        [other.phone, r.id],
+        `INSERT INTO conversations(contact_id,session,chat_id,selected_request_id,version)
+         SELECT id,$2,concat('972',$1,'@c.us'),$3,1
+           FROM contacts WHERE phone=$1
+         ON CONFLICT(channel,session,contact_id) DO UPDATE
+           SET selected_request_id=EXCLUDED.selected_request_id,
+               version=conversations.version+1`,
+        [other.phone, this.s.config.WAHA_SESSION, r.id],
       );
       return output(null, r);
     }

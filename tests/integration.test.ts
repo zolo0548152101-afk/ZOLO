@@ -777,6 +777,62 @@ test("direct recipient verification repeats supplied destination details and ask
   assert.ok((await s.request(request.id)).parties.find((party) => party.role === "receiver")!.approved_at);
 });
 
+test("recipient confirmation cannot open a second donation when the agent calls donate first", async () => {
+  const donor = phone(), receiver = phone();
+  const opening = donate("מיטה", "bed");
+  if (opening.type !== "donate") throw new Error();
+  opening.counterparty_phone = receiver;
+  opening.counterparty_name = "טל";
+  opening.direct = true;
+  await message(
+    donor,
+    `יש לי מיטה למסור לטל ${receiver}. האיסוף בבית שאן, רחוב הרקפת 7, קומה 2; היעד בבית שאן, רחוב הנרקיס 12, קומה 1. אפשר לפנות לטל לאימות.`,
+    [opening],
+  );
+  const request = (await s.active(donor))[0]!;
+  await message(donor, "כן, תפנו לטל לאימות", [
+    { type: "contact_counterparty", request_number: request.number, contact: true },
+  ]);
+  const linked = await pool.query<{ selected_request_id: string }>(
+    `SELECT cv.selected_request_id
+       FROM conversations cv
+       JOIN contacts co ON co.id=cv.contact_id
+      WHERE co.phone=$1`,
+    [receiver],
+  );
+  assert.equal(linked.rows[0]?.selected_request_id, request.id);
+
+  const mistakenDonation = donate("מיטה", "bed");
+  await message(
+    receiver,
+    "אני טל, מאשרת לקבל את המיטה בכתובת שדרות הנרקיס 12 בבית שאן, קומה 1. גם יום שלישי 13/10/2026 מתאים לי.",
+    [
+      mistakenDonation,
+      {
+        type: "details",
+        request_number: request.number,
+        role: "receiver",
+        name: "טל",
+        settlement: "בית שאן",
+        address: "שדרות הנרקיס 12",
+        floor: 1,
+        preferred_time: null,
+      },
+      { type: "approve_self", request_number: request.number },
+      { type: "approve_schedule", request_number: request.number, date: "2026-10-13" },
+    ],
+  );
+
+  const requests = await s.active(receiver);
+  assert.equal(requests.length, 1, "the recipient reply must stay on the direct request");
+  assert.equal(requests[0]!.id, request.id);
+  const saved = await s.request(request.id);
+  const recipient = saved.parties.find((party) => party.role === "receiver")!;
+  assert.ok(recipient.approved_at);
+  assert.equal(recipient.schedule_approved, true);
+  assert.equal(recipient.schedule_approved_date, "2026-10-13");
+});
+
 test("donor cannot overwrite receiver destination after the direct request creation message", async () => {
   const donor = phone(), receiver = phone();
   await message(
