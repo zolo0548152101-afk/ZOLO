@@ -53,6 +53,11 @@ let cfg = config(),
   root = "";
 const ai = new FakePlanner(),
   channel = new FakeChannel();
+
+function requiredFixturePhone(phone: string | null): string {
+  assert.ok(phone, "this fixture requires a resolved party phone");
+  return phone;
+}
 let counter = 0;
 const phone = () => String(530000000 + ++counter);
 before(async () => {
@@ -916,7 +921,7 @@ test("direct handoff keeps supplied pickup and extracts a later labeled donor na
 });
 test("cancellation notifies the other party and supports final close", async () => {
   const r = await readyRequest(),
-    donor = r.parties.find((p) => p.role === "donor")!.phone,
+    donor = requiredFixturePhone(r.parties.find((p) => p.role === "donor")!.phone),
     receiver = r.parties.find((p) => p.role === "receiver")!.phone;
   const asked = await message(donor, "אני מבטל את התיאום", [
     { type: "cancel", request_number: r.number, choice: "ask" },
@@ -1076,7 +1081,7 @@ test("self transfer to אליי treats the sender as both parties without requir
 
 test("receiver cannot alter donor item facts; attempted forbidden change escalates durably", async () => {
   const r = await readyRequest(),
-    receiver = r.parties[1]!.phone;
+    receiver = requiredFixturePhone(r.parties[1]!.phone);
   const m = await message(receiver, "המקרר בחינם ותקין", [
     facts({ request_number: r.number, working: true }),
   ]);
@@ -2039,7 +2044,7 @@ test("admin database is read-only and exposes only named mutation operations", a
   assert.equal(genericDelete.statusCode, 404);
   const namedMutation = await app.inject({
     method: "POST",
-    url: `/admin/conversations/${encodeURIComponent(r.parties[0]!.phone)}/resume`,
+    url: `/admin/conversations/${encodeURIComponent(requiredFixturePhone(r.parties[0]!.phone))}/resume`,
     headers: { "x-admin-token": cfg.HAIM_ADMIN_TOKEN },
     payload: { reason: "T18 named operation" },
   });

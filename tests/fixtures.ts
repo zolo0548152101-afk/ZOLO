@@ -10,7 +10,7 @@ import type {
   Item,
   Notice,
 } from "../src/domain/types.js";
-import type { Planner } from "../src/infrastructure/ai.js";
+import type { Planner, ReplyPlan } from "../src/infrastructure/ai.js";
 import type { Channel, Delivery } from "../src/infrastructure/waha.js";
 import { asItem } from "../src/application/commands.js";
 import { rulePlan } from "../src/application/rule-planner.js";
@@ -98,12 +98,25 @@ export class FakePlanner implements Planner {
   }
   async reply(
     _ctx: Context,
-    input: { operation: Record<string, unknown>; fallback: string },
-  ): Promise<{ text: string; metadata: Record<string, unknown> }> {
+    input: { operation: Record<string, unknown>; request: Request | null },
+  ): Promise<{ plan: ReplyPlan; metadata: Record<string, unknown> }> {
     this.replyCalls++;
     if (this.fail) throw new Error("simulated_openai_timeout");
     return {
-      text: this.phraseReplyText || this.managedReply || input.fallback,
+      plan: {
+        messages: [
+          {
+            recipient: "sender",
+            purpose: "test_reply",
+            text:
+              this.phraseReplyText ||
+              this.managedReply ||
+              (input.operation.request_status === "coordinated"
+                ? "הפנייה תואמה."
+                : "קיבלתי, נמשיך לפי הפרטים השמורים."),
+          },
+        ],
+      },
       metadata: { test_double: true, operation: input.operation },
     };
   }
@@ -173,8 +186,12 @@ export const details = (
   floor: null,
   ...over,
 });
-export function sampleRequest(): Request {
-  const p = (role: Party["role"], phone: string): Party => ({
+/** Test fixture: unlike production's incomplete parties, both fixture parties have phones. */
+export type FixtureParty = Party & { phone: string };
+export type FixtureRequest = Omit<Request, "parties"> & { parties: FixtureParty[] };
+
+export function sampleRequest(): FixtureRequest {
+  const p = (role: Party["role"], phone: string): FixtureParty => ({
     role,
     phone,
     name: role === "donor" ? "מוסר בדיקה" : "מקבל בדיקה",
