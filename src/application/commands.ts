@@ -1243,9 +1243,8 @@ export class Commands {
     mutable(r);
     let distanceReviewThisTurn = false;
     if (cmd.type === "details") {
-      if (cmd.name || cmd.settlement || cmd.address || cmd.floor !== null)
-        invalidateProposal(r);
       let p: Party;
+      let donorCorrectingReceiverDestination = false;
       try {
         p = ownParty(r, phone, cmd.role ?? undefined);
       } catch (error) {
@@ -1258,6 +1257,17 @@ export class Commands {
           (!cmd.address || !receiver.address || receiver.address === cmd.address) &&
           (cmd.floor === null || receiver.floor === null || receiver.floor === cmd.floor),
         );
+        const changesReceiverDestination = Boolean(
+          receiver &&
+            ((cmd.settlement && receiver.settlement !== cmd.settlement) ||
+              (cmd.address && receiver.address !== cmd.address) ||
+              (cmd.floor !== null && receiver.floor !== cmd.floor)),
+        );
+        const directDonorReceiverEdit =
+          r.origin === "direct" &&
+          cmd.role === "receiver" &&
+          actor?.role === "donor" &&
+          Boolean(receiver);
         // In a direct handoff the donor may supply the receiver's destination
         // ("כתובת היעד…"), either in the opening message or together with
         // later consent to contact them. Store those facts as provisional so
@@ -1266,16 +1276,26 @@ export class Commands {
         // later cross-party edits stay forbidden.
         if (
           !(error instanceof AppError && error.code === "forbidden_party") ||
-          r.origin !== "direct" ||
-          cmd.role !== "receiver" ||
-          actor?.role !== "donor" ||
+          !directDonorReceiverEdit ||
           !receiver ||
-          receiver.approved_at !== null ||
-          !onlyFillsMissingReceiverFields
+          !(
+            (receiver.approved_at === null && onlyFillsMissingReceiverFields) ||
+            (receiver.approved_at !== null && changesReceiverDestination && !cmd.name)
+          )
         )
           throw error;
         p = receiver;
+        donorCorrectingReceiverDestination =
+          receiver.approved_at !== null && changesReceiverDestination;
       }
+      // A donor correction of an already-approved receiver destination needs
+      // that receiver's address reconfirmation, but it does not erase a date
+      // approval. Every other material detail edit still resets the proposal.
+      if (
+        (cmd.name || cmd.settlement || cmd.address || cmd.floor !== null) &&
+        !donorCorrectingReceiverDestination
+      )
+        invalidateProposal(r);
       const settlementIsTheStreet =
         Boolean(cmd.settlement) &&
         Boolean(cmd.address) &&
@@ -1329,6 +1349,22 @@ export class Commands {
       // Never invent floor=0 — only store a floor the customer actually gave.
       if (cmd.floor !== null) p.floor = cmd.floor;
       if (cmd.preferred_time) r.preferred_time = cmd.preferred_time;
+      if (donorCorrectingReceiverDestination) {
+        p.approved_at = null;
+        p.approved_by = null;
+        await c.query(
+          `UPDATE request_verifications
+              SET state='consented', approved_at=NULL, updated_at=clock_timestamp(), last_error=NULL
+            WHERE request_id=$1 AND role='receiver'`,
+          [r.id],
+        );
+        await this.s.event(c, ctx.message, phone, "receiver_destination_reconfirmation_required", {
+          settlement: p.settlement,
+          address: p.address,
+          floor: p.floor,
+          schedule_approval_preserved: p.schedule_approved,
+        }, r.id);
+      }
       if (cmd.address && /^(?:רחוב|שכונת|שכונה|שדרות|שד[׳']?)(?=$|\s)/u.test(cmd.address.trim())) {
         const known = await this.s.region(c, cmd.address.trim());
         if (known.decision === "review")

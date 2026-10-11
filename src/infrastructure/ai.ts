@@ -49,12 +49,22 @@ export interface DecodeResult {
   metadata: Record<string, unknown>;
 }
 
+export const replyMessageSchema = z.strictObject({
+  recipient: z.enum(["sender", "donor", "receiver"]),
+  purpose: z.string().trim().min(1).max(80),
+  text: z.string().trim().min(1).max(4000),
+});
+export const replyPlanSchema = z.strictObject({
+  messages: z.array(replyMessageSchema).min(1).max(3),
+});
+export type ReplyPlan = z.infer<typeof replyPlanSchema>;
+
 export interface Planner {
   plan(context: Context): Promise<DecodeResult>;
   reply(
     context: Context,
-    input: { operation: Record<string, unknown>; fallback: string },
-  ): Promise<{ text: string; metadata: Record<string, unknown> }>;
+    input: { operation: Record<string, unknown>; request: Request | null },
+  ): Promise<{ plan: ReplyPlan; metadata: Record<string, unknown> }>;
   phraseReply(
     canonical: string,
     context: Context,
@@ -111,7 +121,7 @@ function toResponsesStrictSchema(source: JsonSchemaObject): JsonSchemaObject {
 const decodeOutputJsonSchema = toResponsesStrictSchema(
   z.toJSONSchema(decodeSchemaSource) as JsonSchemaObject,
 );
-const replyResponseSchema = z.strictObject({ reply: z.string().trim().min(1).max(4000) });
+const replyResponseSchema = replyPlanSchema;
 
 /** Legacy hosted-prompt shape still accepted while the decode prompt is rolled out. */
 const managedResponseSchema = z
@@ -265,10 +275,6 @@ function decodePromptSource(_c: Config): PromptSource {
 
 function withCanonical(instructions: string, canonical: string): string {
   return instructions.split("{{canonical}}").join(canonical);
-}
-
-function replyPromptSource(_c: Config, canonical = ""): PromptSource {
-  return { mode: "git", instructions: withCanonical(REPLY_INSTRUCTIONS, canonical) };
 }
 
 function phrasePromptSource(_c: Config, canonical: string): PromptSource {
@@ -494,12 +500,15 @@ export class OpenAIPlanner implements Planner {
 
   async reply(
     ctx: Context,
-    input: { operation: Record<string, unknown>; fallback: string },
-  ): Promise<{ text: string; metadata: Record<string, unknown> }> {
+    input: { operation: Record<string, unknown>; request: Request | null },
+  ): Promise<{ plan: ReplyPlan; metadata: Record<string, unknown> }> {
     if (!this.c.AI_ENABLED)
-      return { text: input.fallback, metadata: { provider: "fallback", ai_enabled: false } };
+      throw new AppError("reply_manager_disabled", 503);
     const started = Date.now();
-    const source = replyPromptSource(this.c, input.fallback);
+    // The new two-stage path is intentionally owned by the prompt committed
+    // with the code. Hosted prompts are retained for rollback, not selected
+    // implicitly at runtime.
+    const source = { mode: "git" as const, instructions: REPLY_INSTRUCTIONS };
     const clearPath =
       ctx.requests.length > 0 ||
       /(?:למסור|לתרום|להעביר|לקבל|מסירה|מיטה|ספה|שולחן|כרטיס איש קשר)/u.test(
@@ -513,8 +522,8 @@ export class OpenAIPlanner implements Planner {
       candidates: ctx.candidates,
       active_search: ctx.active_search ?? null,
       operation_result: input.operation,
-      fallback_reply: input.fallback,
-      canonical: input.fallback,
+      request_after_commit: input.request,
+      allowed_recipients: ["sender", "donor", "receiver"],
       // Intro only when the path is still unclear — never on a clear donate/receive turn.
       already_introduced:
         conversationAlreadyIntroduced(ctx.history) || clearPath,
@@ -522,24 +531,36 @@ export class OpenAIPlanner implements Planner {
     };
     const response = await this.client.responses.create({
       model: this.c.OPENAI_MODEL,
-      ...(source.mode === "hosted"
-        ? { prompt: { id: source.id, version: source.version } }
-        : {
-            instructions: source.instructions,
-            text: {
-              format: {
-                type: "json_schema",
-                name: "haim_reply",
-                strict: true,
-                schema: {
+      instructions: source.instructions,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "haim_reply_messages",
+          strict: true,
+          schema: {
+            type: "object",
+            properties: {
+              messages: {
+                type: "array",
+                minItems: 1,
+                maxItems: 3,
+                items: {
                   type: "object",
-                  properties: { reply: { type: "string" } },
-                  required: ["reply"],
+                  properties: {
+                    recipient: { type: "string", enum: ["sender", "donor", "receiver"] },
+                    purpose: { type: "string" },
+                    text: { type: "string" },
+                  },
+                  required: ["recipient", "purpose", "text"],
                   additionalProperties: false,
                 },
               },
             },
-          }),
+            required: ["messages"],
+            additionalProperties: false,
+          },
+        },
+      },
       input: [{
         role: "user",
         content: JSON.stringify(replyInput),
@@ -551,12 +572,12 @@ export class OpenAIPlanner implements Planner {
     const parsed = replyResponseSchema.safeParse(payload);
     if (!parsed.success) throw new AppError("invalid_reply_manager_response");
     return {
-      text: parsed.data.reply,
+      plan: parsed.data,
       metadata: {
         provider: "openai_responses_reply_manager",
         prompt_mode: source.mode,
-        prompt_id: source.mode === "hosted" ? source.id : "git:prompts/haim-reply.he.md",
-        prompt_version: source.mode === "hosted" ? source.version : "git",
+        prompt_id: "git:prompts/haim-reply.he.md",
+        prompt_version: "git",
         prompt_sha: promptSha(REPLY_INSTRUCTIONS),
         model: this.c.OPENAI_MODEL,
         response_id: response.id,
@@ -564,8 +585,8 @@ export class OpenAIPlanner implements Planner {
         usage: response.usage,
         model_input: {
           prompt_mode: source.mode,
-          prompt_id: source.mode === "hosted" ? source.id : "git:prompts/haim-reply.he.md",
-          prompt_version: source.mode === "hosted" ? source.version : "git",
+          prompt_id: "git:prompts/haim-reply.he.md",
+          prompt_version: "git",
           payload: replyInput,
         },
         model_output: {

@@ -154,7 +154,7 @@ export class Store {
     );
     if (!base.rows[0]) throw new AppError("request_not_found", 404);
     const parties = await c.query<Party>(
-      `SELECT p.role,co.phone,p.name,p.settlement,p.address,p.floor,p.floor_note_shown,p.approved_at::text,ap.phone AS approved_by,(p.schedule_approved_date::date=COALESCE(r.proposed_run_date,r.run_date)::date AND p.schedule_approved_date IS NOT NULL) AS schedule_approved,p.schedule_approved_date::text,p.schedule_approved_at::text FROM request_parties p JOIN requests r ON r.id=p.request_id LEFT JOIN contacts co ON co.id=p.contact_id LEFT JOIN contacts ap ON ap.id=p.approved_by WHERE p.request_id=$1 ORDER BY role`,
+      `SELECT p.role,p.contact_id,co.phone,p.name,p.settlement,p.address,p.floor,p.floor_note_shown,p.approved_at::text,ap.phone AS approved_by,(p.schedule_approved_date::date=COALESCE(r.proposed_run_date,r.run_date)::date AND p.schedule_approved_date IS NOT NULL) AS schedule_approved,p.schedule_approved_date::text,p.schedule_approved_at::text FROM request_parties p JOIN requests r ON r.id=p.request_id LEFT JOIN contacts co ON co.id=p.contact_id LEFT JOIN contacts ap ON ap.id=p.approved_by WHERE p.request_id=$1 ORDER BY role`,
       [id],
     );
     const items = await c.query<Item>(

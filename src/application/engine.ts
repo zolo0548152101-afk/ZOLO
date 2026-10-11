@@ -1240,12 +1240,10 @@ export class Engine {
     } catch {
       /* pre-snapshot is best-effort */
     }
-    const deferredNotices: {
-      outboxId: string;
-      notice: Notice;
-      requestId: string | null;
-    }[] = [];
-    const committed = await this.s.transaction(async (c) => {
+    // Compatibility-only holder for the retired template path below. It is
+    // intentionally never populated once the durable reply stage is enabled.
+    const deferredNotices: { outboxId: string; notice: Notice; requestId: string | null }[] = [];
+    const rawCommitted = await this.s.transaction(async (c) => {
       let ctx = await this.s.context(id, c, true);
       if (ctx.message.processed_at) return;
       const text = ctx.message.transcript ?? ctx.message.text,
@@ -1711,23 +1709,10 @@ export class Engine {
                 { command },
                 result.request?.id ?? null,
               );
-              for (const [n, notice] of result.notices.entries()) {
-                const dedupeKey = `notice:${id}:${index}:${n}`;
-                const outboxId = await this.s.outbound(
-                  c,
-                  ctx.message,
-                  notice,
-                  dedupeKey,
-                  result.request?.id ?? null,
-                  "pending",
-                );
-                if (outboxId)
-                  deferredNotices.push({
-                    outboxId,
-                    notice,
-                    requestId: result.request?.id ?? null,
-                  });
-              }
+              // Notices are business intent, not independently phrased
+              // templates. The reply manager receives the committed state and
+              // produces the complete recipient list in one durable stage.
+              void result.notices;
               index++;
               if (reason || request?.status === "rejected") break;
             }
@@ -1878,26 +1863,6 @@ export class Engine {
                 await this.s.save(c, request);
                 reply = nextQuestion(request, phone).text;
                 intent = "ask_schedule_approval";
-                for (const p of request.parties) {
-                  if (!p.phone || p.phone === phone || request.represents_both_parties) continue;
-                  const permission = await c.query<{ state: string }>(
-                    "SELECT state FROM request_verifications WHERE request_id=$1 AND role=$2",
-                    [request.id, p.role],
-                  );
-                  const authorized = ["consented", "queued", "provider_accepted", "delivered", "approved"].includes(permission.rows[0]?.state ?? "");
-                  if (!authorized) continue;
-                  const notice = { phone: p.phone, text: nextQuestion(request, p.phone).text };
-                  const outboxId = await this.s.outbound(
-                    c,
-                    ctx.message,
-                    notice,
-                    `schedule-proposal:${request.id}:${proposed}:${p.phone}`,
-                    request.id,
-                    "pending",
-                  );
-                  if (outboxId)
-                    deferredNotices.push({ outboxId, notice, requestId: request.id });
-                }
               }
             }
             if (request && !reason) {
@@ -1938,21 +1903,9 @@ export class Engine {
                   { date: request.run_date },
                   request.id,
                 );
-                for (const p of request.parties)
-                  if (p.phone && p.phone !== phone)
-                    {
-                    const notice = { phone: p.phone, text: reply };
-                    const outboxId = await this.s.outbound(
-                      c,
-                      ctx.message,
-                      notice,
-                      `coordination:${request.id}:${request.run_date}:${p.phone}`,
-                      request.id,
-                      "pending",
-                    );
-                    if (outboxId)
-                      deferredNotices.push({ outboxId, notice, requestId: request.id });
-                    }
+                // The committed reply stage creates both summaries together.
+                // Keeping this out of the command stage prevents duplicate
+                // schedule/coordinated notices from two independent paths.
               }
             }
           }
@@ -2004,22 +1957,26 @@ export class Engine {
       }
       // Never ship the old «חסר רק…» wording (canonical or model paraphrase).
       if (reply) reply = stripRakOnlyClaims(reply);
-      let customerOutboxId: string | null = null;
-      customerOutboxId = await this.s.outbound(
-        c,
-        ctx.message,
-        { phone, text: reply },
-        `reply:${id}`,
-        request?.id ?? null,
-        "pending",
-      );
+      const operation = {
+        action_results: { intent, reason: reason ?? null },
+        request_status: request?.status ?? null,
+        request_number: request?.number ?? null,
+        persisted: !reason,
+        changed_fields: changedFields,
+        missing_required: request
+          ? nextQuestion(request, phone).missing
+          : null,
+        active_search: afterCtx.active_search ?? null,
+      };
       await c.query(
         "INSERT INTO command_results(message_id,command,result) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
         [
           id,
           JSON.stringify(plan ?? { fast_path: true }),
           JSON.stringify({
-            reply,
+            // Command wording is audit-only. The reply manager sees the
+            // committed request and chooses the actual customer text.
+            command_reply: reply,
             intent,
             request_number: request?.number ?? null,
             reason: reason ?? null,
@@ -2027,8 +1984,14 @@ export class Engine {
         ],
       );
       await c.query(
-        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1",
-        [id, reply, reason ?? null],
+        "UPDATE messages SET processed_at=clock_timestamp(),reply=NULL,error_code=$2 WHERE id=$1",
+        [id, reason ?? null],
+      );
+      await c.query(
+        `INSERT INTO reply_jobs(message_id,request_id,operation)
+         VALUES($1,$2,$3::jsonb)
+         ON CONFLICT(message_id) DO NOTHING`,
+        [id, request?.id ?? null, JSON.stringify(operation)],
       );
       await c.query(
         `UPDATE conversation_turns t SET status='completed',completed_at=clock_timestamp()
@@ -2048,29 +2011,45 @@ export class Engine {
         stage: "processed",
         request_number: request?.number ?? null,
         code: reason ?? "ok",
-        customerOutboxId,
+        // Kept as null only for compatibility with older turn-audit records.
+        // The durable reply worker creates the real outbox rows.
+        customerOutboxId: null,
         canonicalReply: reply,
         requestId: request?.id ?? null,
-        provenOperational: request?.status === "coordinated" || deferredNotices.length > 0,
-        operation: {
-          action_results: { intent, reason: reason ?? null },
-          request_status: request?.status ?? null,
-          request_number: request?.number ?? null,
-          persisted: !reason,
-          outbound_notices_queued: deferredNotices.length,
-          changed_fields: changedFields,
-          missing_required: request
-            ? nextQuestion(request, phone).missing
-            : null,
-          active_search: afterCtx.active_search ?? null,
-        },
+        operation,
         changedFields,
       };
     });
+    // Keep legacy audit-only code below type-isolated while the durable reply
+    // worker is the active path. It is never selected unless explicitly
+    // disabled for a rollback investigation.
+    const committed: any = rawCommitted;
     if (committed) this.log.info(committed);
+    const durableReplyEnabled = process.env.HAIM_USE_DURABLE_REPLY !== "disabled";
+    if (durableReplyEnabled && committed && "operation" in committed && "message_id" in committed) {
+      await this.s.transaction(async (c) => {
+        await this.s.queue.send(c, "reply", { id }, `reply:${id}`);
+      });
+      const stage = "stage" in committed ? String(committed.stage) : "processed";
+      await this.auditTurn(id, {
+        fate: stage === "superseded" ? "superseded" : technicalReason ? "failed" : "completed",
+        fate_detail: { stage, code: "code" in committed ? committed.code : null },
+        state_before: stateBefore,
+        reply_text: null,
+        outbox_id: null,
+        error_code: technicalReason ?? null,
+        opened_at: openedAt,
+        intent: String(
+          (committed.operation as { action_results?: { intent?: string } })
+            .action_results?.intent ?? "",
+        ) || null,
+        introduced: false,
+      });
+      return;
+    }
     let auditedReply: string | null =
       committed && "canonicalReply" in committed
-        ? (committed.canonicalReply as string | null)
+        ? (committed.canonicalReply as unknown as string | null)
         : null;
     let auditedIntroduced = false;
     let auditedMergedInto: string | null = null;
@@ -2117,13 +2096,13 @@ export class Engine {
       let replyMeta: Record<string, unknown> | null = null;
       try {
         const generated = await this.ai.reply(ctx, {
-          fallback: committed.canonicalReply,
+          request: committed.requestId ? await this.s.request(committed.requestId) : null,
           operation: committed.operation,
         });
         replyMeta = generated.metadata;
         // Reply manager owns customer wording. Do not replace it with the
         // canonical template when the model produced text.
-        const phrased = (generated.text ?? "").trim();
+        const phrased = (generated.plan.messages[0]?.text ?? "").trim();
         const guarded = applyClaimGuard(
           committed.canonicalReply,
           phrased || committed.canonicalReply,
@@ -2316,7 +2295,7 @@ export class Engine {
         reply_text: auditedMergedInto ? null : auditedReply,
         outbox_id:
           "customerOutboxId" in committed
-            ? (committed.customerOutboxId as string | null)
+            ? (committed.customerOutboxId as unknown as string | null)
             : null,
         error_code:
           fate === "failed"
@@ -2340,6 +2319,114 @@ export class Engine {
             : null,
         introduced: auditedIntroduced,
       });
+    }
+  }
+
+  /**
+   * Second AI stage. Commands were already committed before this method is
+   * queued, so retrying it can never replay a database mutation.
+   */
+  async reply(id: string): Promise<void> {
+    const job = await this.s.transaction(async (c) => {
+      const found = await c.query<{
+        message_id: string;
+        request_id: string | null;
+        operation: Record<string, unknown>;
+        state: string;
+      }>("SELECT message_id,request_id,operation,state FROM reply_jobs WHERE message_id=$1 FOR UPDATE", [id]);
+      const row = found.rows[0];
+      if (!row || row.state === "completed") return null;
+      await c.query(
+        "UPDATE reply_jobs SET state='processing',attempts=attempts+1,claimed_at=clock_timestamp(),last_error=NULL WHERE message_id=$1",
+        [id],
+      );
+      return row;
+    });
+    if (!job) return;
+    try {
+      const context = await this.s.context(id);
+      const request = job.request_id ? await this.s.request(job.request_id) : null;
+      const generated = await this.ai.reply(context, {
+        operation: job.operation,
+        request,
+      });
+      await this.s.transaction(async (c) => {
+        const active = await c.query<{ state: string }>(
+          "SELECT state FROM reply_jobs WHERE message_id=$1 FOR UPDATE",
+          [id],
+        );
+        if (active.rows[0]?.state !== "processing") return;
+        const fresh = await this.s.context(id, c);
+        const freshRequest = job.request_id
+          ? await this.s.request(job.request_id, c)
+          : null;
+        const sender = await c.query<{ contact_id: string }>(
+          "SELECT contact_id FROM messages WHERE id=$1",
+          [id],
+        );
+        const targets = new Map<string, { contactId: string; phone: string }>();
+        if (sender.rows[0] && fresh.message.phone)
+          targets.set("sender", {
+            contactId: sender.rows[0].contact_id,
+            phone: fresh.message.phone,
+          });
+        for (const role of ["donor", "receiver"] as const) {
+          const party = freshRequest?.parties.find((candidate) => candidate.role === role);
+          const verification = freshRequest?.verification_states?.find(
+            (candidate) => candidate.role === role,
+          );
+          const allowed = ["consented", "queued", "provider_accepted", "delivered", "approved"].includes(
+            verification?.state ?? "",
+          );
+          if (party?.contact_id && party.phone && (party.contact_id === sender.rows[0]?.contact_id || allowed))
+            targets.set(role, { contactId: party.contact_id, phone: party.phone });
+        }
+        const used = new Set<string>();
+        const outboxIds: string[] = [];
+        let senderText: string | null = null;
+        const revision = [
+          freshRequest?.version ?? 0,
+          freshRequest?.run_date ?? freshRequest?.proposed_run_date ?? "none",
+        ].join(":");
+        for (const message of generated.plan.messages) {
+          const target = targets.get(message.recipient);
+          if (!target) throw new AppError("reply_recipient_not_allowed", 400);
+          const identityPurpose = `${target.contactId}:${message.purpose}`;
+          if (used.has(identityPurpose)) continue;
+          used.add(identityPurpose);
+          const purpose = message.purpose.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "reply";
+          const outboxId = await this.s.outbound(
+            c,
+            fresh.message,
+            { phone: target.phone, text: message.text },
+            `ai-reply:${freshRequest?.id ?? id}:${purpose}:${target.contactId}:${revision}`,
+            freshRequest?.id ?? null,
+          );
+          if (outboxId) outboxIds.push(outboxId);
+          if (target.contactId === sender.rows[0]?.contact_id) senderText = message.text;
+        }
+        if (!outboxIds.length) throw new AppError("reply_plan_produced_no_outbox", 409);
+        await c.query("UPDATE messages SET reply=$2,ai_metadata=coalesce(ai_metadata, '{}'::jsonb) || jsonb_build_object('reply', $3::jsonb) WHERE id=$1", [
+          id,
+          senderText,
+          JSON.stringify(generated.metadata),
+        ]);
+        await c.query(
+          "UPDATE reply_jobs SET state='completed',completed_at=clock_timestamp(),last_error=NULL WHERE message_id=$1",
+          [id],
+        );
+        await this.s.event(c, fresh.message, "system", "reply_manager_completed", {
+          response_id: generated.metadata.response_id ?? null,
+          prompt_id: generated.metadata.prompt_id ?? null,
+          outbox_ids: outboxIds,
+        }, freshRequest?.id ?? null);
+      });
+    } catch (error) {
+      await this.s.pool.query(
+        "UPDATE reply_jobs SET state='failed',last_error=$2,claimed_at=NULL WHERE message_id=$1 AND state='processing'",
+        [id, errorCode(error)],
+      );
+      throw error;
     }
   }
 

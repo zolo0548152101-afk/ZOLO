@@ -140,6 +140,13 @@ export class Runtime {
           },
         );
         await queue.boss.work<JobData, void, typeof settings>(
+          "reply",
+          settings,
+          async (jobs) => {
+            for (const j of jobs) await engine.reply(j.data.id);
+          },
+        );
+        await queue.boss.work<JobData, void, typeof settings>(
           "send",
           settings,
           async (jobs) => {
@@ -229,6 +236,22 @@ export class Runtime {
               row.id,
               jobId,
             ]);
+          });
+        }
+        await this.pool.query(
+          `UPDATE reply_jobs SET state='pending',claimed_at=NULL
+            WHERE state='processing'
+              AND claimed_at < clock_timestamp()-interval '2 minutes'`,
+        );
+        const recoverReplies = await this.pool.query<{ message_id: string }>(
+          `SELECT message_id FROM reply_jobs
+            WHERE state IN ('pending','failed')
+            ORDER BY created_at
+            LIMIT 500`,
+        );
+        for (const row of recoverReplies.rows) {
+          await store.transaction(async (c) => {
+            await queue.send(c, "reply", { id: row.message_id }, `reply:${row.message_id}`);
           });
         }
         if (this.config.INTEGRATION_DISPATCH) await this.recoverIntegrationQueue();
