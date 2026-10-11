@@ -21,6 +21,9 @@ const envSchema = z.object({
   // do not override the hosted prompt's model.
   OPENAI_MODEL: z.string().default("gpt-6-luna"),
   // Unified customer agent (tools + reply). Falls back to ACTION when empty.
+  // The source-controlled prompt is the default. Set this only for a reviewed
+  // OpenAI-hosted prompt version that deliberately replaces it.
+  OPENAI_USE_HOSTED_AGENT_PROMPT: flag.default(false),
   OPENAI_AGENT_PROMPT_ID: z.string().default(""),
   OPENAI_AGENT_PROMPT_VERSION: z.string().default(""),
   OPENAI_ACTION_PROMPT_ID: z.string().default(""),
@@ -145,7 +148,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error("simulation_requires_separate_schema");
   if (c.AI_ENABLED && !c.OPENAI_API_KEY)
     throw new Error("missing_openai_key_or_disable_ai");
-  if (c.AI_ENABLED) {
+  if (c.AI_ENABLED && c.OPENAI_USE_HOSTED_AGENT_PROMPT) {
     const agentId = c.OPENAI_AGENT_PROMPT_ID || c.OPENAI_ACTION_PROMPT_ID;
     const agentVersion =
       c.OPENAI_AGENT_PROMPT_VERSION || c.OPENAI_ACTION_PROMPT_VERSION;

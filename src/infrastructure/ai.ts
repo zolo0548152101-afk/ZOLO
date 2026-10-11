@@ -314,7 +314,9 @@ export class OpenAIPlanner implements Planner {
       };
     }
     const started = Date.now();
-    const hosted = agentHosted(this.c);
+    const hosted = this.c.OPENAI_USE_HOSTED_AGENT_PROMPT
+      ? agentHosted(this.c)
+      : null;
     const rulesState = input.rules ?? defaultRulesState(this.c.TRANSPORT_CAPACITY);
     const facts = buildStage1Facts({
       ctx,
@@ -353,14 +355,11 @@ export class OpenAIPlanner implements Planner {
     // A hosted prompt owns its complete instruction contract. Passing
     // `instructions` here would replace that contract rather than append to
     // it, so use the local full prompt only when no hosted prompt is selected.
-    const agentInstructions = this.c.OPENAI_AGENT_PROMPT_ID
-      ? undefined
-      : AGENT_INSTRUCTIONS;
+    const agentInstructions = hosted ? undefined : AGENT_INSTRUCTIONS;
     let response = await this.client.responses.create({
-      prompt: {
-        id: hosted.id,
-        version: hosted.version,
-      },
+      ...(hosted
+        ? { prompt: { id: hosted.id, version: hosted.version } }
+        : {}),
       ...(agentInstructions ? { instructions: agentInstructions } : {}),
       ...(tools ? { tools } : {}),
       text: {
@@ -456,10 +455,9 @@ export class OpenAIPlanner implements Planner {
 
       response = await this.client.responses.create({
         previous_response_id: response.id,
-        prompt: {
-          id: hosted.id,
-          version: hosted.version,
-        },
+        ...(hosted
+          ? { prompt: { id: hosted.id, version: hosted.version } }
+          : {}),
         ...(agentInstructions ? { instructions: agentInstructions } : {}),
         ...(tools ? { tools } : {}),
         text: {
@@ -499,9 +497,9 @@ export class OpenAIPlanner implements Planner {
       changedFields,
       metadata: {
         provider: "openai_responses_agent",
-        prompt_mode: "hosted",
-        prompt_id: hosted.id,
-        prompt_version: hosted.version,
+        prompt_mode: hosted ? "hosted" : "source_controlled",
+        prompt_id: hosted?.id ?? null,
+        prompt_version: hosted?.version ?? null,
         model: response.model ?? this.c.OPENAI_MODEL,
         action_source: "ai_agent_tools",
         response_id: response.id,
@@ -510,9 +508,9 @@ export class OpenAIPlanner implements Planner {
         tool_call_count: toolCalls,
         claims: parsed.data.claims,
         model_input: {
-          prompt_mode: "hosted",
-          prompt_id: hosted.id,
-          prompt_version: hosted.version,
+          prompt_mode: hosted ? "hosted" : "source_controlled",
+          prompt_id: hosted?.id ?? null,
+          prompt_version: hosted?.version ?? null,
           payload: userPayload,
         },
         model_output: {
@@ -635,7 +633,9 @@ export class OpenAIPlanner implements Planner {
       };
     }
     const started = Date.now();
-    const hosted = agentHosted(this.c);
+    const hosted = this.c.OPENAI_USE_HOSTED_AGENT_PROMPT
+      ? agentHosted(this.c)
+      : null;
     const facts = buildStage2Facts({
       ctx,
       rules: input.rules,
@@ -670,10 +670,10 @@ export class OpenAIPlanner implements Planner {
         : {}),
     };
     const response = await this.client.responses.create({
-      prompt: {
-        id: hosted.id,
-        version: hosted.version,
-      },
+      ...(hosted
+        ? { prompt: { id: hosted.id, version: hosted.version } }
+        : {}),
+      ...(hosted ? {} : { instructions: AGENT_INSTRUCTIONS }),
       text: {
         format: {
           type: "json_schema",
@@ -702,9 +702,9 @@ export class OpenAIPlanner implements Planner {
       claims: parsed.data.claims,
       metadata: {
         provider: "openai_responses_agent_reply",
-        prompt_mode: "hosted",
-        prompt_id: hosted.id,
-        prompt_version: hosted.version,
+        prompt_mode: hosted ? "hosted" : "source_controlled",
+        prompt_id: hosted?.id ?? null,
+        prompt_version: hosted?.version ?? null,
         model: response.model ?? this.c.OPENAI_MODEL,
         response_id: response.id,
         elapsed_ms: Date.now() - started,
