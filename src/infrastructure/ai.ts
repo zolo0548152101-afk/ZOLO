@@ -360,6 +360,7 @@ export class OpenAIPlanner implements Planner {
       ...(hosted
         ? { prompt: { id: hosted.id, version: hosted.version } }
         : {}),
+      ...(hosted ? {} : { model: this.c.OPENAI_MODEL }),
       ...(agentInstructions ? { instructions: agentInstructions } : {}),
       ...(tools ? { tools } : {}),
       text: {
@@ -673,6 +674,7 @@ export class OpenAIPlanner implements Planner {
       ...(hosted
         ? { prompt: { id: hosted.id, version: hosted.version } }
         : {}),
+      ...(hosted ? {} : { model: this.c.OPENAI_MODEL }),
       ...(hosted ? {} : { instructions: AGENT_INSTRUCTIONS }),
       text: {
         format: {
@@ -744,7 +746,9 @@ export class OpenAIPlanner implements Planner {
         text: draft,
         metadata: { provider: "fallback", ai_enabled: false },
       };
-    const hosted = agentHosted(this.c);
+    const hosted = this.c.OPENAI_USE_HOSTED_AGENT_PROMPT
+      ? agentHosted(this.c)
+      : null;
     const started = Date.now();
     const recipient =
       request?.parties.find((party) => party.phone === notice.phone) ?? null;
@@ -789,10 +793,11 @@ export class OpenAIPlanner implements Planner {
         : null,
     };
     const response = await this.client.responses.create({
-      prompt: {
-        id: hosted.id,
-        version: hosted.version,
-      },
+      ...(hosted
+        ? { prompt: { id: hosted.id, version: hosted.version } }
+        : {}),
+      ...(hosted ? {} : { model: this.c.OPENAI_MODEL }),
+      ...(hosted ? {} : { instructions: AGENT_INSTRUCTIONS }),
       text: {
         format: {
           type: "json_schema",
@@ -819,9 +824,9 @@ export class OpenAIPlanner implements Planner {
       text: keepPhrasing ? phrased : draft,
       metadata: {
         provider: keepPhrasing ? "openai_responses_notice" : "notice_draft_guard",
-        prompt_mode: "hosted",
-        prompt_id: hosted.id,
-        prompt_version: hosted.version,
+        prompt_mode: hosted ? "hosted" : "source_controlled",
+        prompt_id: hosted?.id ?? null,
+        prompt_version: hosted?.version ?? null,
         model: response.model ?? this.c.OPENAI_MODEL,
         response_id: response.id,
         elapsed_ms: Date.now() - started,
