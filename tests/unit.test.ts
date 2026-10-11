@@ -3021,6 +3021,7 @@ test("config accepts agent prompt falling back to action prompt", () => {
   assert.equal(c.OPENAI_AGENT_PROMPT_ID, "");
   assert.equal(c.OPENAI_ACTION_PROMPT_ID, "pmpt_action");
   assert.equal(c.OPENAI_REPLY_PROMPT_ID, "pmpt_reply");
+  assert.equal(c.OPENAI_USE_HOSTED_AGENT_PROMPT, false);
 });
 
 test("transport preference rejects a non-Tuesday or out-of-window request", () => {

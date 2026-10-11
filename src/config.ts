@@ -21,9 +21,9 @@ const envSchema = z.object({
   // do not override the hosted prompt's model.
   OPENAI_MODEL: z.string().default("gpt-6-luna"),
   // Unified customer agent (tools + reply). Falls back to ACTION when empty.
-  // Cursor's reviewed hosted prompt is the deployed default. Set false only
-  // when deliberately migrating to a source-controlled prompt.
-  OPENAI_USE_HOSTED_AGENT_PROMPT: flag.default(true),
+  // The source-controlled prompt is the deployment default. The hosted
+  // version is opt-in only while it is separately validated against it.
+  OPENAI_USE_HOSTED_AGENT_PROMPT: flag.default(false),
   OPENAI_AGENT_PROMPT_ID: z.string().default(""),
   OPENAI_AGENT_PROMPT_VERSION: z.string().default(""),
   OPENAI_ACTION_PROMPT_ID: z.string().default(""),
