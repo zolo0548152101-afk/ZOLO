@@ -701,12 +701,18 @@ export class Engine {
       openedRequestNumber: donateResult?.request_number ?? null,
       contactedCounterparty: allToolResults.some(
         (r) =>
-          r.command.type === "contact_counterparty" &&
           r.ok &&
-          (r.notices_queued > 0 ||
-            (r.command.type === "contact_counterparty" &&
-              "contact" in r.command &&
-              (r.command as { contact?: boolean }).contact === true)),
+          ((r.command.type === "contact_counterparty" &&
+            (r.notices_queued > 0 ||
+              ("contact" in r.command &&
+                (r.command as { contact?: boolean }).contact === true))) ||
+            (r.command.type === "donate" &&
+              r.notices_queued > 0 &&
+              r.changed_fields.some(
+                (field) =>
+                  field.table === "requests" &&
+                  field.column === "verification_contacted",
+              ))),
       ),
       scheduleDate: null as string | null,
       cancelled: allToolResults.some(
@@ -2124,9 +2130,23 @@ export class Engine {
               (row) =>
                 row &&
                 typeof row === "object" &&
-                (row as { command?: { type?: string }; notices_queued?: number })
-                  .command?.type === "contact_counterparty" &&
-                ((row as { notices_queued?: number }).notices_queued ?? 0) > 0,
+                (() => {
+                  const result = row as {
+                    command?: { type?: string };
+                    notices_queued?: number;
+                    changed_fields?: ChangedField[];
+                  };
+                  if ((result.notices_queued ?? 0) <= 0) return false;
+                  if (result.command?.type === "contact_counterparty") return true;
+                  return (
+                    result.command?.type === "donate" &&
+                    (result.changed_fields ?? []).some(
+                      (field) =>
+                        field.table === "requests" &&
+                        field.column === "verification_contacted",
+                    )
+                  );
+                })(),
             );
           if (!rejected) {
             const check = verifyClaims(claims, claimFacts);
