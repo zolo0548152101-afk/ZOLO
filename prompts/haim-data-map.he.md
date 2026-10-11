@@ -18,6 +18,9 @@
 - represents_both_parties (מייצג את שני הצדדים) ← פקודה donate.counterparty_phone
 - closed_at (מועד סגירה) ← פקודה cancel
 - proposed_run_date (מועד הובלה מוצע) ← system
+- photo_status (סטטוס תמונה) ← engine
+- needs_distance_check (דורש בדיקת מרחק) ← engine
+- team_notes (הערות לצוות) ← engine
 
 ### request_parties
 - role (תפקיד (מוסר/מקבל)) ← פקודה donate.type
@@ -90,6 +93,7 @@
 - requests.verification_contacted: פנינו לצד השני; חסר: עדיין לא פנינו
 - requests.preferred_time: נשמרה שעת ההעדפה; חסר: אין שעת העדפה שמורה
 - requests.proposed_run_date: הוצע מועד הובלה; חסר: עדיין אין מועד מוצע
+- requests.photo_status: סטטוס התמונה במסד הוא הערך שנקרא; חסר: לא בוקשה
 - request_parties.name: נשמר השם; חסר: חסר שם
 - request_parties.settlement: נשמר היישוב; חסר: חסר יישוב
 - request_parties.address: נשמרה הכתובת; חסר: חסרה כתובת

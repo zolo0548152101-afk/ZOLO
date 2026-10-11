@@ -93,6 +93,7 @@ export const EXCLUDED_COLUMNS: {
   { table: "conversations", column: "session", reason: "internal" },
   { table: "conversations", column: "chat_id", reason: "internal" },
   { table: "conversations", column: "version", reason: "concurrency" },
+  { table: "conversations", column: "pending_extra_item", reason: "internal transient workflow state" },
   { table: "outbox", column: "id", reason: "pk" },
   { table: "outbox", column: "seq", reason: "internal" },
   { table: "outbox", column: "dedupe_key", reason: "internal" },
