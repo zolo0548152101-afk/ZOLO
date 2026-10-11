@@ -314,7 +314,7 @@ export class Commands {
     this.queueCounterpartyNotice(r, other, notices);
     await c.query(
       `INSERT INTO conversations(contact_id,session,chat_id,selected_request_id,version)
-       SELECT id,$2,concat('972',$1,'@c.us'),$3,1
+       SELECT id,$2,concat('972',$1::text,'@c.us'),$3,1
          FROM contacts WHERE phone=$1
        ON CONFLICT(channel,session,contact_id) DO UPDATE
          SET selected_request_id=EXCLUDED.selected_request_id,
