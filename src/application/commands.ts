@@ -1382,10 +1382,19 @@ export class Commands {
           p.approved_by = phone;
         }
     } else if (cmd.type === "approve_schedule") {
-      const proposedDate = r.proposed_run_date?.slice(0, 10) ?? null;
-      // Persist approval when Action asks; prompt owns date/self-approval gates.
-      if (!proposedDate) return output(null, r);
-      if (cmd.date && cmd.date !== proposedDate) return output(null, r);
+      let proposedDate = r.proposed_run_date?.slice(0, 10) ?? null;
+      // A verification notice can name the next Tuesday before the recipient
+      // has replied.  If they explicitly approve that exact date, establish
+      // the proposal through the same capacity-aware store operation before
+      // persisting their approval.  Never manufacture a date from the model.
+      if (!proposedDate) {
+        const candidate = await this.s.proposeScheduleDate(c, r, this.now());
+        if (!candidate || candidate !== cmd.date) return output(null, r);
+        r.proposed_run_date = candidate;
+        r.status = "awaiting_approval";
+        proposedDate = candidate;
+      }
+      if (cmd.date !== proposedDate) return output(null, r);
       for (const p of r.parties)
         if (p.phone === phone) {
           p.schedule_approved = true;

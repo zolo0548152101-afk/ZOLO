@@ -228,6 +228,17 @@ function loadAgentInstructions(): string {
 
 const AGENT_INSTRUCTIONS = loadAgentInstructions();
 
+// The deployed hosted prompt is versioned independently of this repository.
+// Keep this small, source-controlled correction alongside the application so
+// every live agent turn receives the same operational rule while the hosted
+// prompt is being revised.  It directs the model's tool choice; it is not a
+// business-rule fallback in code.
+const AGENT_RUNTIME_INSTRUCTIONS = `
+תיקון תפעולי מחייב: כאשר הודעת פתיחה של מוסר למסירה ישירה כוללת שם/טלפון של המקבל והרשאה מפורשת לפנות אליו (למשל "אפשר לפנות לטל לאימות"), קרא באותו תור ל-contact_counterparty עם contact=true, בנוסף לכל donate/details הדרושים. אל תדחה את הפנייה בגלל שחסרים free/working או פרטי השלמה אחרים; אותם משלימים בהמשך. אל תכתוב שהפנייה לא נשלחה אם לא קראת לכלי.
+
+אם נמען מאשר במפורש תאריך שלישי מלא (DD/MM/YYYY) שהופיע בהודעת האימות, קרא גם ל-approve_schedule עם אותו תאריך, בנוסף ל-approve_self ול-details. תוצאת הכלי היא הראיה היחידה לכך שאישור המועד נשמר.
+`.trim();
+
 const OPENING_COMMANDS = new Set(["donate", "receive_from_donor", "seek"]);
 
 function hasOpenRequest(ctx: Context): boolean {
@@ -350,11 +361,12 @@ export class OpenAIPlanner implements Planner {
     const rounds: unknown[] = [];
     const tools = maxToolCalls > 0 ? AGENT_WRITE_TOOLS : undefined;
 
-    // The published Agent prompt is the source of truth. Keep the local full
-    // prompt as a safe fallback while AGENT_PROMPT_ID is not configured.
+    // Hosted instructions remain the primary prompt.  Supply the
+    // source-controlled operational correction on every turn; when no hosted
+    // prompt is configured the full local prompt remains the fallback.
     const agentInstructions = this.c.OPENAI_AGENT_PROMPT_ID
-      ? undefined
-      : AGENT_INSTRUCTIONS;
+      ? AGENT_RUNTIME_INSTRUCTIONS
+      : `${AGENT_INSTRUCTIONS}\n\n${AGENT_RUNTIME_INSTRUCTIONS}`;
     let response = await this.client.responses.create({
       prompt: {
         id: hosted.id,
