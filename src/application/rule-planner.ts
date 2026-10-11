@@ -186,7 +186,7 @@ function addressWithSettlement(text: string): string | null {
 function explicitName(text: string): string | null {
   const normalized = norm(text);
   const match = normalized.match(
-    /(?:^|[,;.!?]\s*)(?:השם(?:\s+(?:הוא|שלי))?|שמי|קוראים\s+לי)\s+([א-ת][א-ת׳״'’\-]*(?:\s+[א-ת][א-ת׳״'’\-]*){0,2})(?=\s*(?:[,;.!?]|$))/u,
+    /(?:^|[,;.!?]\s*)(?:השם\s+(?:הוא|שלי)|השם|שמי|קוראים\s+לי)\s+([א-ת][א-ת׳״'’\-]*(?:\s+[א-ת][א-ת׳״'’\-]*){0,2})(?=\s*(?:[,;.!?]|$))/u,
   );
   if (match?.[1]) {
     const name = match[1].trim();
@@ -525,7 +525,7 @@ function recipientExtraChoice(text: string): "same" | "other" | null {
 export function rulePlan(ctx: Context): Plan | null {
   const text = (ctx.message.transcript ?? ctx.message.text).trim();
   if (!text) return null;
-  const pendingExtra = ctx.conversation.pending_extra_item ?? null;
+  const pendingExtra = ctx.conversation?.pending_extra_item ?? null;
   if (pendingExtra?.stage === "replace_or_add") {
     const choice = replaceExtraChoice(text);
     // Compat: still resolve במקום/בנוסף when pending_extra exists.
@@ -1002,7 +1002,9 @@ export function rulePlan(ctx: Context): Plan | null {
       /חסר(?:ה)?(?:\s+רק)?\s+השם|מה שמך|נא לציין שם|שואלים לשמך|שם מלא/u.test(
         prior,
       );
-    const bare = norm(text).trim();
+    // Prefer an explicit phrase such as "השם שלי ישראל" over treating the
+    // whole sentence as a bare name after a prior name prompt.
+    const bare = explicitName(text) ?? norm(text).trim();
     if (
       askedName &&
       looksLikePersonName(bare) &&

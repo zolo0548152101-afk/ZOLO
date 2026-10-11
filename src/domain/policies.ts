@@ -903,9 +903,9 @@ export function nextQuestion(
       missing: missingOf(r, !p.name ? "name" : "address", p.role),
     };
   // Always ask floor — never invent קומה 0.
-  if (p.floor === null)
+  if (p.floor === null && !p.floor_note_shown)
     return {
-      text: "באיזו קומה?",
+      text: "בבניין עם קומות — לציין קומה.",
       floorNote: !p.floor_note_shown,
       missing: missingOf(r, "floor", p.role),
     };
