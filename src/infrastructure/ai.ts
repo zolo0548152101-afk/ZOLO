@@ -459,6 +459,7 @@ export class OpenAIPlanner implements Planner {
         ...(hosted
           ? { prompt: { id: hosted.id, version: hosted.version } }
           : {}),
+        ...(hosted ? {} : { model: this.c.OPENAI_MODEL }),
         ...(agentInstructions ? { instructions: agentInstructions } : {}),
         ...(tools ? { tools } : {}),
         text: {
