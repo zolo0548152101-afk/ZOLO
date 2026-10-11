@@ -726,22 +726,17 @@ export class Engine {
       rejected = true;
       rejectedClaims = check.rejected;
       try {
-        const retry = await this.ai.agentTurn(await this.s.context(id), {
+        // This is a phrase-only retry after the write tools have committed.
+        // Use the reply stage, not another agent/tool turn: it receives the
+        // refreshed DB snapshot and the exact changed-field allow-list.
+        const retry = await this.ai.reply(await this.s.context(id), {
           rules,
-          executeTool: async (command) => {
-            // Guard retry is phrase-only — refuse further writes.
-            return snapshotToolResult({
-              command,
-              before: null,
-              after: null,
-              changed: [],
-              notices: [],
-              phone: ctx0.conversation.phone,
-              error: "guard_retry_writes_disabled",
-            });
-          },
+          commands: executedCommands,
+          results: [],
+          changed: changedFromTools,
+          boundary: null,
+          notices: [],
           guardFeedback: { rejected_claims: check.rejected },
-          maxToolCalls: 0,
         });
         claims = retry.claims;
         replyText = retry.text;
