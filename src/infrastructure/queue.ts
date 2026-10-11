@@ -6,6 +6,7 @@ export const QUEUES = [
   "ingest",
   "capture",
   "conversation",
+  "reply",
   "send",
   "integration",
   "ops",

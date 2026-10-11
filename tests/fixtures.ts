@@ -10,7 +10,7 @@ import type {
   Item,
   Notice,
 } from "../src/domain/types.js";
-import type { Planner } from "../src/infrastructure/ai.js";
+import type { Planner, ReplyPlan } from "../src/infrastructure/ai.js";
 import type { Channel, Delivery } from "../src/infrastructure/waha.js";
 import { asItem } from "../src/application/commands.js";
 import { rulePlan } from "../src/application/rule-planner.js";
@@ -43,7 +43,10 @@ export function config(extra: Partial<Config> = {}): Config {
 export class FakePlanner implements Planner {
   readonly plans = new Map<string, Plan>();
   readonly understood = new Map<string, boolean>();
+  /** Counts action-manager / decode plan() calls only. */
   calls = 0;
+  /** Counts reply-manager / phrase invocations. */
+  replyCalls = 0;
   fail = false;
   planDelayMs = 0;
   phraseNoticePrefix = "";
@@ -56,11 +59,14 @@ export class FakePlanner implements Planner {
     plan: Plan;
     metadata: Record<string, unknown>;
   }> {
-    this.calls++;
     if (this.fail) throw new Error("simulated_openai_timeout");
     if (this.planDelayMs) await delay(this.planDelayMs);
     const explicit = this.plans.get(ctx.message.id);
     const deterministic = rulePlan(ctx);
+    // Scripted plans count as AI decode. Pure rulePlan bridging does not —
+    // integration tests assert "without calling the AI planner" for openings
+    // that the deterministic rules already own.
+    if (explicit) this.calls++;
     const plan =
       explicit ??
       deterministic ??
@@ -68,6 +74,7 @@ export class FakePlanner implements Planner {
         commands: [{ type: "next" }],
         evidence: (ctx.message.transcript ?? ctx.message.text).slice(0, 2000),
       } satisfies Plan);
+    if (!explicit && !deterministic) this.calls++;
     return {
       understood: this.understood.get(ctx.message.id) ?? true,
       plan,
@@ -82,11 +89,35 @@ export class FakePlanner implements Planner {
     canonical: string,
     _ctx: Context,
   ): Promise<{ text: string; metadata: Record<string, unknown> }> {
-    this.calls++;
+    this.replyCalls++;
     if (this.fail) throw new Error("simulated_openai_timeout");
     return {
       text: this.phraseReplyText || this.managedReply || canonical,
       metadata: { test_double: true },
+    };
+  }
+  async reply(
+    _ctx: Context,
+    input: { operation: Record<string, unknown>; request: Request | null },
+  ): Promise<{ plan: ReplyPlan; metadata: Record<string, unknown> }> {
+    this.replyCalls++;
+    if (this.fail) throw new Error("simulated_openai_timeout");
+    return {
+      plan: {
+        messages: [
+          {
+            recipient: "sender",
+            purpose: "test_reply",
+            text:
+              this.phraseReplyText ||
+              this.managedReply ||
+              (input.operation.request_status === "coordinated"
+                ? "הפנייה תואמה."
+                : "קיבלתי, נמשיך לפי הפרטים השמורים."),
+          },
+        ],
+      },
+      metadata: { test_double: true, operation: input.operation },
     };
   }
   async phraseNotice(
@@ -155,8 +186,12 @@ export const details = (
   floor: null,
   ...over,
 });
-export function sampleRequest(): Request {
-  const p = (role: Party["role"], phone: string): Party => ({
+/** Test fixture: unlike production's incomplete parties, both fixture parties have phones. */
+export type FixtureParty = Party & { phone: string };
+export type FixtureRequest = Omit<Request, "parties"> & { parties: FixtureParty[] };
+
+export function sampleRequest(): FixtureRequest {
+  const p = (role: Party["role"], phone: string): FixtureParty => ({
     role,
     phone,
     name: role === "donor" ? "מוסר בדיקה" : "מקבל בדיקה",
@@ -187,6 +222,7 @@ export function sampleRequest(): Request {
     ],
     parties: [p("donor", "501111111"), p("receiver", "502222222")],
     photo_ids: [randomUUID()],
+    photo_status: "התקבלה",
     run_date: null,
     proposed_run_date: "2026-09-15",
     earliest_run_date: null,

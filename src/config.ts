@@ -22,13 +22,6 @@ const envSchema = z.object({
     .string()
     .default("pmpt_6a9d0c66737881938a0f60f5df9088cb0806a26699929a86"),
   OPENAI_PROMPT_VERSION: z.string().default("23"),
-  // Optional hosted prompt overrides. When empty, decode/phrase use the git
-  // files prompts/decode.txt and prompts/phrase.txt via Responses instructions
-  // (preferred — reusable OpenAI prompt objects are being deprecated).
-  OPENAI_DECODE_PROMPT_ID: z.string().default(""),
-  OPENAI_DECODE_PROMPT_VERSION: z.string().default(""),
-  OPENAI_PHRASE_PROMPT_ID: z.string().default(""),
-  OPENAI_PHRASE_PROMPT_VERSION: z.string().default(""),
   OPENAI_REASONING_EFFORT: z.enum(["none", "low", "medium"]).default("low"),
   OPENAI_TIMEOUT_MS: z.coerce
     .number()
@@ -93,20 +86,22 @@ const envSchema = z.object({
   LIVE_ALLOWLIST: z.string().default(""),
   LIVE_DEPENDENCIES_VERIFIED: flag.default(false),
   MEDIA_VOLUME_CONFIRMED: flag.default(false),
-  // Quiet window: wait for this much silence after the newest inbound
-  // message before merging a burst into one reply.
+  // Rolling quiet window: every new inbound from the same phone resets the
+  // countdown; reply only after this much silence after the newest message.
   MESSAGE_COALESCE_QUIET_MS: z.coerce
     .number()
     .int()
     .min(50)
     .max(15000)
     .default(2800),
+  // Cap so a never-ending burst cannot hold a worker forever; must stay well
+  // above QUIET so each new message can still fully reset the countdown.
   MESSAGE_COALESCE_MAX_MS: z.coerce
     .number()
     .int()
     .min(100)
-    .max(30000)
-    .default(10000),
+    .max(60000)
+    .default(30000),
 });
 export type Config = z.infer<typeof envSchema>;
 export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {

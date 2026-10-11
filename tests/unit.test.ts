@@ -389,6 +389,7 @@ test("role approval records participation only and cannot approve a proposed dat
 test("an open donation that may help someone is not a direct handoff", () => {
   assert.equal(directHandoffIntent("יש לי כיסא למסירה, אולי יעזור למישהו."), false);
   assert.equal(directHandoffIntent("יש לי כיסא למסור למישהו ספציפי."), true);
+  assert.equal(directHandoffIntent("אני רוצה למסור למישו ספציפי"), true);
   assert.equal(directHandoffIntent("שלום, יש לי ספה תקינה למסירה לטל 0536662043"), true);
   assert.equal(directHandoffIntent("יש לי מיטה למסירה"), false);
 });
@@ -901,7 +902,7 @@ test("השם שלי extracts only the personal name", () => {
       processed_at: null,
       ai_plan: null,
     },
-    history: [{ role: "assistant", content: "תודה. חסר רק השם." }],
+    history: [{ role: "assistant", content: "תודה. חסר השם." }],
   } as Context;
   const command = rulePlan(context)?.commands[0];
   assert.equal(command?.type, "details");
@@ -1074,7 +1075,7 @@ test("Beit Shean floor note shown at most once; never asks באיזו קומה",
   const r = sampleRequest(),
     p = r.parties[0]!;
   p.settlement = "בית שאן";
-  p.address = null;
+  p.address = "רחוב העלייה 7";
   p.floor = null;
   assert.match(nextQuestion(r, p.phone).text, /בבניין עם קומות — לציין קומה/);
   p.floor_note_shown = true;
@@ -1088,7 +1089,7 @@ test("Beit Shean does not remind someone to provide a floor already stored", () 
   p.address = "רחוב העלייה 7";
   p.floor = 2;
   const q = nextQuestion(r, p.phone);
-  assert.equal(q.text, "תודה. חסר רק השם.");
+  assert.equal(q.text, "תודה. חסר השם.");
   assert.equal(q.floorNote, false);
 });
 test("when a Beit Shean donor supplied a name, ask only for the missing address", () => {
@@ -1098,7 +1099,7 @@ test("when a Beit Shean donor supplied a name, ask only for the missing address"
   p.name = "ישראל";
   p.address = null;
   const q = nextQuestion(r, p.phone);
-  assert.match(q.text, /חסרה רק הכתובת/);
+  assert.match(q.text, /חסרה הכתובת/);
   assert.doesNotMatch(q.text, /שם וכתובת/);
 });
 test("address plus floor never becomes a receiver name or repeats the settlement", () => {
@@ -1392,7 +1393,7 @@ test("direct handoff assigns an address after the named recipient phone to the r
   assert.equal(details?.type === "details" ? details.address : null, "רחוב העלייה 7");
   assert.equal(details?.type === "details" ? details.floor : null, 2);
 });
-test("direct handoff without a phone skips condition checks and asks before contact", () => {
+test("direct handoff without a phone skips condition checks and asks for the number after own details", () => {
   const context: Context = {
     conversation: { id: "c", phone: "501111111", chat_id: "972501111111@c.us", mode: "bot", selected_request_id: null, version: 1, pending_counterparty_name: null },
     requests: [],
@@ -1407,8 +1408,31 @@ test("direct handoff without a phone skips condition checks and asks before cont
   r.parties = r.parties.slice(0, 1);
   r.origin = "direct";
   r.verification_contacted = false;
-  assert.match(nextQuestion(r, r.parties[0]!.phone).text, /נפנה למקבל לצורך אימות/);
-  assert.doesNotMatch(nextQuestion(r, r.parties[0]!.phone).text, /תקין ושמיש|תמונה/);
+  assert.match(nextQuestion(r, r.parties[0]!.phone).text, /מספר הטלפון|איש קשר/);
+  assert.doesNotMatch(nextQuestion(r, r.parties[0]!.phone).text, /תקין ושמיש|תמונה|נפנה למקבל/);
+});
+test("contact-counterparty ask waits until own details and item rules are ready", () => {
+  const r = sampleRequest();
+  r.origin = "direct";
+  r.verification_contacted = false;
+  r.proposed_run_date = null;
+  for (const party of r.parties) {
+    party.schedule_approved = false;
+    party.schedule_approved_date = null;
+    party.schedule_approved_at = null;
+  }
+  const donor = r.parties[0]!;
+  donor.name = null;
+  donor.settlement = null;
+  donor.address = null;
+  assert.match(nextQuestion(r, donor.phone).text, /יישוב/);
+  assert.doesNotMatch(nextQuestion(r, donor.phone).text, /נפנה למקבל/);
+  donor.settlement = "בית שאן";
+  assert.match(nextQuestion(r, donor.phone).text, /שם וכתובת|חסר השם/);
+  assert.doesNotMatch(nextQuestion(r, donor.phone).text, /נפנה למקבל/);
+  donor.name = "ישראל";
+  donor.address = "רחוב אילת 4";
+  assert.match(nextQuestion(r, donor.phone).text, /נפנה למקבל לצורך אימות/);
 });
 test("named recipient who wants the item bypasses the photo gate", () => {
   const context: Context = {
@@ -1477,7 +1501,7 @@ test("fridge has no disassembly question; receiver never asked about disassembly
 test("two-item limit, table and chairs is one, free and usable are mandatory", () => {
   const r = sampleRequest();
   r.items[0]!.quantity = 3;
-  assert.match(itemError(r.items, true) ?? "", /שני פריטים/);
+  assert.equal(itemError(r.items, true), null, "numeric furniture limits are decided by the action prompt");
   r.items[0]!.kind = "table_set";
   r.items[0]!.quantity = 1;
   assert.equal(itemError(r.items, true), null);
@@ -1767,7 +1791,8 @@ test("contact card accepts WhatsApp grouped TEL fields", () => {
     "HAIM_YAHAD",
   );
   assert.equal(m?.kind, "contact");
-  assert.equal(m?.text, "[כרטיס איש קשר]");
+  assert.match(m?.text ?? "", /כרטיס איש קשר: שם=אא טל; טלפון=536662043/);
+  assert.ok(m?.contacts?.some((c) => c.phone === "536662043" && c.name === "אא טל"));
   assert.deepEqual(m?.contacts, [
     { phone: "536662043", name: "אא טל" },
   ]);
@@ -1989,7 +2014,7 @@ test("claim-guard drops invented save/approval claims", async () => {
   );
   assert.equal(
     applyClaimGuard("הפרטים נשמרו. נעדכן.", "הפרטים נשמרו אצלנו.", true).rejected,
-    false,
+    true,
   );
   assert.equal(
     applyClaimGuard(
@@ -2034,6 +2059,38 @@ test("claim-guard drops invented save/approval claims", async () => {
   assert.equal(
     applyClaimGuard("Is the item fully working and usable?", "Thanks.", false).rejected,
     true,
+  );
+  assert.equal(
+    applyClaimGuard(
+      "האם תרצה שנפנה למקבל לצורך אימות הפרטים?",
+      "קיבלתי, אבל לפני שנמשיך נא לשלוח תמונה של המיטה.",
+      false,
+    ).rejected,
+    true,
+  );
+  assert.equal(
+    applyClaimGuard(
+      "האם תרצה שנפנה למקבל לצורך אימות הפרטים?",
+      "קיבלתי, אבל לפני שנמשיך נא לשלוח תמונה של המיטה.",
+      false,
+    ).text,
+    "האם תרצה שנפנה למקבל לצורך אימות הפרטים?",
+  );
+  assert.equal(
+    applyClaimGuard(
+      "מעולה, קישרתי את טל כמקבל/ת.\nבאיזה יישוב נמצא הפריט?",
+      "מעולה, אפנה למקבל לצורך אימות הפרטים.",
+      false,
+    ).rejected,
+    true,
+  );
+  assert.equal(
+    applyClaimGuard(
+      "מעולה, קישרתי את טל כמקבל/ת.\nבאיזה יישוב נמצא הפריט?",
+      "מעולה, אפנה למקבל לצורך אימות הפרטים.",
+      false,
+    ).text,
+    "מעולה, קישרתי את טל כמקבל/ת.\nבאיזה יישוב נמצא הפריט?",
   );
 });
 
@@ -2300,7 +2357,6 @@ test("translate maps explicit approve_self and refuses unclear", async () => {
   } as Context;
   const ok = translate(
     {
-      understood: true,
       commands: [{ type: "approve_self", request_number: request.number }],
       evidence: "כן אני טל ומאשרת לקבל את הספה",
     },
@@ -2311,7 +2367,6 @@ test("translate maps explicit approve_self and refuses unclear", async () => {
   assert.equal(ok.plan.commands[0]?.type, "approve_self");
   const schedule = translate(
     {
-      understood: true,
       commands: [
         {
           type: "approve_schedule",
@@ -2329,12 +2384,10 @@ test("translate maps explicit approve_self and refuses unclear", async () => {
     schedule.plan.commands.some((command) => command.type === "item_facts"),
     false,
   );
-  const unclear = translate(
-    { understood: false, commands: [], evidence: "" },
-    ctx,
-    "asdf",
+  assert.throws(
+    () => translate({ understood: false, commands: [], evidence: "" }, ctx, "asdf"),
+    /invalid_action_plan/,
   );
-  assert.equal(unclear.understood, false);
 });
 
 test("דירה without קומה does not set floor", () => {
@@ -2440,7 +2493,69 @@ test("AI details-only without open request does not override rulePlan opening", 
   } as Context);
   assert.ok(rules?.commands.some((command) => command.type === "donate"));
   const selected = selectDecodePlan(aiDetailsOnly, rules, emptyCtx);
-  assert.equal(selected.useAi, false);
+  assert.equal(selected.useAi, true);
+  assert.equal(selected.plan.commands[0]?.type, "details");
+});
+
+test("richer rulePlan self-transfer beats bare AI donate without details", async () => {
+  const { selectDecodePlan } = await import("../src/infrastructure/ai.js");
+  const text =
+    "אני רוצה להעביר לעצמי שולחן מבית שאן רחוב העלייה קומה 1 לבית שאן רחוב העלייה קומה 2";
+  const ctx = {
+    conversation: {
+      id: "c-self",
+      phone: "584152101",
+      chat_id: "972584152101@c.us",
+      mode: "bot",
+      selected_request_id: null,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [],
+    candidates: [],
+    history: [],
+    message: {
+      id: "m-self-ai",
+      seq: "1",
+      external_id: "e",
+      trace_id: "t",
+      mode: "live",
+      chat_id: "972584152101@c.us",
+      phone: "584152101",
+      kind: "text",
+      text,
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+  } as Context;
+  const rules = rulePlan(ctx);
+  assert.ok(rules?.commands.some((command) => command.type === "details"));
+  const aiDonateOnly = {
+    understood: true,
+    plan: {
+      commands: [
+        {
+          type: "donate" as const,
+          items: [{ kind: "table" as const, description: "שולחן", quantity: 1 }],
+          counterparty_phone: "584152101",
+          counterparty_name: null,
+          direct: true,
+          free: true,
+          working: true,
+        },
+      ],
+      evidence: text,
+    },
+  };
+  const selected = selectDecodePlan(aiDonateOnly, rules, ctx);
+  assert.equal(selected.useAi, true);
   assert.equal(selected.plan.commands[0]?.type, "donate");
 });
 
@@ -2551,8 +2666,8 @@ test("לקבל שולחן in an allowed town is a seek, and a bare next does not
     seek,
     { requests: [], candidates: [] } as unknown as Context,
   );
-  assert.equal(bridged.useAi, false);
-  assert.equal(bridged.plan.commands[0]?.type, "seek");
+  assert.equal(bridged.useAi, true);
+  assert.equal(bridged.plan.commands[0]?.type, "next");
   const donate = planFor("אני רוצה למסור שולחן בבית שאן");
   assert.equal(donate?.commands[0]?.type, "donate");
   const approval = planFor("כן אני טל ומאשרת לקבל את הספה");
@@ -2629,4 +2744,117 @@ test("pressure is a clear limit, and fixed lines localize", () => {
     localizeCustomer("לא הבנתי את הכוונה. אפשר לכתוב את זה שוב?", "he"),
     "לא הבנתי את הכוונה. אפשר לכתוב את זה שוב?",
   );
+});
+
+test("field map lists seeker location and preferred time", async () => {
+  const { renderDataMap, FIELD_MAP } = await import("../src/domain/field-map.js");
+  const rendered = renderDataMap();
+  assert.match(rendered, /searches/);
+  assert.match(rendered, /settlement/);
+  assert.match(rendered, /preferred_time/);
+  assert.match(rendered, /רשמתי/);
+  assert.ok(
+    FIELD_MAP.some(
+      (entry) => entry.table === "searches" && entry.column === "floor" && entry.writer === "seek",
+    ),
+  );
+});
+
+test("claim guard rejects unbacked רשמתי", async () => {
+  const { applyClaimGuard } = await import("../src/domain/ai-guards.js");
+  const guarded = applyClaimGuard(
+    "נא לציין אם ברצונך למסור פריט, לקבל פריט או לתאם הובלה.",
+    "רשמתי: רחוב העלייה, קומה 2",
+    false,
+    [],
+  );
+  assert.equal(guarded.rejected, true);
+  assert.equal(
+    guarded.text,
+    "נא לציין אם ברצונך למסור פריט, לקבל פריט או לתאם הובלה.",
+  );
+  assert.equal(
+    applyClaimGuard("נשמר: רחוב העלייה.", "נשמר: רחוב העלייה.", false, [
+      { table: "searches", column: "address" },
+    ]).rejected,
+    false,
+  );
+});
+
+test("seeker follow-up stores street and floor on the search, not next", () => {
+  const phone = "584152101";
+  const plan = rulePlan({
+    conversation: {
+      id: "c-seek-follow",
+      phone,
+      chat_id: `${phone}@c.us`,
+      mode: "bot",
+      selected_request_id: null,
+      version: 1,
+      pending_counterparty_name: null,
+      pending_counterparty_phone: null,
+    },
+    requests: [],
+    candidates: [],
+    history: [
+      { role: "user", content: "אני רוצה לקבל שולחן" },
+      { role: "assistant", content: "כרגע לא נמצא פריט מתאים. נעדכן כשיהיה פריט מתאים." },
+    ],
+    active_search: {
+      kind: "table",
+      state: "active",
+      settlement: null,
+      address: null,
+      floor: null,
+      name: null,
+    },
+    message: {
+      id: "m-seek-follow",
+      seq: "2",
+      external_id: "e-seek-follow",
+      trace_id: "t-seek-follow",
+      mode: "live",
+      chat_id: `${phone}@c.us`,
+      phone,
+      kind: "text",
+      text: "עדיף רחוב העלייה קומה 2",
+      contacts: [],
+      location: null,
+      media_url: null,
+      media_id: null,
+      media_state: "none",
+      transcript: null,
+      processed_at: null,
+      ai_plan: null,
+    },
+  });
+  assert.equal(plan?.commands[0]?.type, "seek");
+  if (plan?.commands[0]?.type === "seek") {
+    assert.equal(plan.commands[0].kind, "table");
+    assert.equal(plan.commands[0].address, "רחוב העלייה");
+    assert.equal(plan.commands[0].floor, 2);
+  }
+});
+
+test("nextQuestion asks whether a receive-from-donor item is free", () => {
+  const request = sampleRequest();
+  request.origin = "direct";
+  request.verification_contacted = true;
+  request.represents_both_parties = false;
+  for (const party of request.parties) {
+    party.approved_at = new Date().toISOString();
+    party.approved_by = party.phone;
+    party.name = party.role === "donor" ? "מוסר" : "מקבל";
+    party.settlement = "בית שאן";
+    party.address = "רחוב העלייה 1";
+  }
+  for (const item of request.items) {
+    item.free = null;
+    item.working = true;
+    item.needs_disassembly = false;
+  }
+  request.proposed_run_date = null;
+  const question = nextQuestion(request, request.parties[1]!.phone);
+  assert.equal(question.missing?.field, "free");
+  assert.match(question.text, /חינם/);
 });

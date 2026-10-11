@@ -22,7 +22,9 @@ export function probeReply(text: string): string {
   const wantsDonate = /(?:רוצה\s+)?(?:למסור|לתת|להעביר)|מסירה/u.test(t);
   const wantsReceive = /(?:רוצה\s+)?(?:לקבל|מבקש|צריך)|קבלה/u.test(t);
   const hasItem =
-    /מיטה|ספה|שידה|מנורה|שולחן|כיסא|מקרר|מכונת|תנור|ארון|פריט|רהיט/u.test(t);
+    /מיטה|(?:^|[^\u05D0-\u05EA])מטה(?=[^\u05D0-\u05EA]|$)|ספה|שידה|מנורה|שולחן|כיסא|מקרר|מכונת|תנור|ארון|פריט|רהיט/u.test(
+      t,
+    );
   if (wantsDonate && !hasPerson)
     return "למי תרצה למסור? אפשר לכתוב שם או מספר טלפון.";
   if (wantsDonate && hasPerson && !hasItem)
@@ -49,11 +51,34 @@ const CLAIM_MARKERS = [
   "תואם",
   "שלחתי",
   "פניתי",
+  "אפנה",
+  "נפנה",
+  "ניצור קשר",
+  "ליצור קשר",
+  "יצרנו קשר",
+  "אשלח הודעה",
+  "נשלח הודעה",
   "בוצע",
   "נקבע",
   "נאסוף",
   "נבוא",
   "ניקח",
+  "רשמתי",
+  "שמרתי",
+  "עדכנתי",
+  "רשמנו",
+  "עדכנו",
+  "קיבלתי",
+];
+
+const SAVE_MARKERS = [
+  "נשמר",
+  "רשמתי",
+  "שמרתי",
+  "עדכנתי",
+  "רשמנו",
+  "עדכנו",
+  "קיבלתי",
 ];
 
 function markersIn(text: string): Set<string> {
@@ -71,11 +96,12 @@ export function claimsOperationalOutcome(text: string): boolean {
  * A required line in the rule reply must still be recognizable after rewording.
  * Photo and the condition question count in Hebrew and in the fixed translations.
  */
+const PHOTO_ASK = {
+  canonical: /תמונה|\bphoto\b|صورة|фото/iu,
+  phrased: /תמונה|\bphoto\b|صورة|фото/iu,
+};
 const REQUIRED_PHRASES: { canonical: RegExp; phrased: RegExp }[] = [
-  {
-    canonical: /תמונה|\bphoto\b|صورة|фото/iu,
-    phrased: /תמונה|\bphoto\b|صورة|фото/iu,
-  },
+  PHOTO_ASK,
   {
     canonical: /האם הפריט תקין|תקין ושמיש|fully working|سليم وقابل|исправен/iu,
     phrased: /תקין|fully working|usable|سليم|исправен/iu,
@@ -88,6 +114,60 @@ function dropsRequiredPhrase(canonical: string, phrased: string): boolean {
   );
 }
 
+/** Reply manager must not invent a photo gate the committed sentence did not ask. */
+function inventsPhotoGate(canonical: string, phrased: string): boolean {
+  return PHOTO_ASK.phrased.test(phrased) && !PHOTO_ASK.canonical.test(canonical);
+}
+
+const SELF_INTRO =
+  /סוכן האוטומטי|בהרצה ניסיונית/;
+
+/** True when a prior assistant turn already introduced the bot. */
+export function conversationAlreadyIntroduced(
+  history: { role: string; content: string }[],
+): boolean {
+  return history.some(
+    (entry) => entry.role === "assistant" && SELF_INTRO.test(entry.content),
+  );
+}
+
+export function isSelfIntroText(text: string): boolean {
+  return SELF_INTRO.test(text);
+}
+
+/**
+ * Drop a repeated self-intro when the conversation already had one.
+ * Keeps the substantive ask (photo / details / etc.).
+ * `alreadyIntroduced` may come from outbox (sent replies) when history still
+ * has no open request — the first intro happens before a request row exists.
+ */
+export function stripRepeatedSelfIntro(
+  text: string,
+  history: { role: string; content: string }[],
+  alreadyIntroduced = conversationAlreadyIntroduced(history),
+): string {
+  const raw = text.trim();
+  if (!raw || !SELF_INTRO.test(raw) || !alreadyIntroduced) return raw;
+  const paragraphs = raw.split(/\n\s*\n/);
+  if (paragraphs.length > 1 && SELF_INTRO.test(paragraphs[0] ?? "")) {
+    const rest = paragraphs.slice(1).join("\n\n").trim();
+    if (rest) return rest;
+  }
+  const stripped = raw
+    .replace(
+      /^(?:שלום[!.,]?\s*|היי[,!]?\s*)?(?:אני\s+)?הסוכן האוטומטי[\s\S]*?בהרצה ניסיונית[^.!?\n]*[.!?…]?\s*(?:[🙂😊]\s*)?/u,
+      "",
+    )
+    // Same-line intro + ask: "…בהרצה ניסיונית. באיזה יישוב…"
+    .replace(
+      /^(?:שלום[!.,]?\s*|היי[,!]?\s*)?(?:אני\s+)?הסוכן האוטומטי[\s\S]*?בהרצה ניסיונית[.!?…]?\s*/u,
+      "",
+    )
+    .replace(/^[\s\S]*?בהרצה ניסיונית[^\n]*\n+/u, "")
+    .trim();
+  return stripped || raw;
+}
+
 /**
  * Prefer the phrased reply only when it does not invent a save/send/approval
  * and does not drop a required line from the rule reply.
@@ -97,6 +177,7 @@ export function applyClaimGuard(
   canonical: string,
   phrased: string | null | undefined,
   _proven: boolean,
+  changedFields: { table: string; column: string }[] = [],
 ): { text: string; rejected: boolean } {
   const candidate = (phrased ?? "").trim();
   if (!candidate) return { text: canonical, rejected: false };
@@ -104,9 +185,29 @@ export function applyClaimGuard(
   const extra = [...markersIn(candidate)].filter(
     (marker) => !canonicalMarkers.has(marker),
   );
+  const saveClaim = SAVE_MARKERS.some((marker) => candidate.includes(marker));
+  const wroteAddress = changedFields.some((f) => f.column === "address");
+  const wroteSettlement = changedFields.some((f) => f.column === "settlement");
+  const inventsAddress =
+    /(?:קיבלתי|רשמתי|שמרתי|נשמר)\s+(?:את\s+)?(?:ה)?כתובת|קיבלתי את הכתובת/.test(
+      candidate,
+    ) && !wroteAddress;
+  const inventsSettlement =
+    /(?:קיבלתי|רשמתי|שמרתי|נשמר).{0,12}(?:יישוב|ישוב)/.test(candidate) &&
+    !wroteSettlement;
   // Each claim token must already be in the committed sentence.
   // A proven operational result does not license extra claims.
-  if (extra.length || dropsRequiredPhrase(canonical, candidate))
+  // A save verb with no changed field is never allowed in the phrased reply.
+  if (
+    extra.length ||
+    dropsRequiredPhrase(canonical, candidate) ||
+    inventsPhotoGate(canonical, candidate) ||
+    inventsAddress ||
+    inventsSettlement ||
+    (saveClaim &&
+      changedFields.length === 0 &&
+      SAVE_MARKERS.some((marker) => candidate.includes(marker)))
+  )
     return { text: canonical, rejected: true };
   return { text: candidate, rejected: false };
 }
