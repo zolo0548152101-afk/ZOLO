@@ -777,6 +777,31 @@ test("direct recipient verification repeats supplied destination details and ask
   assert.ok((await s.request(request.id)).parties.find((party) => party.role === "receiver")!.approved_at);
 });
 
+test("explicit opening permission queues direct recipient verification", async () => {
+  const donor = phone(), receiver = phone();
+  const opening = donate("מיטה", "bed");
+  if (opening.type !== "donate") throw new Error();
+  opening.counterparty_phone = receiver;
+  opening.counterparty_name = "טל";
+  opening.direct = true;
+  const result = await message(
+    donor,
+    `יש לי מיטה למסור לטל ${receiver}. אפשר לפנות לטל לאימות.`,
+    [opening],
+  );
+  const request = (await s.active(donor))[0]!;
+  assert.equal(request.verification_contacted, true);
+  assert.ok((await outputs(result.id)).some((row) => row.phone === receiver));
+  const linked = await pool.query<{ selected_request_id: string }>(
+    `SELECT cv.selected_request_id
+       FROM conversations cv
+       JOIN contacts co ON co.id=cv.contact_id
+      WHERE co.phone=$1`,
+    [receiver],
+  );
+  assert.equal(linked.rows[0]?.selected_request_id, request.id);
+});
+
 test("recipient confirmation cannot open a second donation when the agent calls donate first", async () => {
   const donor = phone(), receiver = phone();
   const opening = donate("מיטה", "bed");

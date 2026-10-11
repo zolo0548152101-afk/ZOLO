@@ -53,6 +53,12 @@ export function validTransportPreference(value: string): boolean {
   return true;
 }
 
+/** A narrow, explicit authorization to contact the known other party. */
+function explicitCounterpartyContactPermission(text: string): boolean {
+  const value = norm(text);
+  return /(?:אפשר\s+(?:לפנות|שתפנו|לשלוח|שתשלחו|לדבר|שתדברו|לכתוב|שתכתבו)|(?:תפנו|שלחו|דברו|כתבו)\s+(?:אליו|אליה|ל(?:מקבל|מוסר|טל))|(?:לפנות|פנו)\s+[^.。]{0,80}(?:לאימות|לאשר))/u.test(value);
+}
+
 /** Pull "קוראים לי X" / "שמי X" from recent user turns when opening a request. */
 function recentSelfName(ctx: Context, text: string): string | null {
   const blob = [
@@ -286,6 +292,34 @@ export class Commands {
       `UPDATE conversations SET selected_request_id=$2,version=version+1
          WHERE contact_id=(SELECT id FROM contacts WHERE phone=$1)`,
       [other.phone, r.id],
+    );
+  }
+
+  /** Execute an explicit consent without depending on the model to repeat it. */
+  private async contactExplicitCounterparty(
+    c: pg.PoolClient,
+    speakerPhone: string,
+    r: Request,
+    notices: Notice[],
+  ): Promise<void> {
+    const speaker = ownParty(r, speakerPhone);
+    const other = r.parties.find((p) => p.role !== speaker.role);
+    if (r.origin !== "direct" || !other) return;
+    await this.persistContactConsent(c, r, other, true);
+    if (!other.phone) return;
+    if (await this.noticeAlreadyQueued(c, r.id, other.phone)) {
+      r.verification_contacted = true;
+      return;
+    }
+    this.queueCounterpartyNotice(r, other, notices);
+    await c.query(
+      `INSERT INTO conversations(contact_id,session,chat_id,selected_request_id,version)
+       SELECT id,$2,concat('972',$1,'@c.us'),$3,1
+         FROM contacts WHERE phone=$1
+       ON CONFLICT(channel,session,contact_id) DO UPDATE
+         SET selected_request_id=EXCLUDED.selected_request_id,
+             version=conversations.version+1`,
+      [other.phone, this.s.config.WAHA_SESSION, r.id],
     );
   }
 
@@ -713,6 +747,8 @@ export class Commands {
         // Same facts again: keep the conversation moving with the next missing
         // detail instead of looping on the opening photo ask.
         await this.maybeQueuePendingVerification(c, phone, existing, notices);
+        if (isDonor && direct && explicitCounterpartyContactPermission(text))
+          await this.contactExplicitCounterparty(c, phone, existing, notices);
         if (unchangedDirect && existing.origin === "direct")
           return output(null, existing);
         return output(null, existing);
@@ -753,6 +789,8 @@ export class Commands {
             phone: p.phone,
             text: `נפתחה פנייה ${r.number} לגבי ${r.items.map((i) => i.description).join(", ")}. נא לאשר את חלקך ב${p.role === "donor" ? "מסירה" : "קבלה"}. ההובלות בימי שלישי 16:00–20:00, ובדרך כלל עד ${DEFAULT_TRANSPORT_CAPACITY} הובלות בכל יום שלישי. מעבר לכך נבקש תחילה אישור מנהל. נעדכן.`,
           });
+      if (isDonor && direct && explicitCounterpartyContactPermission(text))
+        await this.contactExplicitCounterparty(c, phone, r, notices);
       // or set NO_PHOTO here.
       return output(null, r);
     }
@@ -1029,24 +1067,7 @@ export class Commands {
         invalidateProposal(r);
         return output(null, r);
       }
-      // Record consent even when the phone is still missing. Do not mark
-      // contacted until a notice is actually queued.
-      await this.persistContactConsent(c, r, other, true);
-      if (!other.phone) return output(null, r);
-      if (await this.noticeAlreadyQueued(c, r.id, other.phone)) {
-        r.verification_contacted = true;
-        return output(null, r);
-      }
-      this.queueCounterpartyNotice(r, other, notices);
-      await c.query(
-        `INSERT INTO conversations(contact_id,session,chat_id,selected_request_id,version)
-         SELECT id,$2,concat('972',$1,'@c.us'),$3,1
-           FROM contacts WHERE phone=$1
-         ON CONFLICT(channel,session,contact_id) DO UPDATE
-           SET selected_request_id=EXCLUDED.selected_request_id,
-               version=conversations.version+1`,
-        [other.phone, this.s.config.WAHA_SESSION, r.id],
-      );
+      await this.contactExplicitCounterparty(c, phone, r, notices);
       return output(null, r);
     }
     if (cmd.type === "escalate") {
