@@ -711,9 +711,9 @@ export class OpenAIPlanner implements Planner {
         usage: response.usage,
         claims: parsed.data.claims,
         model_input: {
-          prompt_mode: "hosted",
-          prompt_id: hosted.id,
-          prompt_version: hosted.version,
+          prompt_mode: hosted ? "hosted" : "source_controlled",
+          prompt_id: hosted?.id ?? null,
+          prompt_version: hosted?.version ?? null,
           payload: userPayload,
         },
         model_output: {
