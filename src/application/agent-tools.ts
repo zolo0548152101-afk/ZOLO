@@ -49,7 +49,7 @@ function toStrictToolParameters(source: JsonSchemaObject): JsonSchemaObject {
 }
 
 const COMMAND_DESCRIPTIONS: Record<string, string> = {
-  donate: "Open a donation / direct handoff, or update the open same-item request. Never open a second request for the same donor+item while collecting — attach a recipient name/phone with this tool or counterparty on the existing request_number.",
+  donate: "Open a donation / direct handoff, or update the open same-item request. Different named recipients in one message need separate donate calls (max 2 items each). Never open a second request for the same donor+same-item+same-recipient while collecting — attach a recipient name/phone with this tool or counterparty on the existing request_number.",
   receive_from_donor: "Receiver opens a request linked to a known donor phone.",
   seek: "Start a seeker search for an item kind.",
   interest: "Seeker expresses interest in a presented match by request number.",
