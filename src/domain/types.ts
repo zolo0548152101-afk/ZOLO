@@ -303,7 +303,10 @@ export interface Context {
   candidates: Candidate[];
   message: Incoming;
   history: { role: "user" | "assistant"; content: string }[];
+  /** Most recently updated active seek (compat). Prefer active_searches. */
   active_search?: Search | null;
+  /** All active seeks for this contact (fridge + bed, etc.). */
+  active_searches?: Search[];
 }
 export interface Notice {
   phone: string;

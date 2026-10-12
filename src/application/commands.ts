@@ -121,6 +121,60 @@ function itemDescriptionsMatch(
   });
 }
 
+function namesMatch(a: string | null | undefined, b: string | null | undefined): boolean {
+  const x = (a ?? "").replace(/\s+/g, "").toLowerCase();
+  const y = (b ?? "").replace(/\s+/g, "").toLowerCase();
+  return Boolean(x && y && (x === y || x.includes(y) || y.includes(x)));
+}
+
+/**
+ * Same donor+item may merge only when the receiver is the same party.
+ * Name-only «טל» must not merge into self-as-both «לעצמי», and vice versa.
+ */
+function receiversCompatibleForMerge(
+  existing: Request,
+  incoming: Party | undefined,
+  speakerPhone: string,
+): boolean {
+  const ex = existing.parties.find((p) => p.role === "receiver");
+  if (!ex) return true;
+  if (!incoming) return true;
+  const existingPhone = ex.phone ?? null;
+  const incomingPhone = incoming.phone ?? null;
+  const existingName = (ex.name ?? "").trim();
+  const incomingName = (incoming.name ?? "").trim();
+  const existingSelf =
+    existing.represents_both_parties || existingPhone === speakerPhone;
+  const incomingSelf = incomingPhone === speakerPhone;
+
+  if (
+    existingPhone &&
+    incomingPhone &&
+    existingPhone !== incomingPhone
+  )
+    return false;
+  // Self-move vs named other (טל / לעצמי) → separate requests.
+  if (existingSelf !== incomingSelf) return false;
+  if (
+    !existingPhone &&
+    !incomingPhone &&
+    existingName &&
+    incomingName &&
+    !namesMatch(existingName, incomingName)
+  )
+    return false;
+  if (
+    !existingPhone &&
+    existingName &&
+    incomingPhone &&
+    incomingName &&
+    !namesMatch(existingName, incomingName) &&
+    !incomingSelf
+  )
+    return false;
+  return true;
+}
+
 const party = (
   role: Party["role"],
   phone: string | null,
@@ -456,8 +510,7 @@ export class Commands {
       await c.query(
         `INSERT INTO searches(contact_id,kind,settlement,address,floor,name)
          VALUES($1,$2,$3,$4,$5,$6)
-         ON CONFLICT(contact_id) DO UPDATE SET
-           kind=EXCLUDED.kind,
+         ON CONFLICT(contact_id, kind) DO UPDATE SET
            state='active',
            settlement=COALESCE(EXCLUDED.settlement, searches.settlement),
            address=COALESCE(EXCLUDED.address, searches.address),
@@ -466,6 +519,19 @@ export class Commands {
            updated_at=clock_timestamp()`,
         [id, cmd.kind, settlement, address, floor, name],
       );
+      // Location on one seek applies to sibling active seeks (fridge+bed).
+      if (settlement || address || floor !== null || name) {
+        await c.query(
+          `UPDATE searches SET
+             settlement=COALESCE($2, settlement),
+             address=COALESCE($3, address),
+             floor=COALESCE($4, floor),
+             name=COALESCE($5, name),
+             updated_at=clock_timestamp()
+           WHERE contact_id=$1 AND state='active' AND kind<>$6`,
+          [id, settlement, address, floor, name, cmd.kind],
+        );
+      }
       const saved: string[] = [];
       if (name) saved.push(`שם ${name}`);
       if (settlement) saved.push(settlement);
@@ -603,18 +669,12 @@ export class Commands {
       }
       let sameOpenRequest: Request | undefined;
       if (!confirmedAnother && openSameItem.length) {
-        // Same donor+item stays one request while collecting. A new request is
-        // allowed only when both sides already have phones and they differ, or
-        // the customer explicitly confirmed another delivery.
-        const compatible = openSameItem.filter((existing) => {
-          const existingPhone =
-            existing.parties.find((p) => p.role === "receiver")?.phone ?? null;
-          return !(
-            existingPhone &&
-            incomingReceiverPhone &&
-            existingPhone !== incomingReceiverPhone
-          );
-        });
+        // Same donor+item stays one request while collecting only when the
+        // receiver is the same party. Different phones, name-only vs self-move,
+        // or two different names → open a new request.
+        const compatible = openSameItem.filter((existing) =>
+          receiversCompatibleForMerge(existing, incomingReceiver, phone),
+        );
         const ranked = [...compatible].sort((a, b) => {
           const completeness = (request: Request) => {
             const recv = request.parties.find((p) => p.role === "receiver");

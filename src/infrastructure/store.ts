@@ -454,22 +454,19 @@ export class Store {
     }>(
       `SELECT s.kind,s.state,s.settlement,s.address,s.floor,s.name
          FROM searches s JOIN contacts co ON co.id=s.contact_id
-        WHERE co.phone=$1 AND s.state='active'`,
+        WHERE co.phone=$1 AND s.state='active'
+        ORDER BY s.updated_at DESC NULLS LAST, s.kind`,
       [message.phone],
     );
-    const active_search: Search | null = searchRow.rows[0]
-      ? {
-          kind: searchRow.rows[0].kind,
-          state: searchRow.rows[0].state,
-          settlement: searchRow.rows[0].settlement,
-          address: searchRow.rows[0].address,
-          floor:
-            searchRow.rows[0].floor === null
-              ? null
-              : Number(searchRow.rows[0].floor),
-          name: searchRow.rows[0].name,
-        }
-      : null;
+    const active_searches: Search[] = searchRow.rows.map((row) => ({
+      kind: row.kind,
+      state: row.state,
+      settlement: row.settlement,
+      address: row.address,
+      floor: row.floor === null ? null : Number(row.floor),
+      name: row.name,
+    }));
+    const active_search: Search | null = active_searches[0] ?? null;
     return {
       message,
       conversation: conv.rows[0],
@@ -477,6 +474,7 @@ export class Store {
       candidates,
       history,
       active_search,
+      active_searches,
     };
   }
   async create(

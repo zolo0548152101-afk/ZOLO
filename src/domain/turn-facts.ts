@@ -108,7 +108,8 @@ export interface TurnFacts {
   state: {
     requests: RequestFacts[];
     open_request_numbers: number[];
-    active_search: Search | null;
+      active_search: Search | null;
+      active_searches: Search[];
     pending: {
       duplicate_confirmation: PendingExtraItem | null;
       pending_counterparty_name: string | null;
@@ -353,6 +354,9 @@ export function buildStage1Facts(input: {
       ),
       open_request_numbers: open.map((request) => request.number),
       active_search: ctx.active_search ?? null,
+      active_searches:
+        ctx.active_searches ??
+        (ctx.active_search ? [ctx.active_search] : []),
       pending: {
         duplicate_confirmation:
           ctx.conversation.pending_extra_item?.stage === "confirm_another_delivery"
