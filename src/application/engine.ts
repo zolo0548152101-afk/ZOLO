@@ -49,6 +49,7 @@ import {
   FAULT_REPLY,
   isSelfIntroText,
   replyClaimsSaveWithoutWrites,
+  replyDeniesQueuedNotice,
   stripRepeatedSelfIntro,
   verifyClaims,
   emptyClaims,
@@ -737,18 +738,31 @@ export class Engine {
     const donateResult = allToolResults.find(
       (r) => r.command.type === "donate" && r.ok && typeof r.request_number === "number",
     );
+    const ctxAfterTools = await this.s.context(id);
+    const phraseNotices: NoticeFact[] = deferredToolNotices.map((item) => {
+      const request = item.requestId
+        ? ctxAfterTools.requests.find((r) => r.id === item.requestId)
+        : null;
+      const party = request?.parties.find((p) => p.phone === item.notice.phone);
+      return {
+        to_role: party?.role ?? null,
+        to_phone: item.notice.phone,
+        facts: { queued: true },
+      };
+    });
     const claimFacts = {
       changedPaths,
       openedRequestNumber: donateResult?.request_number ?? null,
-      contactedCounterparty: allToolResults.some(
-        (r) =>
-          r.command.type === "contact_counterparty" &&
-          r.ok &&
-          (r.notices_queued > 0 ||
-            (r.command.type === "contact_counterparty" &&
-              "contact" in r.command &&
-              (r.command as { contact?: boolean }).contact === true)),
-      ),
+      // Only notices that were actually queued prove contact — consent alone
+      // (contact=true with notices_queued=0) must not claim we messaged them.
+      contactedCounterparty:
+        deferredToolNotices.length > 0 ||
+        allToolResults.some(
+          (r) =>
+            r.command.type === "contact_counterparty" &&
+            r.ok &&
+            r.notices_queued > 0,
+        ),
       scheduleDate: null as string | null,
       cancelled: allToolResults.some(
         (r) => r.request_status === "cancelled" || r.command.type === "cancel",
@@ -756,7 +770,7 @@ export class Engine {
       humanHandoff:
         Boolean(humanReason) ||
         allToolResults.some((r) => r.request_status === "human"),
-      knownRequestNumbers: (await this.s.context(id)).requests.map((r) => r.number),
+      knownRequestNumbers: ctxAfterTools.requests.map((r) => r.number),
     };
     const phraseCommands =
       executedCommands.length > 0 ? executedCommands : agent.commands;
@@ -771,14 +785,13 @@ export class Engine {
     }));
     const phraseChanged =
       agent.changedFields.length > 0 ? agent.changedFields : changedFromTools;
-    const ctxAfterTools = await this.s.context(id);
     const phraseInput = {
       rules,
       commands: phraseCommands,
       results: phraseResults,
       changed: phraseChanged,
       boundary: null,
-      notices: [] as NoticeFact[],
+      notices: phraseNotices,
       fallback: agent.text,
     };
 
@@ -808,6 +821,12 @@ export class Engine {
     ) {
       check = { ok: false, rejected: ["saved:unproven_save_verb"] };
     }
+    if (
+      check.ok &&
+      replyDeniesQueuedNotice(replyText, phraseNotices.length)
+    ) {
+      check = { ok: false, rejected: ["notices_queued:denied_in_reply"] };
+    }
     if (!check.ok) {
       rejected = true;
       rejectedClaims = check.rejected;
@@ -830,6 +849,12 @@ export class Engine {
           replyClaimsSaveWithoutWrites(replyText, claimFacts.changedPaths)
         ) {
           check = { ok: false, rejected: ["saved:unproven_save_verb"] };
+        }
+        if (
+          check.ok &&
+          replyDeniesQueuedNotice(replyText, phraseNotices.length)
+        ) {
+          check = { ok: false, rejected: ["notices_queued:denied_in_reply"] };
         }
         if (!check.ok) {
           rejected = true;

@@ -91,7 +91,10 @@ function explicitAnotherDelivery(text: string): boolean {
         t,
       )) ||
     /^(?:כן[,.]?\s*)?(?:הובלה|משלוח|פנייה)\s+נוס/.test(t) ||
-    /(?:^|[\s,])בנפרד(?:[\s,]|$)|פנייה\s+חדשה|עוד\s+אחת/.test(t)
+    /(?:^|[\s,])בנפרד(?:[\s,]|$)|פנייה\s+חדשה|עוד\s+אחת/.test(t) ||
+    /(?:new|another)\s+request|open\s+another\s+request|separate\s+(?:delivery|request)/i.test(
+      text,
+    )
   );
 }
 function explicitNotAnotherDelivery(text: string): boolean {
@@ -587,6 +590,43 @@ export class Commands {
           return a.number - b.number;
         });
         sameOpenRequest = ranked[0];
+      }
+      // Explicit "another / new request" for the same donor+item(+receiver):
+      // park confirm_another_delivery so phrase asks yes/no instead of merging.
+      if (
+        sameOpenRequest &&
+        !confirmedAnother &&
+        explicitAnotherDelivery(text)
+      ) {
+        const existingRecv =
+          sameOpenRequest.parties.find((p) => p.role === "receiver")?.phone ??
+          null;
+        if (
+          !incomingReceiverPhone ||
+          !existingRecv ||
+          existingRecv === incomingReceiverPhone
+        ) {
+          await this.setPendingExtra(c, ctx, {
+            stage: "confirm_another_delivery",
+            request_id: sameOpenRequest.id,
+            request_number: sameOpenRequest.number,
+            existing_description:
+              sameOpenRequest.items.map((i) => i.description).join(", ") ||
+              "פריט",
+            items: items.map((item) => ({
+              kind: item.kind,
+              description: item.description,
+              quantity: item.quantity ?? 1,
+            })),
+            free: items[0]?.free ?? true,
+            working: items[0]?.working ?? true,
+            direct:
+              cmd.type === "donate" ? cmd.direct !== false : true,
+            counterparty_phone: incomingReceiverPhone,
+            counterparty_name: incomingReceiver?.name ?? null,
+          });
+          return output(null, sameOpenRequest);
+        }
       }
       if (
         !confirmedAnother &&
@@ -1480,6 +1520,35 @@ export class Commands {
     if (r.parties.length === 1 && r.photo_ids.length) r.status = "available";
     let q = nextQuestion(r, phone);
     if (q.floorNote) ownParty(r, phone).floor_note_shown = true;
+    // details on an open direct request + explicit "another request":
+    // surface confirm_another_delivery so phrase asks instead of flat-refusing.
+    if (
+      cmd.type === "details" &&
+      explicitAnotherDelivery(text) &&
+      !this.pendingExtra(ctx) &&
+      r.origin === "direct"
+    ) {
+      const recv = r.parties.find((p) => p.role === "receiver");
+      if (recv?.phone) {
+        await this.setPendingExtra(c, ctx, {
+          stage: "confirm_another_delivery",
+          request_id: r.id,
+          request_number: r.number,
+          existing_description:
+            r.items.map((i) => i.description).join(", ") || "פריט",
+          items: r.items.map((item) => ({
+            kind: item.kind,
+            description: item.description,
+            quantity: item.quantity ?? 1,
+          })),
+          free: r.items[0]?.free ?? true,
+          working: r.items[0]?.working ?? true,
+          direct: true,
+          counterparty_phone: recv.phone,
+          counterparty_name: recv.name ?? null,
+        });
+      }
+    }
     if (distanceReviewThisTurn)
       return output(null, r);
     return output(null, r);

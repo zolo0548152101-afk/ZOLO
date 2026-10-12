@@ -119,6 +119,9 @@ export function verifyClaims(
   }
   if (claims.contacted_counterparty && !facts.contactedCounterparty)
     rejected.push("contacted_counterparty");
+  // Underclaim: a notice was queued this turn but the model denied contact.
+  if (!claims.contacted_counterparty && facts.contactedCounterparty)
+    rejected.push("contacted_counterparty:underclaim");
   if (
     claims.opened_request !== null &&
     claims.opened_request !== facts.openedRequestNumber
@@ -137,6 +140,20 @@ export function verifyClaims(
   void facts.knownRequestNumbers;
 
   return { ok: rejected.length === 0, rejected };
+}
+
+/**
+ * True when the reply falsely denies that a verification/notice message was
+ * queued or sent, even though this turn queued one or more notices.
+ */
+export function replyDeniesQueuedNotice(
+  reply: string,
+  noticesQueued: number,
+): boolean {
+  if (noticesQueued <= 0) return false;
+  return /(?:לא\s+(?:יצאה|נשלח(?:ה)?|שלח(?:נו|תי)?|פנ(?:ה|ינו))|כרגע\s+לא\s+יצאה|עדיין\s+לא\s+(?:יצאה|נשלח)|לא\s+יצאה\s+אלי[וה]\s+הודע|בלי\s+(?:לשלוח|לפנות)|did\s+not\s+(?:send|contact)|no\s+(?:verification\s+)?(?:message|notice)\s+(?:was\s+)?sent)/iu.test(
+    reply,
+  );
 }
 
 /** True when the reply uses a save verb but no claimable path was written. */
