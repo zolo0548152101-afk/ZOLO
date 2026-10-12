@@ -21,7 +21,6 @@ import type { Channel, Delivery } from "../src/infrastructure/waha.js";
 import { asItem } from "../src/application/commands.js";
 import { rulePlan } from "../src/application/rule-planner.js";
 import { emptyClaims } from "../src/domain/ai-guards.js";
-import { defaultRulesState } from "../src/domain/turn-facts.js";
 import { OUTSIDE } from "../src/domain/policies.js";
 import { setTimeout as delay } from "node:timers/promises";
 import type { ChangedField } from "../src/domain/field-map.js";
@@ -214,24 +213,10 @@ export class FakePlanner implements Planner {
     }
     if (!commands.length) commands.push({ type: "next" });
     const canned = cannedAgentReply(ctx, commands, toolResults);
-    const reply = await this.reply(ctx, {
-      rules: input.rules ?? defaultRulesState(),
-      commands,
-      results: toolResults.map((result) => ({
-        command: result.command.type,
-        ok: result.ok,
-        detail: result.error ? { error: result.error } : undefined,
-      })),
-      changed: changedFields,
-      boundary: null,
-      notices: [],
-      fallback:
-        this.managedReply || this.phraseReplyText || canned || "קיבלתי.",
-      guardFeedback: input.guardFeedback,
-    });
+    // Write stage only. Engine.reply() owns the customer-facing phrase call.
     return {
-      text: reply.text,
-      claims: reply.claims,
+      text: this.managedReply || this.phraseReplyText || canned || "קיבלתי.",
+      claims: emptyClaims(),
       commands,
       toolResults,
       changedFields,

@@ -339,6 +339,7 @@ export class OpenAIPlanner implements Planner {
       data_map: facts.data_map || renderWriteMapMarkdown(),
       allowed_saved: allowedSaved,
       stage: "write",
+      untrusted_user_fields: ["current_message", "history"],
       ...(input.guardFeedback
         ? { guard_feedback: input.guardFeedback }
         : {}),
@@ -667,6 +668,7 @@ export class OpenAIPlanner implements Planner {
       data_map: facts.data_map,
       stage: "phrase",
       mode: "customer_reply",
+      untrusted_user_fields: ["current_message", "history"],
       ...(input.guardFeedback
         ? { guard_feedback: input.guardFeedback }
         : {}),
