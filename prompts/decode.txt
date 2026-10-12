@@ -15,6 +15,8 @@ understood=false רק כשאי אפשר להבין את הכוונה. אז comma
   העברה לעצמי/אליי = donate עם counterparty_phone של השולח, direct=true, ו־counterparty_name=null (או שם השולח בלבד). אסור לשים שם של עוזר/כרטיס איש קשר ב־counterparty_name כשהטלפון הוא של השולח. «אני גם התורם וגם המקבל, טל רק עוזרת» = self-as-both, לא מקבל=טל.
   אל תפתח donate כפול לאותו פריט פתוח — הוספת מקבל = counterparty על request_number הקיים. שולחן+כיסאות = פריט אחד.
   מקום עמום (מאילת/אילת/טירת צבי בלי רחוב או בית שאן) = next לבירור, לא details עם settlement מחוץ לתחום.
+  איסוף בבית שאן + יעד בעפולה/חולון = שמור donate+details איסוף; אל תכתוב יישוב מקבל מחוץ; אל next בלבד.
+  «בן אדם אמיתי» = escalate customer_request; «טוב עזוב» + עובדות באותה הודעה = בלי escalate.
 - seek: חיפוש לקבל פריט («אני מחפש/מבקש/צריך לקבל»). kind בלבד. לא donate ולא תמונה.
 - details: request_number, role donor|receiver, name, settlement, address, floor.
   איסוף = donor. מסירה = receiver. «השם שלי» = name של השולח.

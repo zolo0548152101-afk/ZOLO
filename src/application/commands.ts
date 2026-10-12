@@ -1085,12 +1085,28 @@ export class Commands {
         }
         return { ...output(null, r), humanReason: cmd.reason };
       }
+      // Explicit ask for a real person («בן אדם אמיתי») — hand off, don't just note.
+      if (cmd.reason === "customer_request") {
+        if (r.status !== "coordinated") {
+          r.status = "human";
+          r.human_reason = "customer_request";
+        }
+        r.team_notes = appendTeamNote(
+          r.team_notes,
+          `בקשת לקוח לנציג: ${text.slice(0, 400)}`,
+        );
+        return { ...output(null, r), humanReason: "customer_request" };
+      }
       // Unknown / unclear questions: park for team, keep collecting.
       r.team_notes = appendTeamNote(
         r.team_notes,
         `שאלה לצוות (${cmd.reason}): ${text.slice(0, 400)}`,
       );
-      if (r.status === "human" && r.human_reason !== "customer_insisted") {
+      if (
+        r.status === "human" &&
+        r.human_reason !== "customer_insisted" &&
+        r.human_reason !== "customer_request"
+      ) {
         r.status = "collecting";
         r.human_reason = null;
       }
@@ -1304,8 +1320,10 @@ export class Commands {
           if (cmd.needs_disassembly !== null)
             i.needs_disassembly = cmd.needs_disassembly;
         } else if (appliance(i)) i.needs_disassembly = false;
-        else if (cmd.needs_disassembly !== null)
-          i.needs_disassembly = cmd.needs_disassembly;
+        else if (cmd.needs_disassembly === false)
+          // Explicit "no disassembly" may clear other furniture. True is
+          // wardrobe-only — never stamp ארון-פירוק onto table_set/sofa/chairs.
+          i.needs_disassembly = false;
         if (i.kind === "oven" && cmd.oven_type) i.oven_type = cmd.oven_type;
         if (cmd.evacuation) i.evacuation = cmd.evacuation;
       }
