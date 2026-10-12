@@ -43,16 +43,17 @@ export function stripRepeatedSelfIntro(
     const rest = paragraphs.slice(1).join("\n\n").trim();
     if (rest) return rest;
   }
+  // Only strip the intro banner itself. Do not let a "anything until .!?"
+  // class eat the next sentence (e.g. "רשמתי ארון…") after ניסיונית.
   const stripped = raw
     .replace(
-      /^(?:שלום[!.,]?\s*|היי[,!]?\s*)?(?:אני\s+)?הסוכן האוטומטי[\s\S]*?בהרצה ניסיונית[^.!?\n]*[.!?…]?\s*(?:[🙂😊]\s*)?/u,
+      /^(?:שלום[!.,]?\s*|היי[,!]?\s*)?(?:אני\s+)?הסוכן האוטומטי(?:\s+של\s+חיים\s+יחד)?(?:,)?\s*בהרצה ניסיונית\s*[.!?…]?\s*(?:[🙂😊]\s*)?/u,
       "",
     )
     .replace(
-      /^(?:שלום[!.,]?\s*|היי[,!]?\s*)?(?:אני\s+)?הסוכן האוטומטי[\s\S]*?בהרצה ניסיונית[.!?…]?\s*/u,
+      /^(?:שלום[!.,]?\s*|היי[,!]?\s*)?(?:אני\s+)?הסוכן האוטומטי[\s\S]{0,80}?בהרצה ניסיונית\s*[.!?…]?\s*(?:[🙂😊]\s*)?/u,
       "",
     )
-    .replace(/^[\s\S]*?בהרצה ניסיונית[^\n]*\n+/u, "")
     .trim();
   return stripped || raw;
 }

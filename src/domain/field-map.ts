@@ -273,6 +273,7 @@ export function diffChangedFields(input: {
     items?: {
       kind: string;
       description: string;
+      quantity?: number | null;
       free: boolean | null;
       working: boolean | null;
       needs_disassembly: boolean | null;
@@ -300,6 +301,7 @@ export function diffChangedFields(input: {
     items?: {
       kind: string;
       description: string;
+      quantity?: number | null;
       free: boolean | null;
       working: boolean | null;
       needs_disassembly: boolean | null;
@@ -350,6 +352,22 @@ export function diffChangedFields(input: {
       out.push({ table: "request_items", column: "kind" });
     for (const [index, item] of afterItems.entries()) {
       const prior = beforeItems[index];
+      // Kind/description/quantity must surface on replace (wardrobe→chairs).
+      pushIfChanged(out, "request_items", "kind", prior?.kind ?? null, item.kind);
+      pushIfChanged(
+        out,
+        "request_items",
+        "description",
+        prior?.description ?? null,
+        item.description,
+      );
+      pushIfChanged(
+        out,
+        "request_items",
+        "quantity",
+        prior?.quantity ?? null,
+        item.quantity ?? null,
+      );
       pushIfChanged(out, "request_items", "free", prior?.free ?? null, item.free);
       pushIfChanged(out, "request_items", "working", prior?.working ?? null, item.working);
       pushIfChanged(out, "request_items", "needs_disassembly", prior?.needs_disassembly ?? null, item.needs_disassembly);
