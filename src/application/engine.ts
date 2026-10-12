@@ -759,19 +759,22 @@ export class Engine {
         facts: { queued: true },
       };
     });
+    const primaryContactQueued = allToolResults.some(
+      (r) =>
+        r.command.type === "contact_counterparty" &&
+        r.ok &&
+        r.notices_queued > 0,
+    );
     const claimFacts = {
       changedPaths,
       openedRequestNumber: donateResult?.request_number ?? null,
       // Only notices that were actually queued prove contact — consent alone
       // (contact=true with notices_queued=0) must not claim we messaged them.
       contactedCounterparty:
-        deferredToolNotices.length > 0 ||
-        allToolResults.some(
-          (r) =>
-            r.command.type === "contact_counterparty" &&
-            r.ok &&
-            r.notices_queued > 0,
-        ),
+        deferredToolNotices.length > 0 || primaryContactQueued,
+      // item_facts correction notices also queue outbound text; do not force
+      // the phrase model to re-affirm "I wrote to them" (underclaim → fallback).
+      requireContactClaim: primaryContactQueued,
       scheduleDate: null as string | null,
       cancelled: allToolResults.some(
         (r) => r.request_status === "cancelled" || r.command.type === "cancel",
@@ -2174,6 +2177,8 @@ export class Engine {
             : null,
         contactedCounterparty:
           (committed.operation?.outbound_notices_queued ?? 0) > 0,
+        // Default true; tools_already_applied path sets this from tool rows.
+        requireContactClaim: true,
         scheduleDate:
           typeof committed.operation?.changed_fields === "object"
             ? ((ctx.requests.find((r) => r.id === committed.requestId)
@@ -2246,16 +2251,18 @@ export class Engine {
               typeof (row as { request_number?: number }).request_number === "number",
           ) as { request_number: number } | undefined;
           if (donate) claimFacts.openedRequestNumber = donate.request_number;
+          const primaryContactQueued = toolRows.some(
+            (row) =>
+              row &&
+              typeof row === "object" &&
+              (row as { command?: { type?: string }; notices_queued?: number })
+                .command?.type === "contact_counterparty" &&
+              ((row as { notices_queued?: number }).notices_queued ?? 0) > 0,
+          );
           claimFacts.contactedCounterparty =
-            claimFacts.contactedCounterparty ||
-            toolRows.some(
-              (row) =>
-                row &&
-                typeof row === "object" &&
-                (row as { command?: { type?: string }; notices_queued?: number })
-                  .command?.type === "contact_counterparty" &&
-                ((row as { notices_queued?: number }).notices_queued ?? 0) > 0,
-            );
+            claimFacts.contactedCounterparty || primaryContactQueued;
+          // Correction notices from item_facts must not underclaim-nuke the reply.
+          claimFacts.requireContactClaim = primaryContactQueued;
           if (!rejected) {
             const check = verifyClaims(claims, claimFacts);
             if (!check.ok) {

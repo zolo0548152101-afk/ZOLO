@@ -71,6 +71,12 @@ export interface ClaimFacts {
   changedPaths: string[];
   openedRequestNumber: number | null;
   contactedCounterparty: boolean;
+  /**
+   * When true (default), a queued notice requires claims.contacted_counterparty.
+   * Set false for follow-up correction/update notices: the model may focus on
+   * item/address/schedule fixes without re-affirming first contact.
+   */
+  requireContactClaim?: boolean;
   scheduleDate: string | null;
   cancelled: boolean;
   humanHandoff: boolean;
@@ -119,8 +125,14 @@ export function verifyClaims(
   }
   if (claims.contacted_counterparty && !facts.contactedCounterparty)
     rejected.push("contacted_counterparty");
-  // Underclaim: a notice was queued this turn but the model denied contact.
-  if (!claims.contacted_counterparty && facts.contactedCounterparty)
+  // Underclaim: a primary contact notice was queued but the model denied it.
+  // Correction/update notices set contactedCounterparty without requiring the
+  // customer reply to re-claim first contact (conv#10 Friday+sofa turn).
+  if (
+    !claims.contacted_counterparty &&
+    facts.contactedCounterparty &&
+    facts.requireContactClaim !== false
+  )
     rejected.push("contacted_counterparty:underclaim");
   if (
     claims.opened_request !== null &&

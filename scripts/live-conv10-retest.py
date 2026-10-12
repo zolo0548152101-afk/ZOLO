@@ -346,7 +346,8 @@ def main():
         x in " ".join(tal2) for x in ("כורס", "ספה")
     )
     report["checks"]["affirms_contact"] = any(
-        x in reply2 for x in ("כותב", "פונה", "אכתוב", "שולח")
+        x in reply2
+        for x in ("כותב", "פונה", "אכתוב", "שולח", "כתבתי", "כתבנו", "פניתי")
     )
 
     since3 = time.time()
@@ -369,9 +370,23 @@ def main():
         s3["items"] or ""
     )
     report["checks"]["address_haemek_5"] = "עמק 5" in (s3["parties"] or "")
-    report["checks"]["refuses_friday"] = any(
-        x in reply3 for x in ("שישי", "רק בשלישי", "בימי שלישי", "הן בשלישי")
+    # House-number-only change on העמק must keep קרקע (floor 0).
+    donor_line = next(
+        (
+            ln
+            for ln in (s3["parties"] or "").splitlines()
+            if "|donor|584152101|" in ln
+        ),
+        "",
     )
+    report["checks"]["floor_kept_on_number_change"] = bool(
+        re.search(r"עמק 5\|0(?:\||$)", donor_line)
+    )
+    report["checks"]["refuses_friday"] = any(
+        x in reply3
+        for x in ("שישי", "רק בשלישי", "בימי שלישי", "הן בשלישי", "ימי שלישי")
+    )
+    report["checks"]["not_guard_fallback"] = "נמשיך מהנקודה הבאה" not in reply3
     # Must not invent a concrete dd/mm date unless proposed_run_date is set.
     req = (s3["requests"] or "").splitlines()[0] if s3["requests"] else ""
     parts = req.split("|")

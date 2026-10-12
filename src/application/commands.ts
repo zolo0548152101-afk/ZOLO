@@ -260,12 +260,53 @@ function contactableCounterpartyPhone(
 }
 
 /** True when the linked counterparty phone is the speaker (self-as-both move). */
+/** True when only the house number changed on the same street (keep floor). */
+function isHouseNumberOnlyAddressChange(
+  prev: string | null | undefined,
+  next: string,
+): boolean {
+  if (!prev?.trim()) return false;
+  const stem = (value: string) =>
+    value
+      .trim()
+      .replace(/\s+\d+[א-ת]?(?:\/\d+)?\s*$/u, "")
+      .replace(/\s+/g, " ");
+  const prevStem = stem(prev);
+  const nextStem = stem(next);
+  return (
+    prevStem.length > 0 &&
+    prevStem === nextStem &&
+    prev.trim() !== next.trim()
+  );
+}
+
 function isSpeakerPhone(
   speakerPhone: string,
   otherPhone: string | null | undefined,
 ): boolean {
   return Boolean(otherPhone && otherPhone === speakerPhone);
 }
+
+/** True when only the house number changed on the same street (keep floor). */
+function isHouseNumberOnlyAddressChange(
+  prev: string | null | undefined,
+  next: string,
+): boolean {
+  if (!prev?.trim()) return false;
+  const stem = (value: string) =>
+    value
+      .trim()
+      .replace(/\s+\d+[א-ת]?(?:\/\d+)?\s*$/u, "")
+      .replace(/\s+/g, " ");
+  const prevStem = stem(prev);
+  const nextStem = stem(next);
+  return (
+    prevStem.length > 0 &&
+    prevStem === nextStem &&
+    prev.trim() !== next.trim()
+  );
+}
+
 export class Commands {
   constructor(
     private readonly s: Store,
@@ -1535,10 +1576,13 @@ export class Commands {
       // Never invent floor=0 — only store a floor the customer actually gave.
       // When settlement/address moves and floor is omitted, drop the stale floor
       // (e.g. Holon Sokolov floor 3 → Beit Shean Herzl 5 with no floor said).
+      // Same-street house-number edits (העמק 3 → העמק 5) keep the prior floor.
       if (cmd.floor !== null) p.floor = cmd.floor;
       else if (
         (cmd.settlement && cmd.settlement !== prevSettlement) ||
-        (cmd.address && cmd.address.trim() !== (prevAddress ?? "").trim())
+        (cmd.address &&
+          cmd.address.trim() !== (prevAddress ?? "").trim() &&
+          !isHouseNumberOnlyAddressChange(prevAddress, cmd.address))
       )
         p.floor = null;
       if (cmd.preferred_time && validTransportPreference(cmd.preferred_time))
