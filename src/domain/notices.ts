@@ -1,5 +1,4 @@
 import type { Party, Request } from "./types.js";
-import { nextTuesday } from "./policies.js";
 
 export function formatHebrewDate(iso: string): string {
   const [year, month, day] = iso.slice(0, 10).split("-");
@@ -22,8 +21,9 @@ function itemLine(request: Request): string {
   return request.items.map((item) => item.description).filter(Boolean).join(", ") || "פריט";
 }
 
-function deliveryDate(request: Request, now: Date): string {
-  return request.run_date ?? request.proposed_run_date ?? nextTuesday(now).date;
+/** Concrete calendar date only when the request actually has one booked/proposed. */
+export function scheduledDeliveryDate(request: Request): string | null {
+  return request.run_date ?? request.proposed_run_date ?? null;
 }
 
 function partyByPhone(request: Request, phone: string): Party | undefined {
@@ -35,11 +35,11 @@ export function draftCounterpartyVerification(input: {
   recipient: Party;
   now: Date;
 }): string {
-  const { request, recipient, now } = input;
+  const { request, recipient } = input;
   const initiator =
     request.parties.find((party) => party.role !== recipient.role) ?? null;
   const items = itemLine(request);
-  const dateHe = formatHebrewDate(deliveryDate(request, now));
+  const scheduled = scheduledDeliveryDate(request);
   const greeting = recipient.name ? `שלום ${recipient.name}` : "שלום";
   const other = initiator?.name
     ? initiator.name
@@ -51,12 +51,22 @@ export function draftCounterpartyVerification(input: {
       ? `${other} רוצה למסור לך ${items}.`
       : `${other} רוצה לקבל ממך ${items}.`;
   const address = partyAddressLine(recipient);
+  // Never invent next-Tuesday when nothing is proposed/coordinated yet
+  // (same bug as conv#5/#8 notices claiming a concrete date while still collecting).
+  const scheduleLine = scheduled
+    ? `יום ההובלה המוצע הוא שלישי ${formatHebrewDate(scheduled)}, בין 16:00–20:00. השעה המדויקת תלויה במסלול של אותו יום.`
+    : `ההובלות שלנו מתקיימות בימי שלישי בין 16:00–20:00 (בלי שעה מדויקת). עדיין לא נקבע תאריך להובלה הזו.`;
   const confirm = address
-    ? `רשמנו את הכתובת שלך: ${address}.\nנא לאשר שהכתובת נכונה ושהיום מתאים.`
-    : "נא לאשר את הכתובת שלך ושהיום מתאים.";
+    ? scheduled
+      ? `רשמנו את הכתובת שלך: ${address}.\nנא לאשר שהכתובת נכונה ושהיום מתאים.`
+      : `רשמנו את הכתובת שלך: ${address}.\nנא לאשר שהכתובת נכונה, ושחלון יום שלישי מתאים לך.`
+    : scheduled
+      ? "נא לאשר את הכתובת שלך ושהיום מתאים."
+      : "נא לאשר את הכתובת שלך, ושחלון יום שלישי מתאים לך.";
+  void input.now;
   return `${greeting}, כאן חיים יחד.
 ${action}
-יום ההובלה הוא שלישי ${dateHe}, בין 16:00–20:00. השעה המדויקת תלויה במסלול של אותו יום.
+${scheduleLine}
 ${confirm}`;
 }
 
@@ -91,7 +101,7 @@ export function looksLikeJsonNotice(text: string): boolean {
 export function noticeKeepsRequiredFacts(draft: string, text: string): boolean {
   if (!text.trim() || looksLikeJsonNotice(text)) return false;
   const skip =
-    /^(?:שלום|כאן|חיים|יחד|ההובלה|בין|רשמנו|אפשר|לאשר|שהכתובת|נכונה|שהיום|מתאים|רוצה|למסור|לקבל|ממך|לך|יום|שלישי|המוסר|המקבל|לגבי|המועד|המוצע|הוא|את|של|אותו|תלויה|במסלול)$/u;
+    /^(?:שלום|כאן|חיים|יחד|ההובלה|בין|רשמנו|אפשר|לאשר|שהכתובת|נכונה|שהיום|מתאים|רוצה|למסור|לקבל|ממך|לך|יום|שלישי|המוסר|המקבל|לגבי|המועד|המוצע|הוא|את|של|אותו|תלויה|במסלול|עדיין|לא|נקבע|תאריך|להובלה|הזו|ושחלון|מתקיימות|בימי)$/u;
   const tokens = [...new Set(draft.match(/[א-ת]{2,}|\d{1,2}\/\d{1,2}(?:\/\d{4})?/g) ?? [])];
   return tokens.filter((token) => !skip.test(token)).every((token) => text.includes(token));
 }

@@ -1473,6 +1473,10 @@ decorateRequestArtifacts=function(){if(dbTableName!=='requests')return;const mi=
              WHERE id=$1`,
             [p.id, b.state, b.provider_id],
           );
+          if (b.state === "delivered" || b.state === "read")
+            await s.advanceVerificationForOutbox(client, p.id, "delivered");
+          else if (b.state === "accepted")
+            await s.advanceVerificationForOutbox(client, p.id, "provider_accepted");
           await s.event(
             client,
             { trace_id: req.id },

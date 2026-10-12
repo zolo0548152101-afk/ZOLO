@@ -1790,12 +1790,20 @@ export class Engine {
                   result.request?.id ?? null,
                   "pending",
                 );
-                if (outboxId)
+                if (outboxId) {
                   deferredNotices.push({
                     outboxId,
                     notice,
                     requestId: result.request?.id ?? null,
                   });
+                  if (result.request?.id)
+                    await this.s.markVerificationQueued(
+                      c,
+                      result.request.id,
+                      notice.phone,
+                      outboxId,
+                    );
+                }
               }
               index++;
               if (reason || request?.status === "rejected") break;
@@ -2635,6 +2643,7 @@ export class Engine {
         "UPDATE outbox SET state='sent',delivery_state='accepted',provider_id=$2,sent_at=clock_timestamp(),provider_accepted_at=clock_timestamp(),error_code=NULL WHERE id=$1",
         [id, providerId],
       );
+      await this.s.advanceVerificationForOutbox(c, id, "provider_accepted");
       if (claimed.match_id)
         await c.query(
           "UPDATE matches SET state='presented',presented_at=clock_timestamp() WHERE id=$1 AND state='queued_photo'",

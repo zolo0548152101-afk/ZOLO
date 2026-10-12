@@ -867,6 +867,64 @@ export class Store {
   }
 
   /**
+   * Advance request_verifications when a counterparty notice outbox row is created.
+   * Links outbox_id + queued_at so consent is not left as a dead-end state.
+   */
+  async markVerificationQueued(
+    c: pg.PoolClient,
+    requestId: string,
+    phone: string,
+    outboxId: string,
+  ): Promise<void> {
+    await c.query(
+      `UPDATE request_verifications rv
+          SET state='queued',
+              outbox_id=$3,
+              queued_at=COALESCE(rv.queued_at, clock_timestamp()),
+              updated_at=clock_timestamp(),
+              last_error=NULL
+         FROM request_parties p
+         LEFT JOIN contacts co ON co.id=p.contact_id
+        WHERE rv.request_id=$1
+          AND p.request_id=rv.request_id
+          AND p.role=rv.role
+          AND co.phone=$2
+          AND rv.state IN ('consented','offered','queued')`,
+      [requestId, phone, outboxId],
+    );
+  }
+
+  /** Advance verification when the linked notice outbox is accepted/delivered. */
+  async advanceVerificationForOutbox(
+    c: pg.PoolClient,
+    outboxId: string,
+    stage: "provider_accepted" | "delivered",
+  ): Promise<void> {
+    if (stage === "provider_accepted") {
+      await c.query(
+        `UPDATE request_verifications
+            SET state='provider_accepted',
+                provider_accepted_at=COALESCE(provider_accepted_at, clock_timestamp()),
+                updated_at=clock_timestamp()
+          WHERE outbox_id=$1
+            AND state IN ('queued','consented','offered')`,
+        [outboxId],
+      );
+      return;
+    }
+    await c.query(
+      `UPDATE request_verifications
+          SET state='delivered',
+              delivered_at=COALESCE(delivered_at, clock_timestamp()),
+              provider_accepted_at=COALESCE(provider_accepted_at, clock_timestamp()),
+              updated_at=clock_timestamp()
+        WHERE outbox_id=$1
+          AND state IN ('queued','provider_accepted','consented','offered')`,
+      [outboxId],
+    );
+  }
+
+  /**
    * Enqueue WhatsApp send only when the outbox row is format-ready and is the
    * head of this phone's FIFO. Used after reply/notice formatting completes.
    */

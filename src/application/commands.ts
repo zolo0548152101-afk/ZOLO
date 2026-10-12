@@ -306,10 +306,26 @@ export class Commands {
     other: Party,
     contact: boolean,
   ): Promise<void> {
+    // Consent must not rewind queued/sent verification rows back to "consented"
+    // (conv#8 left state=consented with null outbox_id after a live notice send).
     await c.query(
       `INSERT INTO request_verifications(request_id,role,state,consented_at,updated_at,last_error)
        VALUES($1,$2,$3,$4,clock_timestamp(),$5)
-       ON CONFLICT(request_id,role) DO UPDATE SET state=EXCLUDED.state,consented_at=EXCLUDED.consented_at,updated_at=clock_timestamp(),last_error=EXCLUDED.last_error`,
+       ON CONFLICT(request_id,role) DO UPDATE SET
+         state=CASE
+           WHEN EXCLUDED.state='consented'
+             AND request_verifications.state IN (
+               'queued','provider_accepted','delivered','approved'
+             )
+           THEN request_verifications.state
+           ELSE EXCLUDED.state
+         END,
+         consented_at=COALESCE(request_verifications.consented_at, EXCLUDED.consented_at),
+         updated_at=clock_timestamp(),
+         last_error=CASE
+           WHEN EXCLUDED.state='declined' THEN EXCLUDED.last_error
+           ELSE NULL
+         END`,
       [
         r.id,
         other.role,
