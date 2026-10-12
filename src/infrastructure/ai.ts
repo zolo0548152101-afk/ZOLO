@@ -338,6 +338,7 @@ export class OpenAIPlanner implements Planner {
       completeness: facts.this_turn.completeness,
       data_map: facts.data_map || renderWriteMapMarkdown(),
       allowed_saved: allowedSaved,
+      stage: "write",
       ...(input.guardFeedback
         ? { guard_feedback: input.guardFeedback }
         : {}),
@@ -664,6 +665,8 @@ export class OpenAIPlanner implements Planner {
       /** Exact strings allowed in claims.saved this turn (subset or empty). */
       allowed_saved: allowedSaved,
       data_map: facts.data_map,
+      stage: "phrase",
+      mode: "customer_reply",
       ...(input.guardFeedback
         ? { guard_feedback: input.guardFeedback }
         : {}),

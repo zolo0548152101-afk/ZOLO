@@ -717,31 +717,57 @@ export class Engine {
         allToolResults.some((r) => r.request_status === "human"),
       knownRequestNumbers: (await this.s.context(id)).requests.map((r) => r.number),
     };
-    let claims = agent.claims;
+    const phraseCommands =
+      executedCommands.length > 0 ? executedCommands : agent.commands;
+    const phraseResults: ActionResultFact[] = allToolResults.map((result) => ({
+      command: result.command.type,
+      ok: result.ok,
+      detail: result.error
+        ? { error: result.error }
+        : result.request_number != null
+          ? { request_number: result.request_number }
+          : undefined,
+    }));
+    const phraseChanged =
+      agent.changedFields.length > 0 ? agent.changedFields : changedFromTools;
+    const ctxAfterTools = await this.s.context(id);
+    const phraseInput = {
+      rules,
+      commands: phraseCommands,
+      results: phraseResults,
+      changed: phraseChanged,
+      boundary: null,
+      notices: [] as NoticeFact[],
+      fallback: agent.text,
+    };
+
+    let claims = emptyClaims();
     let replyText = agent.text;
     let rejected = false;
     let rejectedClaims: string[] = [];
+    try {
+      const composed = await this.ai.reply(ctxAfterTools, phraseInput);
+      claims = composed.claims;
+      replyText = composed.text;
+      agent = {
+        ...agent,
+        text: replyText,
+        claims,
+        metadata: { ...agent.metadata, phrase: composed.metadata },
+      };
+    } catch {
+      claims = agent.claims;
+      replyText = agent.text || GUARD_FALLBACK_REPLY;
+    }
+
     let check = verifyClaims(claims, claimFacts);
     if (!check.ok) {
       rejected = true;
       rejectedClaims = check.rejected;
       try {
-        const retry = await this.ai.agentTurn(await this.s.context(id), {
-          rules,
-          executeTool: async (command) => {
-            // Guard retry is phrase-only — refuse further writes.
-            return snapshotToolResult({
-              command,
-              before: null,
-              after: null,
-              changed: [],
-              notices: [],
-              phone: ctx0.conversation.phone,
-              error: "guard_retry_writes_disabled",
-            });
-          },
+        const retry = await this.ai.reply(ctxAfterTools, {
+          ...phraseInput,
           guardFeedback: { rejected_claims: check.rejected },
-          maxToolCalls: 0,
         });
         claims = retry.claims;
         replyText = retry.text;
@@ -782,7 +808,6 @@ export class Engine {
     // Refresh versions AFTER tool writes — pre-tool snapshots go stale and
     // finish() would RetryableError("stale_plan"), re-enter agentTurn, and
     // overwrite tool metadata with a no-write second attempt.
-    const ctxAfterTools = await this.s.context(id);
     await this.s.pool.query(
       `UPDATE messages SET ai_plan=$2,plan_versions=$3,ai_metadata=$4
         WHERE id=$1 AND ai_plan IS NULL AND processed_at IS NULL`,
@@ -2093,7 +2118,7 @@ export class Engine {
           typeof agentMeta.agent_reply === "string" &&
           agentMeta.agent_reply.trim()
         ) {
-          // Single agent turn already produced + claim-checked the reply.
+          // Write tools already ran; phrase call already produced + claim-checked the reply.
           text = agentMeta.agent_reply.trim();
           claims =
             agentMeta.agent_claims &&
