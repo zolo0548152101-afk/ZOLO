@@ -179,6 +179,14 @@ function suppliedPhone(_ctx: Context, input: string): string {
   // Action manager supplies the phone field; canonicalize and write.
   return canonicalPhone(input);
 }
+
+/** True when the linked counterparty phone is the speaker (self-as-both move). */
+function isSpeakerPhone(
+  speakerPhone: string,
+  otherPhone: string | null | undefined,
+): boolean {
+  return Boolean(otherPhone && otherPhone === speakerPhone);
+}
 export class Commands {
   constructor(
     private readonly s: Store,
@@ -364,7 +372,9 @@ export class Commands {
       if (pending.counterparty_phone) {
         const receiverPhone = suppliedPhone(ctx, pending.counterparty_phone);
         const receiver = party("receiver", receiverPhone, receiverPhone === phone);
-        if (pending.counterparty_name) receiver.name = pending.counterparty_name;
+        if (isSpeakerPhone(phone, receiverPhone))
+          receiver.name = parties[0]!.name;
+        else if (pending.counterparty_name) receiver.name = pending.counterparty_name;
         parties.push(receiver);
       } else if (pending.counterparty_name) {
         const receiver = party("receiver", null, false);
@@ -438,16 +448,28 @@ export class Commands {
       const isDonor = cmd.type === "donate";
       // Contact cards often arrive in the same coalesced turn as the item.
       // Enrich missing counterparty phone/name from the vCard before write.
+      // Self-as-both (counterparty_phone === speaker) must not inherit a helper
+      // vCard name — «טל רק עוזרת» must not become receiver.name.
       const card = ctx.message.contacts[0];
       let other = isDonor ? cmd.counterparty_phone : cmd.donor_phone;
       if (isDonor && !other && card?.phone) other = card.phone;
+      const otherCanonical = other ? suppliedPhone(ctx, other) : null;
       if (
         isDonor &&
         cmd.type === "donate" &&
         !cmd.counterparty_name &&
-        card?.name
+        card?.name &&
+        !isSpeakerPhone(phone, otherCanonical)
       )
         cmd.counterparty_name = card.name.replace(/^אא\s+/u, "").trim() || card.name;
+      // Drop a helper name the model attached to a self-as-both donate.
+      if (
+        isDonor &&
+        cmd.type === "donate" &&
+        cmd.counterparty_name &&
+        isSpeakerPhone(phone, otherCanonical)
+      )
+        cmd.counterparty_name = null;
       // A named recipient from the action manager is a direct handoff even
       // when the model omitted direct:true — persist that, do not keep the
       // open-donation photo loop.
@@ -478,8 +500,11 @@ export class Commands {
           p,
           p === phone && isDonor,
         );
-        if (isDonor && cmd.counterparty_name)
+        if (isDonor && cmd.counterparty_name && !isSpeakerPhone(phone, p))
           counterparty.name = cmd.counterparty_name;
+        else if (isDonor && isSpeakerPhone(phone, p))
+          // Mirror the speaker's own name onto the self-as-both receiver side.
+          counterparty.name = parties[0]!.name;
         parties.push(counterparty);
       } else if (
         isDonor &&
@@ -634,20 +659,26 @@ export class Commands {
           if (other) {
             const receiverPhone = suppliedPhone(ctx, other);
             const linked = existing.parties.find((entry) => entry.role === "receiver");
+            const donorParty = existing.parties.find((entry) => entry.role === "donor");
+            const selfBoth = isSpeakerPhone(phone, receiverPhone);
+            const nextName = selfBoth
+              ? (donorParty?.name ?? null)
+              : cmd.type === "donate" && cmd.counterparty_name
+                ? cmd.counterparty_name
+                : undefined;
             if (!linked) {
               const receiver = party("receiver", receiverPhone, receiverPhone === phone);
-              if (cmd.type === "donate" && cmd.counterparty_name)
-                receiver.name = cmd.counterparty_name;
+              if (nextName !== undefined) receiver.name = nextName;
               existing.parties.push(receiver);
             } else if (linked.phone === null || linked.phone === receiverPhone) {
               linked.phone = receiverPhone;
-              if (cmd.type === "donate" && cmd.counterparty_name)
-                linked.name = cmd.counterparty_name;
+              if (nextName !== undefined) linked.name = nextName;
+              else if (selfBoth) linked.name = donorParty?.name ?? null;
             } else {
               // Prompt owns conflicts — overwrite linked phone/name on write.
               linked.phone = receiverPhone;
-              if (cmd.type === "donate" && cmd.counterparty_name)
-                linked.name = cmd.counterparty_name;
+              if (nextName !== undefined) linked.name = nextName;
+              else if (selfBoth) linked.name = donorParty?.name ?? null;
             }
             if (
               existing.parties.length === 2 &&
@@ -1292,34 +1323,50 @@ export class Commands {
         // Fall through to nextQuestion — prompts may ask for phone naturally.
       } else {
         const targetPhone = suppliedPhone(ctx, cmd.phone);
+        const speakerParty = r.parties.find(
+          (entry) => entry.phone === phone && entry.role !== role,
+        );
+        // Self-as-both: never keep a helper/vCard name on the speaker's other role.
+        const resolveCounterpartyName = (): string | null => {
+          if (isSpeakerPhone(phone, targetPhone))
+            return speakerParty?.name ?? null;
+          return (
+            cmd.name ??
+            ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ??
+            ctx.conversation.pending_counterparty_name ??
+            null
+          );
+        };
         if (other) {
           if (other.phone === targetPhone) {
-            // Same phone can still correct the display name (e.g. משה → טל).
-            const nextName =
-              cmd.name ??
-              ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ??
-              ctx.conversation.pending_counterparty_name ??
-              null;
-            if (!nextName || nextName === other.name) return output(null);
-            other.name = nextName;
+            // Same phone can still correct the display name (e.g. משה → טל),
+            // except when that phone is the speaker (self-as-both).
+            const nextName = isSpeakerPhone(phone, targetPhone)
+              ? speakerParty?.name ?? null
+              : cmd.name ??
+                ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ??
+                ctx.conversation.pending_counterparty_name ??
+                null;
+            if (isSpeakerPhone(phone, targetPhone)) {
+              if (other.name === nextName && r.represents_both_parties)
+                return output(null);
+              other.name = nextName;
+            } else {
+              if (!nextName || nextName === other.name) return output(null);
+              other.name = nextName;
+            }
           } else if (other.phone === null) {
             // Attach phone to a prior name-only receiver party.
             other.phone = targetPhone;
             other.name =
-              cmd.name ??
-              ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ??
-              other.name ??
-              ctx.conversation.pending_counterparty_name ??
-              null;
+              resolveCounterpartyName() ??
+              (isSpeakerPhone(phone, targetPhone) ? null : other.name);
           } else {
             // Prompt owns phone changes — overwrite linked counterparty.
             other.phone = targetPhone;
             other.name =
-              cmd.name ??
-              ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ??
-              other.name ??
-              ctx.conversation.pending_counterparty_name ??
-              null;
+              resolveCounterpartyName() ??
+              (isSpeakerPhone(phone, targetPhone) ? null : other.name);
           }
         } else {
           const p = party(
@@ -1328,12 +1375,8 @@ export class Commands {
             targetPhone === phone &&
               r.parties.some((x) => x.phone === phone && x.approved_at !== null),
           );
-          // Explicit correction name wins over vCard display name.
-          p.name =
-            cmd.name ??
-            ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ??
-            ctx.conversation.pending_counterparty_name ??
-            null;
+          // Explicit correction name wins over vCard — unless self-as-both.
+          p.name = resolveCounterpartyName();
           r.parties.push(p);
         }
         invalidateProposal(r);
