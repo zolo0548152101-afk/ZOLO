@@ -30,8 +30,12 @@ import {
   customerInsistsAfterDenial,
   usablePersonName,
   preferredDeliveryDate,
+  contactConsentGiven,
 } from "../domain/policies.js";
-import { draftCounterpartyVerification } from "../domain/notices.js";
+import {
+  draftCounterpartyVerification,
+  draftCounterpartyCorrection,
+} from "../domain/notices.js";
 export interface Outcome {
   reply: string | null;
   request: Request | null;
@@ -376,6 +380,42 @@ export class Commands {
       }),
     });
     r.verification_contacted = true;
+  }
+
+  private queueCounterpartyCorrection(
+    r: Request,
+    other: Party,
+    notices: Notice[],
+    previousItems: string,
+  ): void {
+    if (!other.phone || !r.verification_contacted) return;
+    if (!isLiveOutboundAllowed(other.phone, this.s.config.LIVE_ALLOWLIST))
+      return;
+    const items = r.items.map((i) => i.description).filter(Boolean).join(", ");
+    if (!items || items === previousItems) return;
+    notices.push({
+      phone: other.phone,
+      text: draftCounterpartyCorrection({
+        request: r,
+        recipient: other,
+        previousItems,
+      }),
+    });
+  }
+
+  private async alreadyConsentedInDb(
+    c: pg.PoolClient,
+    r: Request,
+    other: Party,
+  ): Promise<boolean> {
+    if (r.verification_contacted) return true;
+    const row = await c.query<{ state: string }>(
+      "SELECT state FROM request_verifications WHERE request_id=$1 AND role=$2",
+      [r.id, other.role],
+    );
+    return ["consented", "queued", "provider_accepted", "delivered", "approved"].includes(
+      row.rows[0]?.state ?? "",
+    );
   }
 
   /** Send the verification notice once a phone exists and the donor already consented. */
@@ -1246,6 +1286,10 @@ export class Commands {
         invalidateProposal(r);
         return output(null, r);
       }
+      // Opening bursts must not auto-message (conv#10 contacted Tal with no ask/yes).
+      const consentedAlready = await this.alreadyConsentedInDb(c, r, other);
+      const consentedNow = contactConsentGiven(text, ctx.history ?? []);
+      if (!consentedAlready && !consentedNow) return output(null, r);
       // Need a real person name on the speaker side before messaging the other
       // party (conv#9 noticed Tal as «אמא רוצה למסור לך»).
       if (!usablePersonName(speaker.name)) {
@@ -1502,6 +1546,10 @@ export class Commands {
     } else if (cmd.type === "item_facts") {
       invalidateProposal(r);
       ownParty(r, phone, "donor");
+      const previousItems = r.items
+        .map((i) => i.description)
+        .filter(Boolean)
+        .join(", ");
       // Apply AI items directly — replace-vs-add / furniture-count are prompt-only.
       if (cmd.items) {
         const incoming = cmd.items.map((i, index) => {
@@ -1560,6 +1608,12 @@ export class Commands {
       if (r.items.some((i) => i.evacuation === "different")) {
         r.human_reason = "evacuation";
       }
+      // After Tal was already notified about «כורסה», a correction to «ספה»
+      // must send an update notice (conv#10 left the stale first notice).
+      const speaker = ownParty(r, phone);
+      const other = r.parties.find((p) => p.role !== speaker.role);
+      if (other?.phone && r.verification_contacted)
+        this.queueCounterpartyCorrection(r, other, notices, previousItems);
     } else if (cmd.type === "counterparty") {
       const role = ownParty(r, phone).role === "donor" ? "receiver" : "donor";
       const other = r.parties.find((p) => p.role === role);

@@ -947,6 +947,52 @@ export function nextTuesday(
   d.setUTCDate(d.getUTCDate() + delta);
   return { date: d.toISOString().slice(0, 10), sameDay: delta === 0 };
 }
+
+/** Strong consent to message the other party (not bare «כן» alone). */
+export function strongContactConsent(text: string): boolean {
+  const t = norm(text);
+  if (
+    /אל\s+תפנ|לא\s+(?:לפנות|לכתוב|לשלוח|תיצרי?\s+קשר)|don'?t\s+contact/iu.test(
+      t,
+    )
+  )
+    return false;
+  return (
+    /מאשר(?:ת)?\s+(?:ליצור(?:\s+אית(?:ה|ו))?\s+קשר|לפנות|לכתוב)/u.test(t) ||
+    /(?:תפנו|תכתבו|תשלחו|דבר(?:י)?\s+אית|כתוב(?:י)?\s+(?:ל|אלי)|פנה\s+(?:ל|אלי)|יאללה\s+(?:תכתב|תפנ|תשלח))/u.test(
+      t,
+    ) ||
+    /(?:please\s+)?(?:contact|message|text)\s+(?:them|him|her|tal)/i.test(text)
+  );
+}
+
+/**
+ * True when the customer consented to counterparty contact — strong phrasing,
+ * or bare yes only right after we asked (conv#10 auto-contacted without ask/yes).
+ */
+export function contactConsentGiven(
+  text: string,
+  history: Array<{ role: string; content: string }> = [],
+): boolean {
+  if (strongContactConsent(text)) return true;
+  const bareYes = /^(?:כן|בטח|בוודאי|סבבה|בסדר|יאללה)(?:[\s,!.]|$)/u.test(
+    norm(text),
+  );
+  if (!bareYes) {
+    for (const entry of history.filter((e) => e.role === "user").slice(-6))
+      if (strongContactConsent(entry.content)) return true;
+    return false;
+  }
+  const lastAssistant = [...history]
+    .reverse()
+    .find((entry) => entry.role === "assistant");
+  return Boolean(
+    lastAssistant &&
+      /לכתוב\s+ל|לאמת|לפנות|כן\s+או\s+לא|שאכתוב|ליצור\s+קשר|לכתוב\s+אלי/u.test(
+        lastAssistant.content,
+      ),
+  );
+}
 export function statusText(requests: Request[]): string {
   if (!requests.length) return "לא נמצאו פניות פעילות עבורך.";
   const labels: Record<string, string> = {

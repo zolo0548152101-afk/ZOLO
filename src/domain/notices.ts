@@ -82,6 +82,29 @@ export function draftScheduleProposal(input: {
 נא לאשר שיום ההובלה מתאים.`;
 }
 
+/** Follow-up when item/facts change after the first verification notice (conv#10). */
+export function draftCounterpartyCorrection(input: {
+  request: Request;
+  recipient: Party;
+  previousItems: string;
+}): string {
+  const { request, recipient, previousItems } = input;
+  const initiator =
+    request.parties.find((party) => party.role !== recipient.role) ?? null;
+  const items = itemLine(request);
+  const recipientLabel = usablePersonName(recipient.name);
+  const greeting = recipientLabel ? `שלום ${recipientLabel}` : "שלום";
+  const other =
+    usablePersonName(initiator?.name) ??
+    (recipient.role === "receiver" ? "המוסר" : "המקבל");
+  const changed =
+    previousItems && previousItems !== items ? ` (לא ${previousItems})` : "";
+  return `${greeting}, כאן חיים יחד.
+עדכון לגבי המסירה מ${other}: הפריט הוא ${items}${changed}.
+ההובלות שלנו מתקיימות בימי שלישי בין 16:00–20:00 (בלי שעה מדויקת). עדיין לא נקבע תאריך להובלה הזו.
+נא לאשר שקיבלת את העדכון.`;
+}
+
 export function draftCoordinatedNotice(input: {
   request: Request;
   date: string;
