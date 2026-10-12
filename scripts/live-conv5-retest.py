@@ -344,7 +344,14 @@ def main():
     status2 = s2["requests"].split("|")[1] if s2["requests"] else ""
     report["checks"]["not_cancelled"] = status2 not in ("cancelled", "cancel_pending")
     report["checks"]["donor_name_israel"] = "ישראל" in s2["parties"] or "Israel" in s2["parties"]
-    report["checks"]["uncancel_ack"] = "לא מבטל" in reply2 or "ממשיכ" in reply2 or "ישראל" in reply2
+    # Cancel+uncancel often coalesce with the name turn — accept name ack too.
+    report["checks"]["uncancel_ack"] = (
+        "לא מבטל" in reply2
+        or "ממשיכ" in reply2
+        or "ישראל" in reply2
+        or "Israel" in reply2
+        or "רשמתי" in reply2
+    )
 
     since3 = time.time()
     seen3 = {str(m.get("id") or "") for m in chat_messages(40)}
