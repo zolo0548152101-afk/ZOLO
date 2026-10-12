@@ -1653,6 +1653,40 @@ test("donate with a renamed recipient plus vCard updates the open request instea
   assert.match(notice, /טל/);
   assert.match(notice, /מיטה/);
 });
+test("counterparty same-phone name correction updates the receiver in DB", async () => {
+  const donor = phone(),
+    receiver = phone();
+  await message(donor, "אני רוצה למסור מיטה למשה", [
+    {
+      type: "donate",
+      items: [{ kind: "bed", description: "מיטה", quantity: 1 }],
+      counterparty_phone: receiver,
+      counterparty_name: "משה",
+      direct: true,
+      free: true,
+      working: true,
+    },
+  ]);
+  const opened = (await s.active(donor))[0]!;
+  assert.equal(
+    opened.parties.find((party) => party.role === "receiver")?.name,
+    "משה",
+  );
+  await message(donor, "בעצם קוראים לו טל", [
+    {
+      type: "counterparty",
+      request_number: opened.number,
+      phone: receiver,
+      name: "טל",
+    },
+  ]);
+  const saved = await s.request(opened.id);
+  const recipient = saved.parties.find((party) => party.role === "receiver");
+  assert.equal(recipient?.phone, receiver);
+  assert.equal(recipient?.name, "טל");
+  assert.equal((await s.active(donor)).length, 1);
+});
+
 test("AI donate with only counterparty_name converts open donation without direct flag", async () => {
   const p = phone();
   await message(p, "יש לי כיסא למסירה", [donate("כיסא", "chairs")]);

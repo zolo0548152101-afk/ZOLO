@@ -1293,25 +1293,32 @@ export class Commands {
       } else {
         const targetPhone = suppliedPhone(ctx, cmd.phone);
         if (other) {
-          if (other.phone === targetPhone)
-            return output(null);
-          if (other.phone === null) {
+          if (other.phone === targetPhone) {
+            // Same phone can still correct the display name (e.g. משה → טל).
+            const nextName =
+              cmd.name ??
+              ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ??
+              ctx.conversation.pending_counterparty_name ??
+              null;
+            if (!nextName || nextName === other.name) return output(null);
+            other.name = nextName;
+          } else if (other.phone === null) {
             // Attach phone to a prior name-only receiver party.
             other.phone = targetPhone;
             other.name =
+              cmd.name ??
               ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ??
               other.name ??
               ctx.conversation.pending_counterparty_name ??
-              cmd.name ??
               null;
           } else {
             // Prompt owns phone changes — overwrite linked counterparty.
             other.phone = targetPhone;
             other.name =
+              cmd.name ??
               ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ??
               other.name ??
               ctx.conversation.pending_counterparty_name ??
-              cmd.name ??
               null;
           }
         } else {
@@ -1321,11 +1328,11 @@ export class Commands {
             targetPhone === phone &&
               r.parties.some((x) => x.phone === phone && x.approved_at !== null),
           );
-          // A contact card is identity data, never consent.
+          // Explicit correction name wins over vCard display name.
           p.name =
+            cmd.name ??
             ctx.message.contacts.find((x) => x.phone === targetPhone)?.name ??
             ctx.conversation.pending_counterparty_name ??
-            cmd.name ??
             null;
           r.parties.push(p);
         }
