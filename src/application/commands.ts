@@ -13,6 +13,7 @@ import { Store } from "../infrastructure/store.js";
 import {
   DEFAULT_TRANSPORT_CAPACITY,
   canonicalPhone,
+  isLiveOutboundAllowed,
   donationIntent,
   ambiguousStreetCity,
   itemError,
@@ -184,6 +185,20 @@ function suppliedPhone(_ctx: Context, input: string): string {
   return canonicalPhone(input);
 }
 
+/**
+ * Canonicalize a counterparty phone, or null when LIVE_ALLOWLIST is active and
+ * the number is outside it — never persist/queue outbound to non-test numbers.
+ */
+function contactableCounterpartyPhone(
+  store: Store,
+  input: string | null | undefined,
+): string | null {
+  if (!input) return null;
+  const phone = canonicalPhone(input);
+  if (!isLiveOutboundAllowed(phone, store.config.LIVE_ALLOWLIST)) return null;
+  return phone;
+}
+
 /** True when the linked counterparty phone is the speaker (self-as-both move). */
 function isSpeakerPhone(
   speakerPhone: string,
@@ -257,6 +272,8 @@ export class Commands {
     notices: Notice[],
   ): void {
     if (!other.phone) return;
+    if (!isLiveOutboundAllowed(other.phone, this.s.config.LIVE_ALLOWLIST))
+      return;
     notices.push({
       phone: other.phone,
       text: draftCounterpartyVerification({
@@ -374,12 +391,26 @@ export class Commands {
       });
       const parties = [party("donor", phone, true)];
       if (pending.counterparty_phone) {
-        const receiverPhone = suppliedPhone(ctx, pending.counterparty_phone);
-        const receiver = party("receiver", receiverPhone, receiverPhone === phone);
-        if (isSpeakerPhone(phone, receiverPhone))
-          receiver.name = parties[0]!.name;
-        else if (pending.counterparty_name) receiver.name = pending.counterparty_name;
-        parties.push(receiver);
+        const receiverPhone = contactableCounterpartyPhone(
+          this.s,
+          pending.counterparty_phone,
+        );
+        if (receiverPhone) {
+          const receiver = party(
+            "receiver",
+            receiverPhone,
+            receiverPhone === phone,
+          );
+          if (isSpeakerPhone(phone, receiverPhone))
+            receiver.name = parties[0]!.name;
+          else if (pending.counterparty_name)
+            receiver.name = pending.counterparty_name;
+          parties.push(receiver);
+        } else if (pending.counterparty_name) {
+          const receiver = party("receiver", null, false);
+          receiver.name = pending.counterparty_name;
+          parties.push(receiver);
+        }
       } else if (pending.counterparty_name) {
         const receiver = party("receiver", null, false);
         receiver.name = pending.counterparty_name;
@@ -498,18 +529,30 @@ export class Commands {
         if (selfName) parties[0]!.name = selfName;
       }
       if (other) {
-        const p = suppliedPhone(ctx, other);
-        const counterparty = party(
-          isDonor ? "receiver" : "donor",
-          p,
-          p === phone && isDonor,
-        );
-        if (isDonor && cmd.counterparty_name && !isSpeakerPhone(phone, p))
-          counterparty.name = cmd.counterparty_name;
-        else if (isDonor && isSpeakerPhone(phone, p))
-          // Mirror the speaker's own name onto the self-as-both receiver side.
-          counterparty.name = parties[0]!.name;
-        parties.push(counterparty);
+        const p = contactableCounterpartyPhone(this.s, other);
+        if (p) {
+          const counterparty = party(
+            isDonor ? "receiver" : "donor",
+            p,
+            p === phone && isDonor,
+          );
+          if (isDonor && cmd.counterparty_name && !isSpeakerPhone(phone, p))
+            counterparty.name = cmd.counterparty_name;
+          else if (isDonor && isSpeakerPhone(phone, p))
+            // Mirror the speaker's own name onto the self-as-both receiver side.
+            counterparty.name = parties[0]!.name;
+          parties.push(counterparty);
+        } else if (
+          isDonor &&
+          cmd.type === "donate" &&
+          (cmd.counterparty_name || other)
+        ) {
+          // Outside LIVE_ALLOWLIST (e.g. made-up QA number): name only — never
+          // persist a phone we cannot message.
+          const receiver = party("receiver", null, false);
+          receiver.name = cmd.counterparty_name ?? null;
+          if (receiver.name) parties.push(receiver);
+        }
       } else if (
         isDonor &&
         cmd.type === "donate" &&
@@ -698,35 +741,52 @@ export class Commands {
           for (const item of existing.items)
             if (item.working === null) item.working = true;
           if (other) {
-            const receiverPhone = suppliedPhone(ctx, other);
+            const receiverPhone = contactableCounterpartyPhone(this.s, other);
             const linked = existing.parties.find((entry) => entry.role === "receiver");
             const donorParty = existing.parties.find((entry) => entry.role === "donor");
-            const selfBoth = isSpeakerPhone(phone, receiverPhone);
-            const nextName = selfBoth
-              ? (donorParty?.name ?? null)
-              : cmd.type === "donate" && cmd.counterparty_name
-                ? cmd.counterparty_name
-                : undefined;
-            if (!linked) {
-              const receiver = party("receiver", receiverPhone, receiverPhone === phone);
-              if (nextName !== undefined) receiver.name = nextName;
-              existing.parties.push(receiver);
-            } else if (linked.phone === null || linked.phone === receiverPhone) {
-              linked.phone = receiverPhone;
-              if (nextName !== undefined) linked.name = nextName;
-              else if (selfBoth) linked.name = donorParty?.name ?? null;
-            } else {
-              // Prompt owns conflicts — overwrite linked phone/name on write.
-              linked.phone = receiverPhone;
-              if (nextName !== undefined) linked.name = nextName;
-              else if (selfBoth) linked.name = donorParty?.name ?? null;
+            if (receiverPhone) {
+              const selfBoth = isSpeakerPhone(phone, receiverPhone);
+              const nextName = selfBoth
+                ? (donorParty?.name ?? null)
+                : cmd.type === "donate" && cmd.counterparty_name
+                  ? cmd.counterparty_name
+                  : undefined;
+              if (!linked) {
+                const receiver = party(
+                  "receiver",
+                  receiverPhone,
+                  receiverPhone === phone,
+                );
+                if (nextName !== undefined) receiver.name = nextName;
+                existing.parties.push(receiver);
+              } else if (linked.phone === null || linked.phone === receiverPhone) {
+                linked.phone = receiverPhone;
+                if (nextName !== undefined) linked.name = nextName;
+                else if (selfBoth) linked.name = donorParty?.name ?? null;
+              } else {
+                // Prompt owns conflicts — overwrite linked phone/name on write.
+                linked.phone = receiverPhone;
+                if (nextName !== undefined) linked.name = nextName;
+                else if (selfBoth) linked.name = donorParty?.name ?? null;
+              }
+              if (
+                existing.parties.length === 2 &&
+                existing.parties[0]!.phone &&
+                existing.parties[0]!.phone === existing.parties[1]!.phone
+              )
+                existing.represents_both_parties = true;
+            } else if (
+              cmd.type === "donate" &&
+              cmd.counterparty_name
+            ) {
+              if (!linked) {
+                const receiver = party("receiver", null, false);
+                receiver.name = cmd.counterparty_name;
+                existing.parties.push(receiver);
+              } else if (!linked.phone) {
+                linked.name = cmd.counterparty_name;
+              }
             }
-            if (
-              existing.parties.length === 2 &&
-              existing.parties[0]!.phone &&
-              existing.parties[0]!.phone === existing.parties[1]!.phone
-            )
-              existing.represents_both_parties = true;
           } else if (
             cmd.type === "donate" &&
             cmd.counterparty_name &&
@@ -1036,7 +1096,7 @@ export class Commands {
       return output(null);
     }
     if (cmd.type === "counterparty_candidate") {
-      const candidatePhone = suppliedPhone(ctx, cmd.phone);
+      const candidatePhone = contactableCounterpartyPhone(this.s, cmd.phone);
       await c.query(
         `UPDATE conversations
             SET pending_counterparty_name=$2,pending_counterparty_phone=$3,version=version+1
@@ -1418,7 +1478,35 @@ export class Commands {
         ctx.conversation.pending_counterparty_phone = null;
         // Fall through to nextQuestion — prompts may ask for phone naturally.
       } else {
-        const targetPhone = suppliedPhone(ctx, cmd.phone);
+        const targetPhone = contactableCounterpartyPhone(this.s, cmd.phone);
+        if (!targetPhone) {
+          // Outside allowlist — keep name only; never attach the unusable phone.
+          const nameOnly =
+            cmd.name ??
+            ctx.conversation.pending_counterparty_name ??
+            other?.name ??
+            null;
+          if (nameOnly) {
+            if (other) other.name = nameOnly;
+            else {
+              const receiver = party(role, null, false);
+              receiver.name = nameOnly;
+              r.parties.push(receiver);
+            }
+            r.origin = "direct";
+            for (const item of r.items)
+              if (item.working === null) item.working = true;
+            invalidateProposal(r);
+          }
+          await c.query(
+            "UPDATE conversations SET pending_counterparty_name=NULL,pending_counterparty_phone=NULL,version=version+1 WHERE id=$1",
+            [ctx.conversation.id],
+          );
+          ctx.conversation.pending_counterparty_name = null;
+          ctx.conversation.pending_counterparty_phone = null;
+          await this.s.save(c, r);
+          return output(null, r);
+        }
         const speakerParty = r.parties.find(
           (entry) => entry.phone === phone && entry.role !== role,
         );

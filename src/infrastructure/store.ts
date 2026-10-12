@@ -19,6 +19,7 @@ import {
 import {
   ACTIVE,
   canonicalPhone,
+  isLiveOutboundAllowed,
   isOperationsAlert,
   DEFAULT_TRANSPORT_CAPACITY,
   MAX_TRANSPORT_CAPACITY,
@@ -820,6 +821,13 @@ export class Store {
   ): Promise<string | null> {
     const phone = canonicalPhone(notice.phone);
     if (isOperationsAlert(notice.text) && phone !== this.config.ADMIN_PHONE)
+      return null;
+    // Canary/live QA: never create outbox rows for phones outside LIVE_ALLOWLIST.
+    // Admin ops alerts to ADMIN_PHONE are still allowed when listed (or open).
+    if (
+      ctx.mode === "live" &&
+      !isLiveOutboundAllowed(phone, this.config.LIVE_ALLOWLIST)
+    )
       return null;
     const chat = isOperationsAlert(notice.text)
       ? `972${phone}@c.us`

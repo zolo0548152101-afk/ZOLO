@@ -2563,8 +2563,17 @@ export class Engine {
       const allow = this.s.config.LIVE_ALLOWLIST.split(",")
         .map((s) => s.trim())
         .filter(Boolean);
-      if (allow.length && !allow.includes(out.phone))
-        throw new RetryableError("recipient_not_in_live_allowlist");
+      if (allow.length && !allow.includes(out.phone)) {
+        // Cancel — do not retry forever on made-up / non-test numbers.
+        await c.query(
+          `UPDATE outbox
+              SET state='cancelled', format_state='ready',
+                  error_code='recipient_not_in_live_allowlist'
+            WHERE id=$1`,
+          [id],
+        );
+        return null;
+      }
       await c.query(
         "UPDATE outbox SET state='sending',error_code=NULL WHERE id=$1",
         [id],

@@ -115,6 +115,39 @@ export function canonicalPhone(value: string): string {
   if (!/^[2-9]\d{7,8}$/.test(s)) throw new AppError("invalid_phone");
   return s;
 }
+
+/** Parse LIVE_ALLOWLIST (comma/whitespace). Empty → open (all phones allowed). */
+export function parseLiveAllowlist(raw: string | null | undefined): string[] {
+  return (raw ?? "")
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      try {
+        return canonicalPhone(s);
+      } catch {
+        return s.replace(/\D/g, "").replace(/^0/, "");
+      }
+    })
+    .filter(Boolean);
+}
+
+/**
+ * When LIVE_ALLOWLIST is non-empty (canary/live QA), only listed phones may
+ * receive WhatsApp traffic. Open mode (empty allowlist) allows every phone.
+ */
+export function isLiveOutboundAllowed(
+  phone: string,
+  allowlistRaw: string | null | undefined,
+): boolean {
+  const allow = parseLiveAllowlist(allowlistRaw);
+  if (!allow.length) return true;
+  try {
+    return allow.includes(canonicalPhone(phone));
+  } catch {
+    return false;
+  }
+}
 export function norm(s: string): string {
   return s
     .normalize("NFKC")
