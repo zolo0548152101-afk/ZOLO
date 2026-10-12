@@ -723,10 +723,10 @@ export class Engine {
       throw e;
     }
 
-    // One claim-guard retry inside the agent when the first reply over-claims.
-    const changedPaths = (agent.changedFields.length
-      ? agent.changedFields
-      : changedFromTools
+    // Prefer committed tool diffs over the model-side accumulator.
+    const changedPaths = (changedFromTools.length
+      ? changedFromTools
+      : agent.changedFields
     ).map((field) =>
       field.role
         ? `${field.table}.${field.column}:${field.role}`
