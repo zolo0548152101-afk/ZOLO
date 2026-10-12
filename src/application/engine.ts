@@ -48,6 +48,7 @@ import {
   GUARD_FALLBACK_REPLY,
   FAULT_REPLY,
   isSelfIntroText,
+  replyClaimsSaveWithoutWrites,
   stripRepeatedSelfIntro,
   verifyClaims,
   emptyClaims,
@@ -564,7 +565,10 @@ export class Engine {
     let humanReason: string | undefined;
 
     const executeTool = async (command: Command): Promise<AgentToolResult> => {
-      return this.s.transaction(async (c) => {
+      // Push onto toolResults only AFTER COMMIT so a rolled-back write cannot
+      // leave a phantom ok:true result (seen when item_facts "succeeded" in
+      // metadata but request_items stayed on the prior kind).
+      const snap = await this.s.transaction(async (c) => {
         const ctx = await this.s.context(id, c, true);
         if (ctx.message.processed_at) {
           return {
@@ -636,7 +640,7 @@ export class Engine {
           });
           executedCommands.push(command);
           changedFromTools.push(...changed);
-          const snap = snapshotToolResult({
+          return snapshotToolResult({
             command,
             before,
             after,
@@ -645,16 +649,18 @@ export class Engine {
             humanReason: result.humanReason,
             phone: ctx.conversation.phone,
           });
-          toolResults.push(snap);
-          return snap;
         } catch (e) {
-          await c.query("ROLLBACK TO SAVEPOINT agent_tool");
+          try {
+            await c.query("ROLLBACK TO SAVEPOINT agent_tool");
+          } catch {
+            // Savepoint may already be released; full tx rollback handles it.
+          }
           if (!(e instanceof AppError)) throw e;
           await this.s.event(c, ctx.message, ctx.conversation.phone, "tool_rejected", {
             code: e.code,
             via: "agent_tool",
           });
-          const snap = snapshotToolResult({
+          return snapshotToolResult({
             command,
             before,
             after: before,
@@ -663,10 +669,10 @@ export class Engine {
             phone: ctx.conversation.phone,
             error: e.code,
           });
-          toolResults.push(snap);
-          return snap;
         }
       });
+      toolResults.push(snap);
+      return snap;
     };
 
     let agent;
@@ -761,6 +767,12 @@ export class Engine {
     }
 
     let check = verifyClaims(claims, claimFacts);
+    if (
+      check.ok &&
+      replyClaimsSaveWithoutWrites(replyText, claimFacts.changedPaths)
+    ) {
+      check = { ok: false, rejected: ["saved:unproven_save_verb"] };
+    }
     if (!check.ok) {
       rejected = true;
       rejectedClaims = check.rejected;
@@ -778,6 +790,12 @@ export class Engine {
           metadata: { ...agent.metadata, guard_retry: retry.metadata },
         };
         check = verifyClaims(claims, claimFacts);
+        if (
+          check.ok &&
+          replyClaimsSaveWithoutWrites(replyText, claimFacts.changedPaths)
+        ) {
+          check = { ok: false, rejected: ["saved:unproven_save_verb"] };
+        }
         if (!check.ok) {
           rejected = true;
           rejectedClaims = check.rejected;
@@ -1776,6 +1794,9 @@ export class Engine {
               if (!declinedPhoto && !photoAsked) {
                 // Photo nudge is owned by the reply manager.
               } else if (declinedPhoto) {
+                // Reload so a prior tool write (item replace) is not overwritten
+                // by a stale in-memory request snapshot from plan start.
+                request = await this.s.request(request.id, c, true);
                 request.photo_status = PHOTO_STATUS.NO_PHOTO;
                 await this.s.save(c, request);
                 intent = "ask_details";

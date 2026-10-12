@@ -139,6 +139,22 @@ export function verifyClaims(
   return { ok: rejected.length === 0, rejected };
 }
 
+/** True when the reply uses a save verb but no claimable path was written. */
+export function replyClaimsSaveWithoutWrites(
+  reply: string,
+  changedPaths: string[],
+): boolean {
+  if (!/(?:נשמר|רשמתי|שמרתי|עדכנתי|רשמנו|עדכנו)/u.test(reply)) return false;
+  return !changedPaths.some(
+    (path) =>
+      path.startsWith("request_items.") ||
+      path.startsWith("request_parties.") ||
+      path.startsWith("requests.") ||
+      path.startsWith("searches.") ||
+      path.startsWith("conversations."),
+  );
+}
+
 /**
  * Legacy marker-based guard kept only as a last-resort when the model returns
  * no claims object. Prefer verifyClaims. Never invents wording — on reject the
