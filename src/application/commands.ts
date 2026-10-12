@@ -1295,11 +1295,8 @@ export class Commands {
       invalidateProposal(r);
       ownParty(r, phone, "donor");
       // Apply AI items directly — replace-vs-add / furniture-count are prompt-only.
-      if (cmd.items)
-        // Action manager owns the replacement item list. New kind/description
-        // overwrite the previous row; keep prior free/working only when the
-        // command leaves those fields unset on the item object.
-        r.items = cmd.items.map((i, index) => {
+      if (cmd.items) {
+        const incoming = cmd.items.map((i, index) => {
           const previous = r.items[index];
           const next = { ...asItem(i), ...i };
           if (previous) {
@@ -1309,6 +1306,29 @@ export class Commands {
           }
           return next;
         });
+        // Partial fact update (e.g. only wardrobe + needs_disassembly) must not
+        // wipe a sibling table_set that donate just saved in this/open request.
+        const existingKinds = new Set(r.items.map((item) => item.kind));
+        const shrinking =
+          r.items.length > 0 && incoming.length < r.items.length;
+        const allIncomingKnown = incoming.every((item) =>
+          existingKinds.has(item.kind),
+        );
+        if (shrinking && allIncomingKnown) {
+          for (const next of incoming) {
+            const idx = r.items.findIndex((item) => item.kind === next.kind);
+            if (idx < 0) continue;
+            const previous = r.items[idx]!;
+            const merged = { ...previous, ...next };
+            if (next.free === null && previous.free !== null) merged.free = previous.free;
+            if (next.working === null && previous.working !== null)
+              merged.working = previous.working;
+            r.items[idx] = merged;
+          }
+        } else {
+          r.items = incoming;
+        }
+      }
       for (const i of r.items) {
         // Trust action-manager field values; do not re-litigate free/working
         // from raw customer wording.
