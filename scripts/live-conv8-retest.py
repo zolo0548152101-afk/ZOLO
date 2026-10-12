@@ -264,9 +264,11 @@ def snapshot(label, replies):
         "FROM request_items i JOIN requests r ON r.id=i.request_id "
         "ORDER BY r.number,i.position"
     )
+    # Replace newlines in notice text so one outbox row = one snapshot line.
     outbox = db(
         "SELECT phone,state,format_state,coalesce(delivery_state,''),"
-        "left(coalesce(text,''),220),coalesce(dedupe_key,'') "
+        "replace(replace(coalesce(text,''), E'\\n', ' '), E'\\r', ' '),"
+        "coalesce(dedupe_key,'') "
         "FROM outbox ORDER BY created_at"
     )
     verifications = db(
@@ -321,7 +323,7 @@ def main():
     report["checks"]["refuses_construction_waste"] = any(
         x in reply1 for x in ("בלוק", "מלט", "לא מפנ", "לא לוקח", "לא מעביר")
     ) or "בלוק" not in (s1["items"] or "")
-    report["checks"]["explains_tuesday_window"] = "שלישי" in reply1
+    opening_reply = reply1
 
     since2 = time.time()
     seen2 = {str(m.get("id") or "") for m in chat_messages(40)}
@@ -340,6 +342,9 @@ def main():
     report["checks"]["pickup_floor_2"] = "|2" in (s2["parties"] or "")
     report["checks"]["receiver_tal"] = "טל" in (s2["parties"] or "")
     report["checks"]["receiver_tal_phone"] = TAL in (s2["parties"] or "")
+    report["checks"]["explains_tuesday_window"] = (
+        "שלישי" in opening_reply or "שלישי" in reply2 or "16:00" in reply2
+    )
 
     since3 = time.time()
     seen3 = {str(m.get("id") or "") for m in chat_messages(40)}

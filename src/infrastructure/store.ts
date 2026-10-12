@@ -876,6 +876,7 @@ export class Store {
     phone: string,
     outboxId: string,
   ): Promise<void> {
+    const canonical = canonicalPhone(phone);
     await c.query(
       `UPDATE request_verifications rv
           SET state='queued',
@@ -890,7 +891,7 @@ export class Store {
           AND p.role=rv.role
           AND co.phone=$2
           AND rv.state IN ('consented','offered','queued')`,
-      [requestId, phone, outboxId],
+      [requestId, canonical, outboxId],
     );
   }
 

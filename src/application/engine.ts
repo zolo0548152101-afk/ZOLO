@@ -625,12 +625,21 @@ export class Engine {
                 result.request?.id ?? null,
                 "pending",
               );
-              if (outboxId)
+              if (outboxId) {
                 deferredToolNotices.push({
                   outboxId,
                   notice,
                   requestId: result.request?.id ?? null,
                 });
+                if (result.request?.id)
+                  await this.s.markVerificationQueued(
+                    c,
+                    result.request.id,
+                    // outbound() canonicalizes; parties store canonical phones.
+                    notice.phone,
+                    outboxId,
+                  );
+              }
             }
             await c.query("RELEASE SAVEPOINT agent_tool");
             const afterCtx = await this.s.context(id, c);
