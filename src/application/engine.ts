@@ -2251,6 +2251,12 @@ export class Engine {
               typeof (row as { request_number?: number }).request_number === "number",
           ) as { request_number: number } | undefined;
           if (donate) claimFacts.openedRequestNumber = donate.request_number;
+          const noticesFromTools = toolRows.some(
+            (row) =>
+              row &&
+              typeof row === "object" &&
+              ((row as { notices_queued?: number }).notices_queued ?? 0) > 0,
+          );
           const primaryContactQueued = toolRows.some(
             (row) =>
               row &&
@@ -2259,19 +2265,17 @@ export class Engine {
                 .command?.type === "contact_counterparty" &&
               ((row as { notices_queued?: number }).notices_queued ?? 0) > 0,
           );
+          // item_facts correction notices also queue outbound — count them so
+          // contacted_counterparty=true is not treated as overclaim in finish().
           claimFacts.contactedCounterparty =
-            claimFacts.contactedCounterparty || primaryContactQueued;
-          // Correction notices from item_facts must not underclaim-nuke the reply.
+            claimFacts.contactedCounterparty ||
+            noticesFromTools ||
+            primaryContactQueued;
           claimFacts.requireContactClaim = primaryContactQueued;
-          if (!rejected) {
-            const check = verifyClaims(claims, claimFacts);
-            if (!check.ok) {
-              rejected = true;
-              rejectedClaims = check.rejected;
-              text = GUARD_FALLBACK_REPLY;
-              claims = emptyClaims();
-            }
-          } else {
+          // Phrase already claim-checked in finishWithAgentTools. Re-verify only
+          // when that stage already rejected — incomplete finish() facts used to
+          // false-overclaim and replace a good reply with GUARD_FALLBACK (conv#10).
+          if (rejected) {
             text = GUARD_FALLBACK_REPLY;
             claims = emptyClaims();
           }
