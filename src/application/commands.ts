@@ -28,6 +28,8 @@ import {
   appendTeamNote,
   stripDistanceCheckNotes,
   customerInsistsAfterDenial,
+  usablePersonName,
+  preferredDeliveryDate,
 } from "../domain/policies.js";
 import { draftCounterpartyVerification } from "../domain/notices.js";
 export interface Outcome {
@@ -300,6 +302,25 @@ export class Commands {
     return Boolean(row.rowCount);
   }
 
+  /** Persist a customer-requested calendar day as earliest_run_date (admin: requested_date). */
+  private capturePreferredDate(r: Request, text: string): void {
+    const date = preferredDeliveryDate(text, this.now());
+    if (!date) return;
+    if (!r.earliest_run_date || date > r.earliest_run_date)
+      r.earliest_run_date = date;
+  }
+
+  private assignPersonName(party: Party, raw: string | null | undefined): boolean {
+    const name = usablePersonName(raw ?? null);
+    if (!name) {
+      // Drop kinship/role labels that were wrongly stored («אמא»).
+      if (raw && party.name && !usablePersonName(party.name)) party.name = null;
+      return false;
+    }
+    party.name = name;
+    return true;
+  }
+
   private async persistContactConsent(
     c: pg.PoolClient,
     r: Request,
@@ -344,6 +365,8 @@ export class Commands {
     if (!other.phone) return;
     if (!isLiveOutboundAllowed(other.phone, this.s.config.LIVE_ALLOWLIST))
       return;
+    const speaker = r.parties.find((p) => p.role !== other.role);
+    if (!usablePersonName(speaker?.name)) return;
     notices.push({
       phone: other.phone,
       text: draftCounterpartyVerification({
@@ -607,7 +630,7 @@ export class Commands {
       void itemError(items, false);
       const parties = [party(isDonor ? "donor" : "receiver", phone, isDonor)];
       if (isDonor) {
-        const selfName = recentSelfName(ctx, text);
+        const selfName = usablePersonName(recentSelfName(ctx, text));
         if (selfName) parties[0]!.name = selfName;
       }
       if (other) {
@@ -619,7 +642,7 @@ export class Commands {
             p === phone && isDonor,
           );
           if (isDonor && cmd.counterparty_name && !isSpeakerPhone(phone, p))
-            counterparty.name = cmd.counterparty_name;
+            counterparty.name = usablePersonName(cmd.counterparty_name);
           else if (isDonor && isSpeakerPhone(phone, p))
             // Mirror the speaker's own name onto the self-as-both receiver side.
             counterparty.name = parties[0]!.name;
@@ -632,7 +655,7 @@ export class Commands {
           // Outside LIVE_ALLOWLIST (e.g. made-up QA number): name only — never
           // persist a phone we cannot message.
           const receiver = party("receiver", null, false);
-          receiver.name = cmd.counterparty_name ?? null;
+          receiver.name = usablePersonName(cmd.counterparty_name ?? null);
           if (receiver.name) parties.push(receiver);
         }
       } else if (
@@ -643,8 +666,8 @@ export class Commands {
         // Name-only receiver: persist on the party (phone null). Do not use
         // pending_counterparty_name for this case — prompts ask for phone.
         const receiver = party("receiver", null, false);
-        receiver.name = cmd.counterparty_name;
-        parties.push(receiver);
+        receiver.name = usablePersonName(cmd.counterparty_name);
+        if (receiver.name) parties.push(receiver);
       }
       // Soft photo ask is prompt/reply-manager owned.
       // Hard boundary #4 — duplicate request (donor+item):
@@ -1164,6 +1187,10 @@ export class Commands {
     const initial = target(ctx, n),
       r = await this.s.request(initial.id, c, true);
     ownParty(r, phone);
+    this.capturePreferredDate(r, text);
+    // Scrub kinship labels already stored so missing_required becomes name again.
+    for (const partyRow of r.parties)
+      if (partyRow.name && !usablePersonName(partyRow.name)) partyRow.name = null;
     if (cmd.type === "select") {
       await c.query(
         "UPDATE conversations SET selected_request_id=$2 WHERE id=$1",
@@ -1217,6 +1244,12 @@ export class Commands {
         r.verification_contacted = false;
         await this.persistContactConsent(c, r, other, false);
         invalidateProposal(r);
+        return output(null, r);
+      }
+      // Need a real person name on the speaker side before messaging the other
+      // party (conv#9 noticed Tal as «אמא רוצה למסור לך»).
+      if (!usablePersonName(speaker.name)) {
+        await this.persistContactConsent(c, r, other, true);
         return output(null, r);
       }
       // Record consent even when the phone is still missing. Do not mark
@@ -1450,10 +1483,9 @@ export class Commands {
         }
       }
       if (cmd.name) {
-        p.name = cmd.name;
-        if (r.represents_both_parties)
+        if (this.assignPersonName(p, cmd.name) && r.represents_both_parties)
           for (const samePerson of r.parties.filter((entry) => entry.phone === phone))
-            samePerson.name = cmd.name;
+            samePerson.name = p.name;
       }
       if (cmd.address) p.address = cmd.address.trim();
       // Never invent floor=0 — only store a floor the customer actually gave.
@@ -1533,13 +1565,14 @@ export class Commands {
       const other = r.parties.find((p) => p.role === role);
       if (!cmd.phone) {
         // Missing phone is incompleteness for Reply to ask — not a 403 human escalate.
-        if (role !== "receiver" || !cmd.name)
+        const named = usablePersonName(cmd.name);
+        if (role !== "receiver" || !named)
           return output(null, r);
         if (other) {
-          other.name = cmd.name;
+          other.name = named;
         } else {
           const receiver = party("receiver", null, false);
-          receiver.name = cmd.name;
+          receiver.name = named;
           r.parties.push(receiver);
         }
         r.origin = "direct";

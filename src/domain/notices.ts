@@ -1,4 +1,5 @@
 import type { Party, Request } from "./types.js";
+import { usablePersonName } from "./policies.js";
 
 export function formatHebrewDate(iso: string): string {
   const [year, month, day] = iso.slice(0, 10).split("-");
@@ -40,12 +41,11 @@ export function draftCounterpartyVerification(input: {
     request.parties.find((party) => party.role !== recipient.role) ?? null;
   const items = itemLine(request);
   const scheduled = scheduledDeliveryDate(request);
-  const greeting = recipient.name ? `שלום ${recipient.name}` : "שלום";
-  const other = initiator?.name
-    ? initiator.name
-    : recipient.role === "receiver"
-      ? "המוסר"
-      : "המקבל";
+  const recipientLabel = usablePersonName(recipient.name);
+  const greeting = recipientLabel ? `שלום ${recipientLabel}` : "שלום";
+  const other =
+    usablePersonName(initiator?.name) ??
+    (recipient.role === "receiver" ? "המוסר" : "המקבל");
   const action =
     recipient.role === "receiver"
       ? `${other} רוצה למסור לך ${items}.`

@@ -155,6 +155,79 @@ export function norm(s: string): string {
     .replace(/\s+/g, " ")
     .trim();
 }
+
+/**
+ * Kinship / role labels are not usable party names (conv#9 saved «אמא» and
+ * messaged Tal «אמא רוצה למסור לך»). Returns a trimmed name or null.
+ */
+export function usablePersonName(name: string | null | undefined): string | null {
+  if (!name) return null;
+  const trimmed = name.trim().replace(/\s+/g, " ");
+  if (trimmed.length < 2) return null;
+  const base =
+    /^(?:ה)?(?:אמ+א|אימ+א|אבא|סבתא|סבא|אח(?:ות)?|דוד(?:ה)?|חבר(?:ה)?|שכן(?:ה)?|בעל|אישה|אשת(?:ו)?|בעלה|המוסר|המקבל|אני|עצמי|מישהו|מישהי)(?:\s+(?:שלי|שלה|שלו|שלנו|שלכם|שלך))?$/iu;
+  if (base.test(trimmed)) return null;
+  // «אמא שלי», «האמא שלי בת 84» — still not a given name.
+  if (
+    /^(?:ה)?(?:אמ+א|אימ+א|אבא|סבתא|סבא)\b/iu.test(trimmed) &&
+    !/[א-ת]{2,}\s+[א-ת]{2,}/u.test(
+      trimmed.replace(/^(?:ה)?(?:אמ+א|אימ+א|אבא|סבתא|סבא)\s+/iu, ""),
+    )
+  )
+    return null;
+  return trimmed;
+}
+
+const HEBREW_MONTHS: Record<string, number> = {
+  ינואר: 1,
+  פברואר: 2,
+  מרץ: 3,
+  מרס: 3,
+  אפריל: 4,
+  מאי: 5,
+  יוני: 6,
+  יולי: 7,
+  אוגוסט: 8,
+  ספטמבר: 9,
+  אוקטובר: 10,
+  נובמבר: 11,
+  דצמבר: 12,
+};
+
+/** Parse a customer-requested calendar day (ISO / dd.mm / «27 באוקטובר»). */
+export function preferredDeliveryDate(
+  text: string,
+  now: Date = new Date(),
+): string | null {
+  const t = norm(text);
+  const iso = t.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const numbered = t.match(/\b(\d{1,2})[./](\d{1,2})(?:[./](20\d{2}))?\b/);
+  if (numbered) {
+    const day = Number(numbered[1]);
+    const month = Number(numbered[2]);
+    const year = numbered[3] ? Number(numbered[3]) : now.getUTCFullYear();
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12)
+      return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+  const hebrew = t.match(
+    /(\d{1,2})\s*(?:ב|ל)?\s*(ינואר|פברואר|מרץ|מרס|אפריל|מאי|יוני|יולי|אוגוסט|ספטמבר|אוקטובר|נובמבר|דצמבר)(?:\s*(20\d{2}))?/u,
+  );
+  if (!hebrew) return null;
+  const day = Number(hebrew[1]);
+  const month = HEBREW_MONTHS[hebrew[2]!]!;
+  let year = hebrew[3] ? Number(hebrew[3]) : now.getUTCFullYear();
+  // If the month already passed this year and no year was given, assume next year.
+  if (!hebrew[3]) {
+    const probe = new Date(Date.UTC(year, month - 1, day));
+    const today = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+    );
+    if (probe < today) year += 1;
+  }
+  if (day < 1 || day > 31) return null;
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
 export function isStatus(s: string): boolean {
   return /^(?:מה\s+(?:מצב\s+(?:הפנייה|הפניה|התיאום|ההובלה)|(?:ה)?סטטוס)|מה קורה עם (?:הפנייה|הפניה|ההובלה)|זה כבר מתואם|מה מצב הפנייה|מתי (?:ההובלה|מגיעים))(?:\s+\d+)?[?？!\s]*$/.test(
     norm(s),
@@ -647,7 +720,7 @@ export function ownPartyDetailsComplete(r: Request, phone: string): boolean {
     return Boolean(
       p.approved_at &&
         p.approved_by === p.phone &&
-        p.name &&
+        usablePersonName(p.name) &&
         p.settlement &&
         p.address &&
         p.floor !== null,
@@ -722,11 +795,11 @@ export function nextQuestion(
       floorNote: false,
       missing: missingOf(r, "settlement", p.role),
     };
-  if (!p.name || !p.address)
+  if (!usablePersonName(p.name) || !p.address)
     return {
       text: "",
       floorNote: false,
-      missing: missingOf(r, !p.name ? "name" : "address", p.role),
+      missing: missingOf(r, !usablePersonName(p.name) ? "name" : "address", p.role),
     };
   // Always ask floor — never invent קומה 0.
   if (p.floor === null)
