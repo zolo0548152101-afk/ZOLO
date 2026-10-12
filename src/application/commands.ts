@@ -25,6 +25,7 @@ import {
   norm,
   mentionedAllowedSettlement,
   appendTeamNote,
+  stripDistanceCheckNotes,
   customerInsistsAfterDenial,
 } from "../domain/policies.js";
 import { draftCounterpartyVerification } from "../domain/notices.js";
@@ -1227,6 +1228,8 @@ export class Commands {
         Boolean(cmd.address) &&
         /^(?:רחוב|שיכון|שכונה|שכונת|שדרות|שד)/.test(cmd.address ?? "") &&
         (cmd.address ?? "").includes(cmd.settlement ?? "");
+      const prevSettlement = p.settlement;
+      const prevAddress = p.address;
       if (cmd.settlement && !settlementIsTheStreet) {
         // Always persist what Action wrote. Outside/review messaging is prompt-owned.
         const reg = await this.s.region(c, cmd.settlement);
@@ -1242,8 +1245,16 @@ export class Commands {
             r.status = "collecting";
             r.human_reason = null;
           }
+        } else if (reg.decision === "outside") {
+          // Far city (חולון/ת״א/…) — keep the fact for history, never as distance-review.
+          p.settlement = await this.s.ensureLocation(c, reg.name, "outside");
+          r.needs_distance_check = false;
+          r.team_notes = stripDistanceCheckNotes(r.team_notes);
         } else {
           p.settlement = reg.name || cmd.settlement;
+          // Correcting to an allowed town clears a prior Holon-style review flag.
+          r.needs_distance_check = false;
+          r.team_notes = stripDistanceCheckNotes(r.team_notes);
         }
       }
       if (cmd.name) {
@@ -1254,7 +1265,14 @@ export class Commands {
       }
       if (cmd.address) p.address = cmd.address.trim();
       // Never invent floor=0 — only store a floor the customer actually gave.
+      // When settlement/address moves and floor is omitted, drop the stale floor
+      // (e.g. Holon Sokolov floor 3 → Beit Shean Herzl 5 with no floor said).
       if (cmd.floor !== null) p.floor = cmd.floor;
+      else if (
+        (cmd.settlement && cmd.settlement !== prevSettlement) ||
+        (cmd.address && cmd.address.trim() !== (prevAddress ?? "").trim())
+      )
+        p.floor = null;
       if (cmd.preferred_time && validTransportPreference(cmd.preferred_time))
         r.preferred_time = cmd.preferred_time;
     } else if (cmd.type === "item_facts") {

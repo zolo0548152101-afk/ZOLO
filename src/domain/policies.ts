@@ -222,6 +222,21 @@ const OUTSIDE_PLACES: { name: string; pattern: RegExp }[] = [
   { name: "אשדוד", pattern: /אשדוד/u },
   { name: "אשקלון", pattern: /אשקלון/u },
   { name: "נתניה", pattern: /נתניה/u },
+  { name: "חולון", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?חולון(?=$|[^א-ת])/u },
+  { name: "חולון", pattern: /\bholon\b/i },
+  { name: "בת ים", pattern: /בת\s+ים/u },
+  { name: "רמת גן", pattern: /רמת\s+גן/u },
+  { name: "פתח תקווה", pattern: /פתח\s+תקוו[הא]/u },
+  { name: "רחובות", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?רחובות(?=$|[^א-ת])/u },
+  { name: "כפר סבא", pattern: /כפר\s+סבא/u },
+  { name: "הרצליה", pattern: /הרצליה/u },
+  { name: "רעננה", pattern: /רעננה/u },
+  { name: "הוד השרון", pattern: /הוד\s+השרון/u },
+  { name: "גבעתיים", pattern: /גבעתיים/u },
+  { name: "בני ברק", pattern: /בני\s+ברק/u },
+  { name: "לוד", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?לוד(?=$|[^א-ת])/u },
+  { name: "רמלה", pattern: /רמלה/u },
+  { name: "מודיעין", pattern: /מודיעין/u },
   { name: "ניר דוד", pattern: /ניר\s+דוד/u },
   { name: "בית השיטה", pattern: /בית\s+השיטה/u },
   { name: "חמדיה", pattern: /חמדיה/u },
@@ -292,6 +307,18 @@ export function appendTeamNote(
   if (!existing?.trim()) return clean;
   if (existing.includes(clean)) return existing.trim();
   return `${existing.trim()}\n${clean}`;
+}
+
+/** Drop stale distance-check notes after a settlement is corrected to allowed. */
+export function stripDistanceCheckNotes(
+  existing: string | null | undefined,
+): string | null {
+  if (!existing?.trim()) return null;
+  const kept = existing
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !/בדיקת\s*מרחק/u.test(line));
+  return kept.length ? kept.join("\n") : null;
 }
 
 /** An allowed town named as the place itself, not merely "near Beit She'an". */
