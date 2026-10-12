@@ -1,21 +1,26 @@
-// Static proof that Action + Reply stay hosted-only (no git prompt mode),
-// and that the field map covers every customer-facing column in scope.
-import { readFile, readdir } from "node:fs/promises";
+// Static proof that write + phrase use repo prompts (hebrew-chatbot-builder
+// two-call flow), and that the field map covers every customer-facing column.
+import { readFile, readdir, access } from "node:fs/promises";
 import { join } from "node:path";
 
 const source = await readFile("src/infrastructure/ai.ts", "utf8");
 
 const required = [
   "this.client.responses.create",
-  "requireHosted",
-  "OPENAI_AGENT_PROMPT_ID",
-  "OPENAI_ACTION_PROMPT_ID",
+  "WRITE_INSTRUCTIONS",
+  "PHRASE_INSTRUCTIONS",
+  'loadPromptFile("haim-write.he.md")',
+  'loadPromptFile("haim-phrase.he.md")',
   "AGENT_WRITE_TOOLS",
   'provider: "openai_responses_agent"',
   'provider: "openai_responses_agent_reply"',
   "async agentTurn(",
+  "async reply(",
   "async phraseNotice(",
   "allowed_saved",
+  'prompt_mode: "repo"',
+  'stage: "write"',
+  'stage: "phrase"',
 ];
 const missing = required.filter((value) => !source.includes(value));
 if (missing.length) throw new Error(`prompt_wiring_missing:${missing.join(",")}`);
@@ -27,14 +32,33 @@ const forbidden = [
   "git:prompts/haim-reply.he.md",
   "withCanonical(",
   "{{canonical}}",
+  "agentHosted(",
 ];
 const present = forbidden.filter((value) => source.includes(value));
 if (present.length)
   throw new Error(`prompt_wiring_forbidden_present:${present.join(",")}`);
-if (!source.includes("haim-agent.he.md"))
-  throw new Error("prompt_wiring_missing:haim-agent.he.md_instructions");
-if (!source.includes("agentInstructions ? { instructions: agentInstructions }"))
-  throw new Error("prompt_wiring_missing:agent_instructions_fallback");
+
+for (const file of ["prompts/haim-write.he.md", "prompts/haim-phrase.he.md"]) {
+  await access(file);
+}
+
+const writePrompt = await readFile("prompts/haim-write.he.md", "utf8");
+const phrasePrompt = await readFile("prompts/haim-phrase.he.md", "utf8");
+for (const needle of ["stage=write", "OWASP LLM01", "hebrew-chatbot-builder"]) {
+  if (!writePrompt.includes(needle))
+    throw new Error(`write_prompt_missing:${needle}`);
+}
+for (const needle of [
+  "stage=phrase",
+  "OWASP LLM01",
+  "hebrew-chatbot-builder",
+  "customer_reply",
+]) {
+  if (!phrasePrompt.includes(needle) && needle !== "customer_reply")
+    throw new Error(`phrase_prompt_missing:${needle}`);
+}
+if (!phrasePrompt.includes("mode=notice_to_counterparty") && !phrasePrompt.includes("notice_to_counterparty"))
+  throw new Error("phrase_prompt_missing:notice_to_counterparty");
 
 const calls = source.match(/this\.client\.responses\.create/g)?.length ?? 0;
 if (calls < 2) throw new Error(`prompt_wiring_expected_two_calls:${calls}`);
@@ -44,9 +68,7 @@ for (const needle of [
   "buildAgentWriteTools",
   "parseAgentToolCall",
   "snapshotToolResult",
-  "Commands.apply",
 ]) {
-  if (needle === "Commands.apply") continue; // applied in engine, not adapter
   if (!agentTools.includes(needle))
     throw new Error(`agent_tools_missing:${needle}`);
 }
@@ -112,4 +134,4 @@ for (const [table, columns] of schema) {
 }
 if (gaps.length) throw new Error(`field_map_gaps:${gaps.join(",")}`);
 
-console.log("prompt_wiring_ok hosted-only field-map-complete");
+console.log("prompt_wiring_ok repo-write-phrase field-map-complete");

@@ -3002,7 +3002,7 @@ test("agent final reply schema and claim guard accept tool changed_fields only",
   assert.ok(bad.rejected.includes("saved:request_parties.address:donor"));
 });
 
-test("config accepts agent prompt falling back to action prompt", () => {
+test("config accepts AI with model and unused legacy hosted prompt ids", () => {
   const c = readConfig({
     NODE_ENV: "test",
     DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:55432/postgres",
@@ -3010,6 +3010,7 @@ test("config accepts agent prompt falling back to action prompt", () => {
     BOT_MODE: "shadow",
     AI_ENABLED: "true",
     OPENAI_API_KEY: "sk-test",
+    OPENAI_MODEL: "gpt-6-luna",
     OPENAI_ACTION_PROMPT_ID: "pmpt_action",
     OPENAI_ACTION_PROMPT_VERSION: "2",
     OPENAI_REPLY_PROMPT_ID: "pmpt_reply",
@@ -3018,6 +3019,7 @@ test("config accepts agent prompt falling back to action prompt", () => {
     HAIM_ADMIN_TOKEN: "test-only-admin-key-not-a-secret-00000",
     MEDIA_ROOT: "/tmp/haim-agent-test-media",
   });
+  assert.equal(c.OPENAI_MODEL, "gpt-6-luna");
   assert.equal(c.OPENAI_AGENT_PROMPT_ID, "");
   assert.equal(c.OPENAI_ACTION_PROMPT_ID, "pmpt_action");
   assert.equal(c.OPENAI_REPLY_PROMPT_ID, "pmpt_reply");

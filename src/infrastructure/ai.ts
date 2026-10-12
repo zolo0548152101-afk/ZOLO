@@ -1,7 +1,7 @@
 /**
- * OpenAI Responses client. Customer turns use one agent + write tools.
- * Notices still use the hosted reply prompt. Code never invents customer
- * sentences and never runs free SQL.
+ * OpenAI Responses client. Customer turns use two repo prompts (write then
+ * phrase) per hebrew-chatbot-builder. Code never invents customer sentences
+ * and never runs free SQL.
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -203,18 +203,12 @@ function requireHosted(
   return { id: id.trim(), version: version.trim() };
 }
 
-function agentHosted(c: Config): { id: string; version: string } {
-  const id = c.OPENAI_AGENT_PROMPT_ID || c.OPENAI_ACTION_PROMPT_ID;
-  const version = c.OPENAI_AGENT_PROMPT_VERSION || c.OPENAI_ACTION_PROMPT_VERSION;
-  return requireHosted(id, version, "agent");
-}
-
-function loadAgentInstructions(): string {
+function loadPromptFile(name: string): string {
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [
-    join(process.cwd(), "prompts/haim-agent.he.md"),
-    join(here, "../../prompts/haim-agent.he.md"),
-    join(here, "../../../prompts/haim-agent.he.md"),
+    join(process.cwd(), "prompts", name),
+    join(here, "../../prompts", name),
+    join(here, "../../../prompts", name),
   ];
   for (const path of candidates) {
     try {
@@ -223,10 +217,23 @@ function loadAgentInstructions(): string {
       /* try next */
     }
   }
-  throw new AppError("missing_agent_prompt_file");
+  throw new AppError(`missing_prompt_file:${name}`);
 }
 
-const AGENT_INSTRUCTIONS = loadAgentInstructions();
+/** Skill-aligned call 1: extract/write with tools. */
+const WRITE_INSTRUCTIONS = loadPromptFile("haim-write.he.md");
+/** Skill-aligned call 2: phrase WhatsApp / notice with no tools. */
+const PHRASE_INSTRUCTIONS = loadPromptFile("haim-phrase.he.md");
+
+function repoPromptMeta(file: "haim-write" | "haim-phrase", model: string) {
+  const text = file === "haim-write" ? WRITE_INSTRUCTIONS : PHRASE_INSTRUCTIONS;
+  return {
+    prompt_mode: "repo" as const,
+    prompt_file: file,
+    prompt_sha: promptSha(text),
+    model,
+  };
+}
 
 const OPENING_COMMANDS = new Set(["donate", "receive_from_donor", "seek"]);
 
@@ -314,7 +321,8 @@ export class OpenAIPlanner implements Planner {
       };
     }
     const started = Date.now();
-    const hosted = agentHosted(this.c);
+    const model = this.c.OPENAI_MODEL;
+    const promptMeta = repoPromptMeta("haim-write", model);
     const rulesState = input.rules ?? defaultRulesState(this.c.TRANSPORT_CAPACITY);
     const facts = buildStage1Facts({
       ctx,
@@ -352,17 +360,9 @@ export class OpenAIPlanner implements Planner {
     const rounds: unknown[] = [];
     const tools = maxToolCalls > 0 ? AGENT_WRITE_TOOLS : undefined;
 
-    // The published Agent prompt is the source of truth. Keep the local full
-    // prompt as a safe fallback while AGENT_PROMPT_ID is not configured.
-    const agentInstructions = this.c.OPENAI_AGENT_PROMPT_ID
-      ? undefined
-      : AGENT_INSTRUCTIONS;
     let response = await this.client.responses.create({
-      prompt: {
-        id: hosted.id,
-        version: hosted.version,
-      },
-      ...(agentInstructions ? { instructions: agentInstructions } : {}),
+      model,
+      instructions: WRITE_INSTRUCTIONS,
       ...(tools ? { tools } : {}),
       text: {
         format: {
@@ -457,11 +457,8 @@ export class OpenAIPlanner implements Planner {
 
       response = await this.client.responses.create({
         previous_response_id: response.id,
-        prompt: {
-          id: hosted.id,
-          version: hosted.version,
-        },
-        ...(agentInstructions ? { instructions: agentInstructions } : {}),
+        model,
+        instructions: WRITE_INSTRUCTIONS,
         ...(tools ? { tools } : {}),
         text: {
           format: {
@@ -500,10 +497,8 @@ export class OpenAIPlanner implements Planner {
       changedFields,
       metadata: {
         provider: "openai_responses_agent",
-        prompt_mode: "hosted",
-        prompt_id: hosted.id,
-        prompt_version: hosted.version,
-        model: response.model ?? this.c.OPENAI_MODEL,
+        ...promptMeta,
+        model: response.model ?? model,
         action_source: "ai_agent_tools",
         response_id: response.id,
         elapsed_ms: Date.now() - started,
@@ -511,9 +506,7 @@ export class OpenAIPlanner implements Planner {
         tool_call_count: toolCalls,
         claims: parsed.data.claims,
         model_input: {
-          prompt_mode: "hosted",
-          prompt_id: hosted.id,
-          prompt_version: hosted.version,
+          ...promptMeta,
           payload: userPayload,
         },
         model_output: {
@@ -636,7 +629,8 @@ export class OpenAIPlanner implements Planner {
       };
     }
     const started = Date.now();
-    const hosted = agentHosted(this.c);
+    const model = this.c.OPENAI_MODEL;
+    const promptMeta = repoPromptMeta("haim-phrase", model);
     const facts = buildStage2Facts({
       ctx,
       rules: input.rules,
@@ -674,10 +668,8 @@ export class OpenAIPlanner implements Planner {
         : {}),
     };
     const response = await this.client.responses.create({
-      prompt: {
-        id: hosted.id,
-        version: hosted.version,
-      },
+      model,
+      instructions: PHRASE_INSTRUCTIONS,
       text: {
         format: {
           type: "json_schema",
@@ -706,18 +698,14 @@ export class OpenAIPlanner implements Planner {
       claims: parsed.data.claims,
       metadata: {
         provider: "openai_responses_agent_reply",
-        prompt_mode: "hosted",
-        prompt_id: hosted.id,
-        prompt_version: hosted.version,
-        model: response.model ?? this.c.OPENAI_MODEL,
+        ...promptMeta,
+        model: response.model ?? model,
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,
         claims: parsed.data.claims,
         model_input: {
-          prompt_mode: "hosted",
-          prompt_id: hosted.id,
-          prompt_version: hosted.version,
+          ...promptMeta,
           payload: userPayload,
         },
         model_output: {
@@ -735,8 +723,7 @@ export class OpenAIPlanner implements Planner {
     request: Request | null,
     facts: Record<string, unknown> = {},
   ): Promise<{ text: string; metadata: Record<string, unknown> }> {
-    // Notices use the same unified hosted Agent prompt. There are no tools on
-    // this request because counterparty notice phrasing is write-free.
+    // Notices reuse the phrase prompt (no tools; write-free).
     const draft = resolveNoticeDraft(
       notice.text,
       request,
@@ -748,7 +735,8 @@ export class OpenAIPlanner implements Planner {
         text: draft,
         metadata: { provider: "fallback", ai_enabled: false },
       };
-    const hosted = agentHosted(this.c);
+    const model = this.c.OPENAI_MODEL;
+    const promptMeta = repoPromptMeta("haim-phrase", model);
     const started = Date.now();
     const recipient =
       request?.parties.find((party) => party.phone === notice.phone) ?? null;
@@ -793,10 +781,8 @@ export class OpenAIPlanner implements Planner {
         : null,
     };
     const response = await this.client.responses.create({
-      prompt: {
-        id: hosted.id,
-        version: hosted.version,
-      },
+      model,
+      instructions: PHRASE_INSTRUCTIONS,
       text: {
         format: {
           type: "json_schema",
@@ -823,10 +809,8 @@ export class OpenAIPlanner implements Planner {
       text: keepPhrasing ? phrased : draft,
       metadata: {
         provider: keepPhrasing ? "openai_responses_notice" : "notice_draft_guard",
-        prompt_mode: "hosted",
-        prompt_id: hosted.id,
-        prompt_version: hosted.version,
-        model: response.model ?? this.c.OPENAI_MODEL,
+        ...promptMeta,
+        model: response.model ?? model,
         response_id: response.id,
         elapsed_ms: Date.now() - started,
         usage: response.usage,
