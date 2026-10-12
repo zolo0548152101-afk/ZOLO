@@ -565,13 +565,132 @@ export class Engine {
     let humanReason: string | undefined;
 
     const executeTool = async (command: Command): Promise<AgentToolResult> => {
-      // Push onto toolResults only AFTER COMMIT so a rolled-back write cannot
-      // leave a phantom ok:true result (seen when item_facts "succeeded" in
-      // metadata but request_items stayed on the prior kind).
-      const snap = await this.s.transaction(async (c) => {
-        const ctx = await this.s.context(id, c, true);
-        if (ctx.message.processed_at) {
-          return {
+      // Record toolResults / changedFromTools only AFTER COMMIT. Deferred DB
+      // triggers (and any COMMIT failure) must not leave phantom changed_fields.
+      type ToolCommit =
+        | { ok: true; snap: AgentToolResult; changed: ChangedField[]; command: Command }
+        | { ok: false; snap: AgentToolResult };
+      let committed: ToolCommit;
+      try {
+        committed = await this.s.transaction(async (c) => {
+          const ctx = await this.s.context(id, c, true);
+          if (ctx.message.processed_at) {
+            return {
+              ok: false as const,
+              snap: {
+                ok: false,
+                command,
+                changed_fields: [],
+                request_number: null,
+                request_status: null,
+                missing_required: null,
+                notices_queued: 0,
+                error: "already_processed",
+              },
+            };
+          }
+          const before =
+            structuredClone(
+              ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
+                ctx.requests.find(
+                  (r) =>
+                    !["coordinated", "closed", "cancelled", "rejected"].includes(
+                      r.status,
+                    ),
+                ) ??
+                null,
+            );
+          await c.query("SAVEPOINT agent_tool");
+          try {
+            const result: Outcome = await this.commands.apply(c, ctx, command);
+            if (result.request) await this.s.save(c, result.request);
+            if (result.humanReason) humanReason = result.humanReason;
+            await this.s.event(
+              c,
+              ctx.message,
+              ctx.conversation.phone,
+              `command.${command.type}`,
+              { command, via: "agent_tool" },
+              result.request?.id ?? null,
+            );
+            const noticeIndex = deferredToolNotices.length;
+            for (const [n, notice] of result.notices.entries()) {
+              const dedupeKey = `notice:${id}:tool:${noticeIndex + n}`;
+              const outboxId = await this.s.outbound(
+                c,
+                ctx.message,
+                notice,
+                dedupeKey,
+                result.request?.id ?? null,
+                "pending",
+              );
+              if (outboxId)
+                deferredToolNotices.push({
+                  outboxId,
+                  notice,
+                  requestId: result.request?.id ?? null,
+                });
+            }
+            await c.query("RELEASE SAVEPOINT agent_tool");
+            const afterCtx = await this.s.context(id, c);
+            const after =
+              result.request ??
+              afterCtx.requests.find(
+                (r) => r.id === afterCtx.conversation.selected_request_id,
+              ) ??
+              null;
+            const changed = diffChangedFields({
+              beforeRequest: before,
+              afterRequest: after,
+              beforeSearch: null,
+              afterSearch: afterCtx.active_search ?? null,
+            });
+            return {
+              ok: true as const,
+              command,
+              changed,
+              snap: snapshotToolResult({
+                command,
+                before,
+                after,
+                changed,
+                notices: result.notices,
+                humanReason: result.humanReason,
+                phone: ctx.conversation.phone,
+              }),
+            };
+          } catch (e) {
+            try {
+              await c.query("ROLLBACK TO SAVEPOINT agent_tool");
+            } catch {
+              // Savepoint may already be released; full tx rollback handles it.
+            }
+            if (!(e instanceof AppError)) throw e;
+            await this.s.event(c, ctx.message, ctx.conversation.phone, "tool_rejected", {
+              code: e.code,
+              via: "agent_tool",
+            });
+            return {
+              ok: false as const,
+              snap: snapshotToolResult({
+                command,
+                before,
+                after: before,
+                changed: [],
+                notices: [],
+                phone: ctx.conversation.phone,
+                error: e.code,
+              }),
+            };
+          }
+        });
+      } catch (e) {
+        // COMMIT-time failures (e.g. deferred triggers) land here.
+        const message =
+          e instanceof Error ? e.message.slice(0, 200) : "tool_commit_failed";
+        committed = {
+          ok: false,
+          snap: {
             ok: false,
             command,
             changed_fields: [],
@@ -579,100 +698,16 @@ export class Engine {
             request_status: null,
             missing_required: null,
             notices_queued: 0,
-            error: "already_processed",
-          };
-        }
-        const before =
-          structuredClone(
-            ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-              ctx.requests.find(
-                (r) =>
-                  !["coordinated", "closed", "cancelled", "rejected"].includes(
-                    r.status,
-                  ),
-              ) ??
-              null,
-          );
-        await c.query("SAVEPOINT agent_tool");
-        try {
-          const result: Outcome = await this.commands.apply(c, ctx, command);
-          if (result.request) await this.s.save(c, result.request);
-          if (result.humanReason) humanReason = result.humanReason;
-          await this.s.event(
-            c,
-            ctx.message,
-            ctx.conversation.phone,
-            `command.${command.type}`,
-            { command, via: "agent_tool" },
-            result.request?.id ?? null,
-          );
-          const noticeIndex = deferredToolNotices.length;
-          for (const [n, notice] of result.notices.entries()) {
-            const dedupeKey = `notice:${id}:tool:${noticeIndex + n}`;
-            const outboxId = await this.s.outbound(
-              c,
-              ctx.message,
-              notice,
-              dedupeKey,
-              result.request?.id ?? null,
-              "pending",
-            );
-            if (outboxId)
-              deferredToolNotices.push({
-                outboxId,
-                notice,
-                requestId: result.request?.id ?? null,
-              });
-          }
-          await c.query("RELEASE SAVEPOINT agent_tool");
-          const afterCtx = await this.s.context(id, c);
-          const after =
-            result.request ??
-            afterCtx.requests.find(
-              (r) => r.id === afterCtx.conversation.selected_request_id,
-            ) ??
-            null;
-          const changed = diffChangedFields({
-            beforeRequest: before,
-            afterRequest: after,
-            beforeSearch: null,
-            afterSearch: afterCtx.active_search ?? null,
-          });
-          executedCommands.push(command);
-          changedFromTools.push(...changed);
-          return snapshotToolResult({
-            command,
-            before,
-            after,
-            changed,
-            notices: result.notices,
-            humanReason: result.humanReason,
-            phone: ctx.conversation.phone,
-          });
-        } catch (e) {
-          try {
-            await c.query("ROLLBACK TO SAVEPOINT agent_tool");
-          } catch {
-            // Savepoint may already be released; full tx rollback handles it.
-          }
-          if (!(e instanceof AppError)) throw e;
-          await this.s.event(c, ctx.message, ctx.conversation.phone, "tool_rejected", {
-            code: e.code,
-            via: "agent_tool",
-          });
-          return snapshotToolResult({
-            command,
-            before,
-            after: before,
-            changed: [],
-            notices: [],
-            phone: ctx.conversation.phone,
-            error: e.code,
-          });
-        }
-      });
-      toolResults.push(snap);
-      return snap;
+            error: message,
+          },
+        };
+      }
+      if (committed.ok) {
+        executedCommands.push(committed.command);
+        changedFromTools.push(...committed.changed);
+      }
+      toolResults.push(committed.snap);
+      return committed.snap;
     };
 
     let agent;
