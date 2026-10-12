@@ -310,7 +310,13 @@ def main():
     # DB: sofa saved, direct, represents_both
     report["checks"]["item_sofa"] = "|sofa|" in items or "sofa|" in items
     report["checks"]["origin_direct"] = "|direct|" in reqs
-    report["checks"]["represents_both"] = "|t|" in reqs or reqs.endswith("|t") or "|t|" in ("|" + reqs + "|")
+    # psql -At may print boolean as t/true depending on driver/settings
+    report["checks"]["represents_both"] = (
+        "|t|" in f"|{reqs}|"
+        or "|true|" in f"|{reqs}|"
+        or reqs.rstrip().endswith("|t")
+        or reqs.rstrip().endswith("|true")
+    )
     # Both parties on Israel's phone
     donor_israel = f"|donor|{ISRAEL}|" in parties
     receiver_israel = f"|receiver|{ISRAEL}|" in parties
