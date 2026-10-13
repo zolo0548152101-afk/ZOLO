@@ -157,25 +157,13 @@ export function norm(s: string): string {
 }
 
 /**
- * Kinship / role labels are not usable party names (conv#9 saved «אמא» and
- * messaged Tal «אמא רוצה למסור לך»). Returns a trimmed name or null.
+ * Trim a party name for storage. Kinship/role rejection («אמא») is prompt-owned —
+ * code must not maintain a forbidden-name list.
  */
 export function usablePersonName(name: string | null | undefined): string | null {
   if (!name) return null;
   const trimmed = name.trim().replace(/\s+/g, " ");
-  if (trimmed.length < 2) return null;
-  const base =
-    /^(?:ה)?(?:אמ+א|אימ+א|אבא|סבתא|סבא|אח(?:ות)?|דוד(?:ה)?|חבר(?:ה)?|שכן(?:ה)?|בעל|אישה|אשת(?:ו)?|בעלה|המוסר|המקבל|אני|עצמי|מישהו|מישהי)(?:\s+(?:שלי|שלה|שלו|שלנו|שלכם|שלך))?$/iu;
-  if (base.test(trimmed)) return null;
-  // «אמא שלי», «האמא שלי בת 84» — still not a given name.
-  if (
-    /^(?:ה)?(?:אמ+א|אימ+א|אבא|סבתא|סבא)\b/iu.test(trimmed) &&
-    !/[א-ת]{2,}\s+[א-ת]{2,}/u.test(
-      trimmed.replace(/^(?:ה)?(?:אמ+א|אימ+א|אבא|סבתא|סבא)\s+/iu, ""),
-    )
-  )
-    return null;
-  return trimmed;
+  return trimmed.length >= 2 ? trimmed : null;
 }
 
 const HEBREW_MONTHS: Record<string, number> = {
@@ -429,7 +417,7 @@ export function stripDistanceCheckNotes(
 
 /** An allowed town named as the place itself, not merely "near Beit She'an". */
 export function mentionedAllowedSettlement(text: string): string | null {
-  if (namedOutsideSettlement(text)) return null;
+  // Far-city lists are prompt-owned; do not veto allowed-town mentions here.
   const normalized = norm(text)
     .replace(/(?:ליד|קרוב ל|באזור|סמוך ל)\s*בית\s*[-־]?\s*שאן/gu, " ")
     .replace(/\bnear\s+beit\s+she'?an\b/gi, " ");
@@ -770,19 +758,8 @@ export function nextQuestion(
       floorNote: false,
       missing: missingOf(r, "oven_type", "donor"),
     };
-  if (
-    donor &&
-    r.origin !== "direct" &&
-    r.items.some(
-      (i) =>
-        !appliance(i) && i.kind !== "wardrobe" && i.needs_disassembly === null,
-    )
-  )
-    return {
-      text: "",
-      floorNote: false,
-      missing: missingOf(r, "needs_disassembly", "donor"),
-    };
+  // Disassembly prompts are owned by write/phrase — code does not force
+  // needs_disassembly as missing_required for chairs/sofa/etc.
   if (!p.approved_at)
     return {
       text: "",
@@ -795,11 +772,11 @@ export function nextQuestion(
       floorNote: false,
       missing: missingOf(r, "settlement", p.role),
     };
-  if (!usablePersonName(p.name) || !p.address)
+  if (!p.name?.trim() || !p.address)
     return {
       text: "",
       floorNote: false,
-      missing: missingOf(r, !usablePersonName(p.name) ? "name" : "address", p.role),
+      missing: missingOf(r, !p.name?.trim() ? "name" : "address", p.role),
     };
   // Always ask floor — never invent קומה 0.
   if (p.floor === null)

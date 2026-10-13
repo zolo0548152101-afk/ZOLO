@@ -118,7 +118,7 @@ export const FIELD_MAP: FieldMapEntry[] = [
   { table: "requests", column: "status", hebrew: "סטטוס פנייה", writer: "system", claimable: true, claim: "הסטטוס במסד הוא הערך שנקרא" },
   { table: "requests", column: "origin", hebrew: "סוג פנייה (מסירה כללית או ישירה)", writer: "donate", commandField: "direct", claimable: false },
   { table: "requests", column: "run_date", hebrew: "תאריך הובלה מתואם", writer: "system", claimable: true, claim: "ההובלה נקבעה לתאריך זה" },
-  { table: "requests", column: "earliest_run_date", hebrew: "תאריך מוקדם ביותר אחרי ביטול", writer: "cancel", commandField: "choice", claimable: false },
+  { table: "requests", column: "earliest_run_date", hebrew: "תאריך מבוקש / מוקדם ביותר", writer: "details", commandField: "earliest_run_date", claimable: true, claim: "נרשם תאריך מבוקש", missing: "אין תאריך מבוקש" },
   { table: "requests", column: "human_reason", hebrew: "סיבת טיפול אנושי", writer: "escalate", commandField: "reason", claimable: false },
   { table: "requests", column: "verification_contacted", hebrew: "האם פנינו לצד השני", writer: "contact_counterparty", commandField: "contact", claimable: true, claim: "פנינו לצד השני", missing: "עדיין לא פנינו" },
   { table: "requests", column: "preferred_time", hebrew: "שעת העדפה", writer: "details", commandField: "preferred_time", claimable: true, claim: "נשמרה שעת ההעדפה", missing: "אין שעת העדפה שמורה" },

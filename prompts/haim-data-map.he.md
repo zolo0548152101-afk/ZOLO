@@ -11,7 +11,7 @@
 - status (סטטוס פנייה) ← system
 - origin (סוג פנייה (מסירה כללית או ישירה)) ← פקודה donate.direct
 - run_date (תאריך הובלה מתואם) ← system
-- earliest_run_date (תאריך מוקדם ביותר אחרי ביטול) ← פקודה cancel.choice
+- earliest_run_date (תאריך מבוקש / מוקדם ביותר) ← details.earliest_run_date (YYYY-MM-DD) או cancel.choice
 - human_reason (סיבת טיפול אנושי) ← פקודה escalate.reason
 - verification_contacted (האם פנינו לצד השני) ← פקודה contact_counterparty.contact
 - preferred_time (שעת העדפה) ← פקודה details.preferred_time

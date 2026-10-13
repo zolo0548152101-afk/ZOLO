@@ -23,7 +23,6 @@ import {
   isOperationsAlert,
   DEFAULT_TRANSPORT_CAPACITY,
   MAX_TRANSPORT_CAPACITY,
-  namedOutsideSettlement,
   norm,
   nextTuesday,
   readyToCoordinate,
@@ -726,14 +725,8 @@ export class Store {
       [candidates],
     );
     if (r.rows[0]) return r.rows[0];
-    // Hard-coded far cities (חולון, ראשון לציון, …) must not become "review"
-    // just because they were never seeded — that sticky distance-check flag
-    // survives after the customer corrects to בית שאן.
-    const outside =
-      namedOutsideSettlement(lookup) ||
-      namedOutsideSettlement(`ב${lookup}`) ||
-      namedOutsideSettlement(s);
-    if (outside) return { name: outside, decision: "outside" };
+    // Outside-area city lists are prompt-owned. Unknown names stay "review"
+    // for the team; the model must not write far settlements in the first place.
     return { name: s, decision: "review" };
   }
   /** Ensure a settlement name exists so request_parties FK can store it. */

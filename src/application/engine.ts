@@ -29,9 +29,7 @@ import {
   isQuickTopic,
   statusText,
   PHOTO_STATUS,
-  OUTSIDE,
   isOperationsAlert,
-  customerInsistsAfterDenial,
   nextQuestion,
   nextTuesday,
   readyToProposeSchedule,
@@ -1655,27 +1653,6 @@ export class Engine {
         // Already handed off — Reply manager acknowledges; no template ask.
         intent = "human_escalation";
         reply = null;
-      } else if (
-        customerInsistsAfterDenial(text) &&
-        ctx.history.some(
-          (entry) =>
-            entry.role === "assistant" &&
-            (entry.content.includes(OUTSIDE) ||
-              /לא נוכל לסייע|מחוץ לאזור|לא במדיניות|אי אפשר/.test(entry.content)),
-        )
-      ) {
-        intent = "human_escalation";
-        const open =
-          ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
-          (ctx.requests.length === 1 ? ctx.requests[0] : null);
-        if (open && open.status !== "coordinated") {
-          open.status = "human";
-          open.human_reason = "customer_insisted";
-          await this.s.save(c, open);
-          request = open;
-        }
-        reply = null;
-        reason = "customer_insisted";
       } else if (technicalReason || ctx.message.media_state === "failed") {
         intent = technicalReason ? "clarification" : "human_escalation";
         const selected =

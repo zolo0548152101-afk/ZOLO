@@ -64,6 +64,8 @@ export const commandSchema = z.discriminatedUnion("type", [
     address: str,
     floor: z.number().int().min(-3).max(100).nullable(),
     preferred_time: str.optional(),
+    /** Customer-requested calendar day (YYYY-MM-DD); AI parses, code only stores. */
+    earliest_run_date: str.optional(),
   }),
   z.strictObject({
     type: z.literal("item_facts"),

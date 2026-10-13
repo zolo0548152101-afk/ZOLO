@@ -27,9 +27,7 @@ import {
   mentionedAllowedSettlement,
   appendTeamNote,
   stripDistanceCheckNotes,
-  customerInsistsAfterDenial,
   usablePersonName,
-  preferredDeliveryDate,
   contactConsentGiven,
 } from "../domain/policies.js";
 import {
@@ -90,6 +88,8 @@ function bareYes(text: string): boolean {
 function bareNo(text: string): boolean {
   return /^(?:לא|אין)(?:[\s,!.]|$)/u.test(norm(text));
 }
+/** Soft Hebrew yes-to-extra only while confirm_another_delivery is pending.
+ * English keyword lists are prompt-owned — code must not detect intent that way. */
 function explicitAnotherDelivery(text: string): boolean {
   const t = norm(text);
   return (
@@ -98,10 +98,7 @@ function explicitAnotherDelivery(text: string): boolean {
         t,
       )) ||
     /^(?:כן[,.]?\s*)?(?:הובלה|משלוח|פנייה)\s+נוס/.test(t) ||
-    /(?:^|[\s,])בנפרד(?:[\s,]|$)|פנייה\s+חדשה|עוד\s+אחת/.test(t) ||
-    /(?:new|another)\s+request|open\s+another\s+request|separate\s+(?:delivery|request)/i.test(
-      text,
-    )
+    /(?:^|[\s,])בנפרד(?:[\s,]|$)|פנייה\s+חדשה|עוד\s+אחת/.test(t)
   );
 }
 function explicitNotAnotherDelivery(text: string): boolean {
@@ -246,17 +243,19 @@ function suppliedPhone(_ctx: Context, input: string): string {
 }
 
 /**
- * Canonicalize a counterparty phone, or null when LIVE_ALLOWLIST is active and
- * the number is outside it — never persist/queue outbound to non-test numbers.
+ * Canonicalize a counterparty phone for DB storage. LIVE_ALLOWLIST must not
+ * drop customer-supplied numbers — it only gates WhatsApp outbound.
  */
 function contactableCounterpartyPhone(
-  store: Store,
+  _store: Store,
   input: string | null | undefined,
 ): string | null {
   if (!input) return null;
-  const phone = canonicalPhone(input);
-  if (!isLiveOutboundAllowed(phone, store.config.LIVE_ALLOWLIST)) return null;
-  return phone;
+  try {
+    return canonicalPhone(input);
+  } catch {
+    return null;
+  }
 }
 
 /** True when the linked counterparty phone is the speaker (self-as-both move). */
@@ -327,21 +326,9 @@ export class Commands {
     return Boolean(row.rowCount);
   }
 
-  /** Persist a customer-requested calendar day as earliest_run_date (admin: requested_date). */
-  private capturePreferredDate(r: Request, text: string): void {
-    const date = preferredDeliveryDate(text, this.now());
-    if (!date) return;
-    if (!r.earliest_run_date || date > r.earliest_run_date)
-      r.earliest_run_date = date;
-  }
-
   private assignPersonName(party: Party, raw: string | null | undefined): boolean {
     const name = usablePersonName(raw ?? null);
-    if (!name) {
-      // Drop kinship/role labels that were wrongly stored («אמא»).
-      if (raw && party.name && !usablePersonName(party.name)) party.name = null;
-      return false;
-    }
+    if (!name) return false;
     party.name = name;
     return true;
   }
@@ -713,8 +700,7 @@ export class Commands {
           cmd.type === "donate" &&
           (cmd.counterparty_name || other)
         ) {
-          // Outside LIVE_ALLOWLIST (e.g. made-up QA number): name only — never
-          // persist a phone we cannot message.
+          // Phone failed to canonicalize — still keep the name the model wrote.
           const receiver = party("receiver", null, false);
           receiver.name = usablePersonName(cmd.counterparty_name ?? null);
           if (receiver.name) parties.push(receiver);
@@ -1248,10 +1234,6 @@ export class Commands {
     const initial = target(ctx, n),
       r = await this.s.request(initial.id, c, true);
     ownParty(r, phone);
-    this.capturePreferredDate(r, text);
-    // Scrub kinship labels already stored so missing_required becomes name again.
-    for (const partyRow of r.parties)
-      if (partyRow.name && !usablePersonName(partyRow.name)) partyRow.name = null;
     if (cmd.type === "select") {
       await c.query(
         "UPDATE conversations SET selected_request_id=$2 WHERE id=$1",
@@ -1334,14 +1316,7 @@ export class Commands {
       return output(null, r);
     }
     if (cmd.type === "escalate") {
-      // Human handoff only when the customer insists after a clear denial.
-      if (customerInsistsAfterDenial(text)) {
-        if (r.status !== "coordinated") {
-          r.status = "human";
-          r.human_reason = "customer_insisted";
-        }
-        return { ...output(null, r), humanReason: "customer_insisted" };
-      }
+      // Write what the model asked for — when/whether to escalate is prompt-owned.
       if (cmd.reason === "borderline_area") {
         r.needs_distance_check = true;
         r.team_notes = appendTeamNote(
@@ -1352,34 +1327,26 @@ export class Commands {
         r.human_reason = null;
         return output(null, r);
       }
-      if (cmd.reason === "evacuation") {
+      if (cmd.reason === "evacuation" || cmd.reason === "customer_request") {
         if (r.status !== "coordinated") {
           r.status = "human";
           r.human_reason = cmd.reason;
         }
+        if (cmd.reason === "customer_request")
+          r.team_notes = appendTeamNote(
+            r.team_notes,
+            `בקשת לקוח לנציג: ${text.slice(0, 400)}`,
+          );
         return { ...output(null, r), humanReason: cmd.reason };
       }
-      // Explicit ask for a real person («בן אדם אמיתי») — hand off, don't just note.
-      if (cmd.reason === "customer_request") {
-        if (r.status !== "coordinated") {
-          r.status = "human";
-          r.human_reason = "customer_request";
-        }
-        r.team_notes = appendTeamNote(
-          r.team_notes,
-          `בקשת לקוח לנציג: ${text.slice(0, 400)}`,
-        );
-        return { ...output(null, r), humanReason: "customer_request" };
-      }
-      // Unknown / unclear questions: park for team, keep collecting.
       r.team_notes = appendTeamNote(
         r.team_notes,
         `שאלה לצוות (${cmd.reason}): ${text.slice(0, 400)}`,
       );
       if (
         r.status === "human" &&
-        r.human_reason !== "customer_insisted" &&
-        r.human_reason !== "customer_request"
+        r.human_reason !== "customer_request" &&
+        r.human_reason !== "evacuation"
       ) {
         r.status = "collecting";
         r.human_reason = null;
@@ -1567,6 +1534,12 @@ export class Commands {
         p.floor = null;
       if (cmd.preferred_time && validTransportPreference(cmd.preferred_time))
         r.preferred_time = cmd.preferred_time;
+      // AI-parsed customer calendar day (YYYY-MM-DD) — code does not parse Hebrew dates.
+      if (cmd.earliest_run_date) {
+        const day = cmd.earliest_run_date.trim().slice(0, 10);
+        if (/^\d{4}-\d{2}-\d{2}$/.test(day))
+          r.earliest_run_date = day;
+      }
     } else if (cmd.type === "item_facts") {
       invalidateProposal(r);
       ownParty(r, phone, "donor");
@@ -1610,19 +1583,14 @@ export class Commands {
         }
       }
       for (const i of r.items) {
-        // Trust action-manager field values; do not re-litigate free/working
-        // from raw customer wording.
+        // Persist what the model wrote — wardrobe-only disassembly is prompt-owned.
         if (cmd.free !== null) i.free = cmd.free;
         if (cmd.working !== null) i.working = cmd.working;
-        if (i.kind === "wardrobe") {
-          if (cmd.wardrobe_small_whole !== null)
-            i.wardrobe_small_whole = cmd.wardrobe_small_whole;
-          if (cmd.needs_disassembly !== null)
-            i.needs_disassembly = cmd.needs_disassembly;
-        } else if (appliance(i)) i.needs_disassembly = false;
-        else if (cmd.needs_disassembly === false)
-          // Explicit "no disassembly" may clear other furniture. True is
-          // wardrobe-only — never stamp ארון-פירוק onto table_set/sofa/chairs.
+        if (cmd.needs_disassembly !== null)
+          i.needs_disassembly = cmd.needs_disassembly;
+        if (i.kind === "wardrobe" && cmd.wardrobe_small_whole !== null)
+          i.wardrobe_small_whole = cmd.wardrobe_small_whole;
+        if (appliance(i) && cmd.needs_disassembly === null)
           i.needs_disassembly = false;
         if (i.kind === "oven" && cmd.oven_type) i.oven_type = cmd.oven_type;
         if (cmd.evacuation) i.evacuation = cmd.evacuation;
