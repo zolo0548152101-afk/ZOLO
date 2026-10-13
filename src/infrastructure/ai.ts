@@ -74,13 +74,23 @@ export interface ReplyInput {
   notices: NoticeFact[];
   /** Only used when AI is disabled — never a customer template under normal path. */
   fallback?: string;
-  guardFeedback?: { rejected_claims: string[] };
+  guardFeedback?: {
+    rejected_claims: string[];
+    /** Drop disputed claims; natural reply with only proven facts — never fault tone. */
+    safe_mode?: boolean;
+    /** Ask AI to say a human teammate will continue; claims must not overclaim. */
+    human_handoff?: boolean;
+  };
 }
 
 export interface AgentTurnInput {
   rules?: RulesState;
   executeTool: (command: Command) => Promise<AgentToolResult>;
-  guardFeedback?: { rejected_claims: string[] };
+  guardFeedback?: {
+    rejected_claims: string[];
+    safe_mode?: boolean;
+    human_handoff?: boolean;
+  };
   maxToolCalls?: number;
 }
 

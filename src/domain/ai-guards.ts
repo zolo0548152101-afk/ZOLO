@@ -1,13 +1,19 @@
 /**
- * False-information guard and the only two fixed customer lines the code may
- * emit (OpenAI unreachable / guard failed twice). Everything else is AI text.
+ * False-information guard. Customer WhatsApp wording is always AI-authored.
+ * The only fixed customer line code may emit is OUTAGE_REPLY — and only when
+ * OpenAI is unreachable after retries (no model available to phrase).
+ * Claim-guard failures must re-ask the phrase model (guard_feedback / safe_mode),
+ * never substitute a canned Hebrew sentence.
  */
 
 /** Neutral line when OpenAI is unreachable after retries. */
 export const OUTAGE_REPLY =
   "יש תקלה זמנית במערכת. נחזור אליך בהקדם.";
 
-/** Neutral line when the claims guard rejects twice. */
+/**
+ * @deprecated Never send to customers. Legacy marker for tests / old call sites.
+ * Claim failures must re-phrase via the AI, not this string.
+ */
 export const GUARD_FALLBACK_REPLY =
   "קיבלתי את ההודעה. נמשיך מהנקודה הבאה.";
 
@@ -186,8 +192,8 @@ export function replyClaimsSaveWithoutWrites(
 
 /**
  * Legacy marker-based guard kept only as a last-resort when the model returns
- * no claims object. Prefer verifyClaims. Never invents wording — on reject the
- * caller re-asks the model or uses GUARD_FALLBACK_REPLY.
+ * no claims object. Prefer verifyClaims. On reject the caller must re-ask the
+ * phrase model — not send GUARD_FALLBACK_REPLY to the customer.
  */
 export function applyClaimGuard(
   _canonical: string,
@@ -196,7 +202,7 @@ export function applyClaimGuard(
   changedFields: { table: string; column: string }[] = [],
 ): { text: string; rejected: boolean } {
   const candidate = (phrased ?? "").trim();
-  if (!candidate) return { text: GUARD_FALLBACK_REPLY, rejected: true };
+  if (!candidate) return { text: "", rejected: true };
   const saveClaim =
     /(?:נשמר|רשמתי|שמרתי|עדכנתי|רשמנו|עדכנו|קיבלתי)/u.test(candidate);
   if (saveClaim && changedFields.length === 0)

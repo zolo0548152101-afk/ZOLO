@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { Store, type Outbound } from "../infrastructure/store.js";
 import { Commands, type Outcome } from "./commands.js";
-import { type Planner } from "../infrastructure/ai.js";
+import { type Planner, type ReplyInput } from "../infrastructure/ai.js";
 import {
   DeliveryError,
   type Channel,
@@ -45,7 +45,6 @@ import {
 } from "../domain/notices.js";
 import {
   OUTAGE_REPLY,
-  GUARD_FALLBACK_REPLY,
   FAULT_REPLY,
   isSelfIntroText,
   replyClaimsSaveWithoutWrites,
@@ -812,75 +811,31 @@ export class Engine {
     let rejected = false;
     let rejectedClaims: string[] = [];
     try {
-      const composed = await this.ai.reply(ctxAfterTools, phraseInput);
-      claims = composed.claims;
-      replyText = composed.text;
+      const phrased = await this.phraseUntilClaimsOk(
+        ctxAfterTools,
+        phraseInput,
+        claimFacts,
+        phraseNotices.length,
+      );
+      claims = phrased.claims;
+      replyText = phrased.text;
+      rejected = phrased.rejected;
+      rejectedClaims = phrased.rejectedClaims;
       agent = {
         ...agent,
         text: replyText,
         claims,
-        metadata: { ...agent.metadata, phrase: composed.metadata },
+        metadata: { ...agent.metadata, ...phrased.metadata },
       };
+      if (phrased.escalateHuman && !humanReason)
+        humanReason = "claim_guard_exhausted";
     } catch {
-      claims = agent.claims;
-      replyText = agent.text || GUARD_FALLBACK_REPLY;
-    }
-
-    let check = verifyClaims(claims, claimFacts);
-    if (
-      check.ok &&
-      replyClaimsSaveWithoutWrites(replyText, claimFacts.changedPaths)
-    ) {
-      check = { ok: false, rejected: ["saved:unproven_save_verb"] };
-    }
-    if (
-      check.ok &&
-      replyDeniesQueuedNotice(replyText, phraseNotices.length)
-    ) {
-      check = { ok: false, rejected: ["notices_queued:denied_in_reply"] };
-    }
-    if (!check.ok) {
+      // Model unreachable — only then may code emit the outage line.
+      claims = emptyClaims();
+      replyText = agent.text?.trim() || OUTAGE_REPLY;
       rejected = true;
-      rejectedClaims = check.rejected;
-      try {
-        const retry = await this.ai.reply(ctxAfterTools, {
-          ...phraseInput,
-          guardFeedback: { rejected_claims: check.rejected },
-        });
-        claims = retry.claims;
-        replyText = retry.text;
-        agent = {
-          ...agent,
-          text: replyText,
-          claims,
-          metadata: { ...agent.metadata, guard_retry: retry.metadata },
-        };
-        check = verifyClaims(claims, claimFacts);
-        if (
-          check.ok &&
-          replyClaimsSaveWithoutWrites(replyText, claimFacts.changedPaths)
-        ) {
-          check = { ok: false, rejected: ["saved:unproven_save_verb"] };
-        }
-        if (
-          check.ok &&
-          replyDeniesQueuedNotice(replyText, phraseNotices.length)
-        ) {
-          check = { ok: false, rejected: ["notices_queued:denied_in_reply"] };
-        }
-        if (!check.ok) {
-          rejected = true;
-          rejectedClaims = check.rejected;
-          replyText = GUARD_FALLBACK_REPLY;
-          claims = emptyClaims();
-        } else {
-          rejected = false;
-          rejectedClaims = [];
-        }
-      } catch {
-        replyText = GUARD_FALLBACK_REPLY;
-        claims = emptyClaims();
-      }
+      rejectedClaims = ["phrase_unreachable"];
+      if (!humanReason) humanReason = "ai_fault_after_retries";
     }
 
     const planCommands =
@@ -1258,6 +1213,113 @@ export class Engine {
 
   private voiced(ctx: Context, text: string): string {
     return localizeCustomer(text, conversationLanguage(ctx));
+  }
+
+  private evaluateReplyClaims(
+    text: string,
+    claims: ReplyClaims,
+    claimFacts: Parameters<typeof verifyClaims>[1],
+    noticesQueued: number,
+  ): { ok: boolean; rejected: string[] } {
+    let check = verifyClaims(claims, claimFacts);
+    if (check.ok && replyClaimsSaveWithoutWrites(text, claimFacts.changedPaths))
+      check = { ok: false, rejected: ["saved:unproven_save_verb"] };
+    if (check.ok && replyDeniesQueuedNotice(text, noticesQueued))
+      check = { ok: false, rejected: ["notices_queued:denied_in_reply"] };
+    return check;
+  }
+
+  /**
+   * Phrase until claims pass. Never substitutes a canned customer sentence —
+   * on repeated claim failure, safe_mode / human_handoff re-ask the model.
+   * Only OUTAGE_REPLY when the model is unreachable.
+   */
+  private async phraseUntilClaimsOk(
+    ctx: Context,
+    phraseInput: Omit<ReplyInput, "guardFeedback">,
+    claimFacts: Parameters<typeof verifyClaims>[1],
+    noticesQueued: number,
+  ): Promise<{
+    text: string;
+    claims: ReplyClaims;
+    rejected: boolean;
+    rejectedClaims: string[];
+    metadata: Record<string, unknown>;
+    escalateHuman: boolean;
+  }> {
+    const meta: Record<string, unknown> = {};
+    let composed = await this.ai.reply(ctx, phraseInput);
+    meta.phrase = composed.metadata;
+    let check = this.evaluateReplyClaims(
+      composed.text,
+      composed.claims,
+      claimFacts,
+      noticesQueued,
+    );
+    if (!check.ok) {
+      composed = await this.ai.reply(ctx, {
+        ...phraseInput,
+        guardFeedback: { rejected_claims: check.rejected },
+      });
+      meta.guard_retry = composed.metadata;
+      check = this.evaluateReplyClaims(
+        composed.text,
+        composed.claims,
+        claimFacts,
+        noticesQueued,
+      );
+    }
+    if (!check.ok) {
+      composed = await this.ai.reply(ctx, {
+        ...phraseInput,
+        guardFeedback: { rejected_claims: check.rejected, safe_mode: true },
+      });
+      meta.guard_safe_retry = composed.metadata;
+      check = this.evaluateReplyClaims(
+        composed.text,
+        composed.claims,
+        claimFacts,
+        noticesQueued,
+      );
+    }
+    let escalateHuman = false;
+    if (!check.ok) {
+      escalateHuman = true;
+      composed = await this.ai.reply(ctx, {
+        ...phraseInput,
+        guardFeedback: {
+          rejected_claims: check.rejected,
+          safe_mode: true,
+          human_handoff: true,
+        },
+      });
+      meta.guard_human_handoff = composed.metadata;
+      check = this.evaluateReplyClaims(
+        composed.text,
+        composed.claims,
+        claimFacts,
+        noticesQueued,
+      );
+    }
+    const text = composed.text.trim();
+    if (!text) {
+      return {
+        text: OUTAGE_REPLY,
+        claims: emptyClaims(),
+        rejected: true,
+        rejectedClaims: check.rejected,
+        metadata: meta,
+        escalateHuman: true,
+      };
+    }
+    return {
+      text,
+      claims: check.ok ? composed.claims : emptyClaims(),
+      rejected: !check.ok,
+      rejectedClaims: check.ok ? [] : check.rejected,
+      metadata: meta,
+      escalateHuman: escalateHuman || !check.ok,
+    };
   }
 
   /** Best-effort audit row — never throws into the turn path. */
@@ -2043,9 +2105,9 @@ export class Engine {
       // keeps a pending placeholder here; boundaries already applied above.
       void protectedReply;
       if (reason) await this.alert(c, ctx, reason, reply, request);
-      // Placeholder until the reply manager writes the real text. Keep any
-      // structured command result only as an AI-disabled / outage fallback.
-      if (!reply?.trim()) reply = GUARD_FALLBACK_REPLY;
+      // Placeholder until the reply manager writes the real text (pending
+      // format_state — not customer-visible). Must be truthy so finish() runs.
+      if (!reply?.trim()) reply = OUTAGE_REPLY;
       let customerOutboxId: string | null = null;
       customerOutboxId = await this.s.outbound(
         c,
@@ -2272,13 +2334,9 @@ export class Engine {
             noticesFromTools ||
             primaryContactQueued;
           claimFacts.requireContactClaim = primaryContactQueued;
-          // Phrase already claim-checked in finishWithAgentTools. Re-verify only
-          // when that stage already rejected — incomplete finish() facts used to
-          // false-overclaim and replace a good reply with GUARD_FALLBACK (conv#10).
-          if (rejected) {
-            text = GUARD_FALLBACK_REPLY;
-            claims = emptyClaims();
-          }
+          // Phrase already claim-checked in finishWithAgentTools. Trust that
+          // AI text — never replace with a canned line (conv#10 overclaim).
+          if (rejected && !text.trim()) text = OUTAGE_REPLY;
           replyMeta = {
             provider: "openai_responses_agent",
             prompt_id: agentMeta.prompt_id ?? null,
@@ -2287,31 +2345,17 @@ export class Engine {
             tools_already_applied: true,
           };
         } else {
-          let generated = await this.ai.reply(ctx, replyInput);
-          replyMeta = generated.metadata;
-          claims = generated.claims;
-          let check = verifyClaims(claims, claimFacts);
-          if (!check.ok) {
-            rejected = true;
-            rejectedClaims = check.rejected;
-            generated = await this.ai.reply(ctx, {
-              ...replyInput,
-              guardFeedback: { rejected_claims: check.rejected },
-            });
-            replyMeta = generated.metadata;
-            claims = generated.claims;
-            check = verifyClaims(claims, claimFacts);
-            if (!check.ok) {
-              rejected = true;
-              rejectedClaims = check.rejected;
-              text = GUARD_FALLBACK_REPLY;
-            } else {
-              rejected = false;
-              text = generated.text.trim() || GUARD_FALLBACK_REPLY;
-            }
-          } else {
-            text = generated.text.trim() || GUARD_FALLBACK_REPLY;
-          }
+          const phrased = await this.phraseUntilClaimsOk(
+            ctx,
+            replyInput,
+            claimFacts,
+            0,
+          );
+          replyMeta = phrased.metadata;
+          claims = phrased.claims;
+          rejected = phrased.rejected;
+          rejectedClaims = phrased.rejectedClaims;
+          text = phrased.text;
         }
       } catch (e) {
         this.log.error({

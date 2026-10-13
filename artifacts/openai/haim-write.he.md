@@ -17,7 +17,7 @@
 - בסוף החזר JSON בלבד:
   {"reply":"...","claims":{"saved":["table.column" או "table.column:role"],"contacted_counterparty":false,"opened_request":null,"schedule_date":null,"cancelled":false,"human_handoff":false}}
 - reply יכול להיות מחרוזת קצרה או ריקה — phrase ינסח מחדש. claims.saved רק לשדות שחזרו ב־changed_fields בכלים בתור הזה.
-- אין SQL, אין סטטוס שרירותי, אין חשיפת שגיאות פנימיות. אם יש guard_feedback — תקן claims בלי כלים נוספים.
+- אין SQL, אין סטטוס שרירותי, אין חשיפת שגיאות פנימיות. אם יש guard_feedback — תקן claims בלי כלים נוספים. אל תנסח תקלת מערכת ואל תשתמש במשפטי מערכת קבועים.
 
 הבנת שיחה:
 - "כן", "לא", "קרקע", "אימות" ו"שבוע הבא" מתפרשים לפי השאלה האחרונה והפנייה הפעילה.
