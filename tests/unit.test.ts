@@ -2054,7 +2054,8 @@ test("claim-guard flags unbacked save claims without rewriting wording", async (
     ]).rejected,
     false,
   );
-  assert.equal(applyClaimGuard("x", "", false).text, GUARD_FALLBACK_REPLY);
+  assert.equal(applyClaimGuard("x", "", false).text, "");
+  assert.equal(applyClaimGuard("x", "", false).rejected, true);
   assert.equal(CLARIFY_REPLY, GUARD_FALLBACK_REPLY);
   assert.match(FAULT_REPLY, /תקלה/);
 });
