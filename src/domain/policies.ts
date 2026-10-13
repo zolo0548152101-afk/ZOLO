@@ -299,73 +299,17 @@ export function cityOutsideStreet(text: string, name: string): boolean {
   return rest.includes(name);
 }
 
-const OUTSIDE_PLACES: { name: string; pattern: RegExp }[] = [
-  { name: "תל אביב", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?תל\s+אביב(?=$|[^א-ת])/u },
-  { name: "תל אביב", pattern: /\btel\s*aviv\b/i },
-  { name: "ראשון לציון", pattern: /ראשון\s+לציון/u },
-  { name: "באר שבע", pattern: /באר\s+שבע/u },
-  { name: "ירושלים", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?ירושלים(?=$|[^א-ת])/u },
-  { name: "ירושלים", pattern: /\bjerusalem\b/i },
-  { name: "טבריה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?טברי[הא](?=$|[^א-ת])/u },
-  { name: "טבריה", pattern: /\btiberias\b/i },
-  { name: "טבריה", pattern: /طبري[اة]/u },
-  { name: "עפולה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?עפול[הא](?=$|[^א-ת])/u },
-  { name: "עפולה", pattern: /\bafula\b/i },
-  { name: "חיפה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?חיפה(?=$|[^א-ת])/u },
-  { name: "חיפה", pattern: /\bhaifa\b/i },
-  { name: "אשדוד", pattern: /אשדוד/u },
-  { name: "אשקלון", pattern: /אשקלון/u },
-  { name: "נתניה", pattern: /נתניה/u },
-  { name: "חולון", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?חולון(?=$|[^א-ת])/u },
-  { name: "חולון", pattern: /\bholon\b/i },
-  { name: "בת ים", pattern: /בת\s+ים/u },
-  { name: "רמת גן", pattern: /רמת\s+גן/u },
-  { name: "פתח תקווה", pattern: /פתח\s+תקוו[הא]/u },
-  { name: "רחובות", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?רחובות(?=$|[^א-ת])/u },
-  { name: "כפר סבא", pattern: /כפר\s+סבא/u },
-  { name: "הרצליה", pattern: /הרצליה/u },
-  { name: "רעננה", pattern: /רעננה/u },
-  { name: "הוד השרון", pattern: /הוד\s+השרון/u },
-  { name: "גבעתיים", pattern: /גבעתיים/u },
-  { name: "בני ברק", pattern: /בני\s+ברק/u },
-  { name: "לוד", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?לוד(?=$|[^א-ת])/u },
-  { name: "רמלה", pattern: /רמלה/u },
-  { name: "מודיעין", pattern: /מודיעין/u },
-  { name: "ניר דוד", pattern: /ניר\s+דוד/u },
-  { name: "בית השיטה", pattern: /בית\s+השיטה/u },
-  { name: "חמדיה", pattern: /חמדיה/u },
-  { name: "עין הנציב", pattern: /עין\s+הנציב/u },
-  { name: "מנחמיה", pattern: /מנחמיה/u },
-  { name: "בית יוסף", pattern: /בית\s+יוסף/u },
-  { name: "נווה אור", pattern: /נווה\s+אור/u },
-  { name: "דגניה", pattern: /דגניה/u },
-  { name: "יבנאל", pattern: /יבנאל/u },
-  { name: "נצרת", pattern: /נצרת/u },
-  { name: "צמח", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?צמח(?=$|[^א-ת])/u },
-];
-
 function mentionIsNegated(text: string, index: number): boolean {
   return /(?:לא|אינני|איני)\s*(?:גר(?:ה)?\s*)?(?:ב|מ|ל|in\s+)?$/iu.test(
     text.slice(Math.max(0, index - 20), index),
   );
 }
 
-/** A named town outside the service area, from the customer text itself. */
-export function namedOutsideSettlement(text: string): string | null {
-  const normalized = norm(text);
-  for (const place of OUTSIDE_PLACES) {
-    place.pattern.lastIndex = 0;
-    const match = place.pattern.exec(normalized);
-    if (!match || mentionIsNegated(normalized, match.index)) continue;
-    const matchedHebrew = /[\u0590-\u05FF]/.test(match[0]);
-    if (
-      matchedHebrew &&
-      /[\u0590-\u05FF]/.test(place.name) &&
-      !cityOutsideStreet(normalized, place.name)
-    )
-      continue;
-    return place.name;
-  }
+/**
+ * @deprecated Outside-area city lists live in write/phrase prompts only.
+ * Always returns null so code cannot hard-reject Holon/Gush Dan/etc.
+ */
+export function namedOutsideSettlement(_text: string): string | null {
   return null;
 }
 
@@ -493,7 +437,7 @@ const NOT_A_PLACE = new Set([
  */
 export function mentionedReviewSettlement(text: string): string | null {
   if (!text.trim()) return null;
-  if (namedOutsideSettlement(text) || mentionedAllowedSettlement(text)) return null;
+  if (mentionedAllowedSettlement(text)) return null;
   // Only a transport/donation sentence. Bare ב-words such as ביטול or ברורה are not towns.
   if (!donationIntent(text) && !/(?:הובלה|הובלות)/u.test(norm(text))) return null;
   const normalized = norm(text);

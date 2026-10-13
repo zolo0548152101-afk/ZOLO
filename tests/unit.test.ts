@@ -1236,7 +1236,8 @@ test("a bookcase donation in an allowed town is an item, not a recipient named �
     assert.equal(donation.items[0]?.description, "ספרייה");
   }
   assert.equal(details?.type === "details" ? details.settlement : null, "בית שאן");
-  assert.equal(namedOutsideSettlement("שלום, אני רוצה למסור כיסא בנצרת"), "נצרת");
+  // Outside-city lists are prompt-owned — code no longer hard-rejects נצרת.
+  assert.equal(namedOutsideSettlement("שלום, אני רוצה למסור כיסא בנצרת"), null);
 });
 test("general donation preserves opening pickup facts and an explicit condition", () => {
   const context: Context = {
