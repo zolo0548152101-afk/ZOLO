@@ -2061,10 +2061,25 @@ test("claim-guard flags unbacked save claims without rewriting wording", async (
   assert.match(FAULT_REPLY, /תקלה/);
 });
 
-test("named outside towns reject in code, including English, and negation does not", () => {
-  assert.equal(namedOutsideSettlement("אני בטבריה"), "טבריה");
-  assert.equal(namedOutsideSettlement("I live in Tiberias"), "טבריה");
-  assert.equal(namedOutsideSettlement("Tel Aviv please"), "תל אביב");
+test("engine does not import OUTAGE/FAULT customer templates", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const src = readFileSync(
+    join(process.cwd(), "src/application/engine.ts"),
+    "utf8",
+  );
+  assert.equal(
+    /import\s*\{[^}]*\b(?:OUTAGE_REPLY|FAULT_REPLY)\b/.test(src),
+    false,
+  );
+  assert.match(src, /ai_fault_silence/);
+  assert.match(src, /persistence_gap/);
+});
+
+test("outside towns are not hard-rejected in code; allowed towns still parse", () => {
+  assert.equal(namedOutsideSettlement("אני בטבריה"), null);
+  assert.equal(namedOutsideSettlement("I live in Tiberias"), null);
+  assert.equal(namedOutsideSettlement("Tel Aviv please"), null);
   assert.equal(namedOutsideSettlement("לא בטבריה, אני בבית שאן"), null);
   assert.equal(namedOutsideSettlement("רחוב אילת 4"), null);
   assert.equal(mentionedAllowedSettlement("ליד בית שאן"), null);
@@ -2072,7 +2087,8 @@ test("named outside towns reject in code, including English, and negation does n
   assert.equal(mentionedAllowedSettlement("in Beit Shean"), "בית שאן");
   assert.equal(mentionedReviewSettlement("שלום רוצה הובלה בגלבוע"), "גלבוע");
   assert.equal(mentionedReviewSettlement("רוצה למסור ספה בגלבוע"), "גלבוע");
-  assert.equal(mentionedReviewSettlement("רוצה למסור ספה בנצרת"), null);
+  // נצרת is no longer a code hard-outside; may surface as review for the team.
+  assert.equal(mentionedReviewSettlement("רוצה למסור ספה בנצרת"), "נצרת");
   assert.equal(mentionedReviewSettlement("רוצה למסור ספה בבית שאן"), null);
   assert.equal(mentionedReviewSettlement("רחוב הגלבוע 9"), null);
   assert.equal(mentionedReviewSettlement("גר בגלבוע 9 קומה 3"), null);
@@ -2964,6 +2980,39 @@ test("snapshotToolResult reports changed_fields and missing_required", () => {
   assert.equal(snap.request_number, request.number);
   assert.deepEqual(snap.changed_fields, changed);
   assert.ok(snap.missing_required !== undefined);
+  assert.ok(Array.isArray(snap.requested));
+  assert.ok(Array.isArray(snap.applied));
+  assert.ok(Array.isArray(snap.dropped));
+});
+
+test("snapshotToolResult surfaces invalid phone as dropped", () => {
+  const request = sampleRequest();
+  const snap = snapshotToolResult({
+    command: {
+      type: "counterparty",
+      request_number: request.number,
+      phone: "not-a-phone",
+      name: "טל",
+    },
+    before: request,
+    after: request,
+    changed: [],
+    notices: [],
+    phone: request.parties[0]!.phone!,
+    softDrops: [
+      {
+        path: "request_parties.phone:receiver",
+        reason: "invalid_phone",
+        value: "not-a-phone",
+      },
+    ],
+  });
+  assert.equal(snap.ok, true);
+  assert.ok(
+    snap.dropped.some(
+      (d) => d.path === "request_parties.phone:receiver" && d.reason === "invalid_phone",
+    ),
+  );
 });
 
 test("agent final reply schema and claim guard accept tool changed_fields only", () => {
@@ -2977,7 +3026,9 @@ test("agent final reply schema and claim guard accept tool changed_fields only",
       cancelled: false,
       human_handoff: false,
     },
+    persistence_gaps: [],
   });
+  assert.deepEqual(parsed.persistence_gaps, []);
   const ok = verifyClaims(parsed.claims, {
     changedPaths: ["request_parties.name:donor"],
     openedRequestNumber: null,

@@ -1,12 +1,14 @@
 /**
  * False-information guard. Customer WhatsApp wording is always AI-authored.
- * The only fixed customer line code may emit is OUTAGE_REPLY — and only when
- * OpenAI is unreachable after retries (no model available to phrase).
- * Claim-guard failures must re-ask the phrase model (guard_feedback / safe_mode),
- * never substitute a canned Hebrew sentence.
+ * AI failure / outage must never send a code-authored customer line — silence
+ * only (ops alert + human handoff). Claim-guard failures re-ask the phrase
+ * model (guard_feedback / safe_mode), never substitute a canned Hebrew sentence.
  */
 
-/** Neutral line when OpenAI is unreachable after retries. */
+/**
+ * @deprecated Never send to customers. Ops / localization legacy only.
+ * AI down = silence, not this string.
+ */
 export const OUTAGE_REPLY =
   "יש תקלה זמנית במערכת. נחזור אליך בהקדם.";
 

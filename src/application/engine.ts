@@ -22,7 +22,11 @@ import {
   type Log,
   type Notice,
 } from "../domain/types.js";
-import { snapshotToolResult, type AgentToolResult } from "./agent-tools.js";
+import {
+  snapshotToolResult,
+  type AgentToolResult,
+  type PersistenceGap,
+} from "./agent-tools.js";
 import {
   isStatus,
   photoGate,
@@ -42,8 +46,6 @@ import {
   draftScheduleProposal,
 } from "../domain/notices.js";
 import {
-  OUTAGE_REPLY,
-  FAULT_REPLY,
   isSelfIntroText,
   replyClaimsSaveWithoutWrites,
   replyDeniesQueuedNotice,
@@ -52,16 +54,15 @@ import {
   emptyClaims,
   type ReplyClaims,
 } from "../domain/ai-guards.js";
+
+/** Pending outbox placeholder — never sent; cancelled if phrase never produces AI text. */
+const REPLY_PLACEHOLDER = "\u200b";
 import { diffChangedFields, type ChangedField } from "../domain/field-map.js";
 import {
   type ActionResultFact,
   type BoundaryCode,
   type NoticeFact,
 } from "../domain/turn-facts.js";
-import {
-  conversationLanguage,
-  localizeCustomer,
-} from "../domain/customer-language.js";
 import {
   insertTurnLog,
   messageIdsForTurn,
@@ -583,6 +584,9 @@ export class Engine {
                 request_status: null,
                 missing_required: null,
                 notices_queued: 0,
+                requested: [],
+                applied: [],
+                dropped: [],
                 error: "already_processed",
               },
             };
@@ -598,6 +602,7 @@ export class Engine {
                 ) ??
                 null,
             );
+          const beforeSearch = structuredClone(ctx.active_search ?? null);
           await c.query("SAVEPOINT agent_tool");
           try {
             const result: Outcome = await this.commands.apply(c, ctx, command);
@@ -649,7 +654,7 @@ export class Engine {
             const changed = diffChangedFields({
               beforeRequest: before,
               afterRequest: after,
-              beforeSearch: null,
+              beforeSearch,
               afterSearch: afterCtx.active_search ?? null,
             });
             return {
@@ -664,6 +669,8 @@ export class Engine {
                 notices: result.notices,
                 humanReason: result.humanReason,
                 phone: ctx.conversation.phone,
+                afterSearch: afterCtx.active_search ?? null,
+                softDrops: result.drops,
               }),
             };
           } catch (e) {
@@ -705,6 +712,9 @@ export class Engine {
             request_status: null,
             missing_required: null,
             notices_queued: 0,
+            requested: [],
+            applied: [],
+            dropped: [],
             error: message,
           },
         };
@@ -787,10 +797,19 @@ export class Engine {
       command: result.command.type,
       ok: result.ok,
       detail: result.error
-        ? { error: result.error }
+        ? { error: result.error, dropped: result.dropped }
         : result.request_number != null
-          ? { request_number: result.request_number }
-          : undefined,
+          ? { request_number: result.request_number, dropped: result.dropped }
+          : result.dropped.length
+            ? { dropped: result.dropped }
+            : undefined,
+    }));
+    const toolAcks = allToolResults.map((result) => ({
+      command: result.command.type,
+      ok: result.ok,
+      requested: result.requested,
+      applied: result.applied,
+      dropped: result.dropped,
     }));
     const phraseChanged =
       agent.changedFields.length > 0 ? agent.changedFields : changedFromTools;
@@ -799,22 +818,114 @@ export class Engine {
       commands: phraseCommands,
       results: phraseResults,
       changed: phraseChanged,
-      boundary: null,
+      boundary: null as null,
       notices: phraseNotices,
-      fallback: agent.text,
+      tool_acks: toolAcks,
     };
 
     let claims = emptyClaims();
-    let replyText = agent.text;
+    let replyText = "";
     let rejected = false;
     let rejectedClaims: string[] = [];
+    let persistenceGaps: PersistenceGap[] = [];
     try {
-      const phrased = await this.phraseUntilClaimsOk(
+      let phrased = await this.phraseUntilClaimsOk(
         ctxAfterTools,
         phraseInput,
         claimFacts,
         phraseNotices.length,
       );
+      persistenceGaps = phrased.persistence_gaps;
+
+      // One write re-pass when phrase finds history facts missing from DB.
+      if (persistenceGaps.length > 0) {
+        await this.s.transaction(async (c) => {
+          const ctx = await this.s.context(id, c);
+          await this.s.event(c, ctx.message, "system", "persistence_gap", {
+            gaps: persistenceGaps,
+          });
+        });
+        const unresolvedDrops = allToolResults.flatMap((r) => r.dropped);
+        try {
+          const gapWrite = await this.ai.agentTurn(await this.s.context(id), {
+            rules,
+            executeTool,
+            maxToolCalls: 5,
+            persistenceGapFeedback: [
+              ...persistenceGaps,
+              ...unresolvedDrops.map((d) => ({
+                path: d.path,
+                evidence: `tool_ack dropped: ${d.reason}`,
+                missing_in_state: String(d.value ?? d.reason),
+              })),
+            ],
+          });
+          for (const field of gapWrite.changedFields) {
+            if (
+              !changedFromTools.some(
+                (existing) =>
+                  existing.table === field.table &&
+                  existing.column === field.column &&
+                  existing.role === field.role,
+              )
+            )
+              changedFromTools.push(field);
+          }
+          agent = {
+            ...agent,
+            metadata: {
+              ...agent.metadata,
+              gap_write: gapWrite.metadata,
+            },
+          };
+        } catch (e) {
+          if (!lastAiAttempt && !(e instanceof AppError))
+            throw new RetryableError("openai_retry");
+          throw e;
+        }
+        const ctxAfterGap = await this.s.context(id);
+        const gapChangedPaths = changedFromTools.map((field) =>
+          field.role
+            ? `${field.table}.${field.column}:${field.role}`
+            : `${field.table}.${field.column}`,
+        );
+        claimFacts.changedPaths = gapChangedPaths;
+        claimFacts.knownRequestNumbers = ctxAfterGap.requests.map((r) => r.number);
+        const gapToolAcks = (toolResults.length ? toolResults : []).map(
+          (result) => ({
+            command: result.command.type,
+            ok: result.ok,
+            requested: result.requested,
+            applied: result.applied,
+            dropped: result.dropped,
+          }),
+        );
+        phrased = await this.phraseUntilClaimsOk(
+          ctxAfterGap,
+          {
+            ...phraseInput,
+            commands:
+              executedCommands.length > 0 ? executedCommands : phraseCommands,
+            results: (toolResults.length ? toolResults : allToolResults).map(
+              (result) => ({
+                command: result.command.type,
+                ok: result.ok,
+                detail: result.error
+                  ? { error: result.error, dropped: result.dropped }
+                  : result.dropped.length
+                    ? { dropped: result.dropped }
+                    : undefined,
+              }),
+            ),
+            changed: changedFromTools,
+            tool_acks: gapToolAcks,
+          },
+          claimFacts,
+          phraseNotices.length,
+        );
+        persistenceGaps = phrased.persistence_gaps;
+      }
+
       claims = phrased.claims;
       replyText = phrased.text;
       rejected = phrased.rejected;
@@ -823,17 +934,25 @@ export class Engine {
         ...agent,
         text: replyText,
         claims,
-        metadata: { ...agent.metadata, ...phrased.metadata },
+        persistence_gaps: persistenceGaps,
+        metadata: {
+          ...agent.metadata,
+          ...phrased.metadata,
+          persistence_gaps: persistenceGaps,
+        },
       };
       if (phrased.escalateHuman && !humanReason)
         humanReason = "claim_guard_exhausted";
-    } catch {
-      // Model unreachable — only then may code emit the outage line.
-      claims = emptyClaims();
-      replyText = agent.text?.trim() || OUTAGE_REPLY;
-      rejected = true;
-      rejectedClaims = ["phrase_unreachable"];
-      if (!humanReason) humanReason = "ai_fault_after_retries";
+      if (!replyText.trim()) {
+        await this.finishFault(id, new AppError("empty_phrase"));
+        return;
+      }
+    } catch (e) {
+      // AI unreachable / disabled — silence: no customer WhatsApp text.
+      if (!lastAiAttempt && !(e instanceof AppError))
+        throw new RetryableError("openai_retry");
+      await this.finishFault(id, e);
+      return;
     }
 
     const planCommands =
@@ -1002,39 +1121,19 @@ export class Engine {
     );
   }
 
-  private async consecutiveReplyCount(
-    conversationId: string,
-    beforeSeq: string,
-    match: (reply: string) => boolean,
-    c: { query: Store["pool"]["query"] } = this.s.pool,
-  ): Promise<number> {
-    const rows = await c.query<{ reply: string | null }>(
-      `SELECT reply FROM messages
-        WHERE conversation_id=$1 AND seq<$2 AND processed_at IS NOT NULL
-          AND coalesce(error_code,'') NOT LIKE 'coalesced_into:%'
-          AND coalesce(error_code,'') NOT LIKE 'superseded_by:%'
-        ORDER BY seq DESC LIMIT 8`,
-      [conversationId, beforeSeq],
-    );
-    let count = 0;
-    for (const row of rows.rows) {
-      if (match((row.reply ?? "").trim())) count += 1;
-      else break;
-    }
-    return count;
-  }
-
   private async faultCount(
     conversationId: string,
     beforeSeq: string,
     c: { query: Store["pool"]["query"] } = this.s.pool,
   ): Promise<number> {
-    return this.consecutiveReplyCount(
-      conversationId,
-      beforeSeq,
-      (reply) => reply === FAULT_REPLY,
-      c,
+    // Faults are silent now (no FAULT_REPLY text) — count escalated failures.
+    const rows = await c.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM messages
+        WHERE conversation_id=$1 AND seq < $2
+          AND error_code='openai_failure_escalated'`,
+      [conversationId, beforeSeq],
     );
+    return Number(rows.rows[0]?.n ?? 0);
   }
 
   /**
@@ -1151,15 +1250,13 @@ export class Engine {
     await this.s.transaction(async (c) => {
       const ctx = await this.s.context(id, c, true);
       if (ctx.message.processed_at) return;
-      const phone = ctx.conversation.phone;
       const prior = await this.faultCount(ctx.conversation.id, ctx.message.seq, c);
       const next = prior + 1;
       await this.s.event(c, ctx.message, "system", "ai_fault", {
         code: errorCode(error),
         fault_count: next,
       });
-      // The first AI/API failure goes to a human, even with no open request.
-      // It does not count as unclear.
+      // AI failure → human + ops alert; never send code-authored customer text.
       const open =
         ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
         ctx.requests.find(
@@ -1171,14 +1268,12 @@ export class Engine {
         open.human_reason = "ai_fault_after_retries";
         await this.s.save(c, open);
       }
-      await this.alert(c, ctx, "ai_fault_after_retries", FAULT_REPLY, open);
-      const faultReply = this.voiced(ctx, FAULT_REPLY);
-      await this.s.outbound(
-        c,
-        ctx.message,
-        { phone, text: faultReply },
-        `reply:${id}`,
-        open?.id ?? null,
+      await this.alert(c, ctx, "ai_fault_after_retries", null, open);
+      // Cancel any pending customer reply — silence, not OUTAGE/FAULT templates.
+      await c.query(
+        `UPDATE outbox SET state='cancelled',format_state='ready',error_code='ai_fault_silence'
+          WHERE message_id=$1 AND dedupe_key=$2 AND state='pending'`,
+        [id, `reply:${id}`],
       );
       await c.query(
         "INSERT INTO command_results(message_id,command,result) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
@@ -1186,15 +1281,16 @@ export class Engine {
           id,
           JSON.stringify({ fault: true, code: errorCode(error) }),
           JSON.stringify({
-            reply: faultReply,
+            reply: null,
             intent: "fault",
             code: errorCode(error),
+            silence: true,
           }),
         ],
       );
       await c.query(
-        "UPDATE messages SET processed_at=clock_timestamp(),reply=$2,error_code=$3 WHERE id=$1 AND processed_at IS NULL",
-        [id, faultReply, "openai_failure_escalated"],
+        "UPDATE messages SET processed_at=clock_timestamp(),reply=NULL,error_code=$2 WHERE id=$1 AND processed_at IS NULL",
+        [id, "openai_failure_escalated"],
       );
       await c.query(
         "UPDATE conversations SET mode='human',version=version+1 WHERE id=$1",
@@ -1203,14 +1299,10 @@ export class Engine {
     });
     await this.auditTurn(id, {
       fate: "failed",
-      fate_detail: { path: "finishFault" },
+      fate_detail: { path: "finishFault", silence: true },
       error_code: "openai_failure_escalated",
       intent: "fault",
     });
-  }
-
-  private voiced(ctx: Context, text: string): string {
-    return localizeCustomer(text, conversationLanguage(ctx));
   }
 
   private evaluateReplyClaims(
@@ -1230,7 +1322,7 @@ export class Engine {
   /**
    * Phrase until claims pass. Never substitutes a canned customer sentence —
    * on repeated claim failure, safe_mode / human_handoff re-ask the model.
-   * Only OUTAGE_REPLY when the model is unreachable.
+   * Empty / unreachable phrase → caller silences (no code-authored WhatsApp).
    */
   private async phraseUntilClaimsOk(
     ctx: Context,
@@ -1240,6 +1332,7 @@ export class Engine {
   ): Promise<{
     text: string;
     claims: ReplyClaims;
+    persistence_gaps: PersistenceGap[];
     rejected: boolean;
     rejectedClaims: string[];
     metadata: Record<string, unknown>;
@@ -1300,23 +1393,14 @@ export class Engine {
       );
     }
     const text = composed.text.trim();
-    if (!text) {
-      return {
-        text: OUTAGE_REPLY,
-        claims: emptyClaims(),
-        rejected: true,
-        rejectedClaims: check.rejected,
-        metadata: meta,
-        escalateHuman: true,
-      };
-    }
     return {
       text,
       claims: check.ok ? composed.claims : emptyClaims(),
-      rejected: !check.ok,
-      rejectedClaims: check.ok ? [] : check.rejected,
+      persistence_gaps: composed.persistence_gaps ?? [],
+      rejected: !check.ok || !text,
+      rejectedClaims: check.ok ? (text ? [] : ["empty_phrase"]) : check.rejected,
       metadata: meta,
-      escalateHuman: escalateHuman || !check.ok,
+      escalateHuman: escalateHuman || !check.ok || !text,
     };
   }
 
@@ -2083,8 +2167,8 @@ export class Engine {
       void protectedReply;
       if (reason) await this.alert(c, ctx, reason, reply, request);
       // Placeholder until the reply manager writes the real text (pending
-      // format_state — not customer-visible). Must be truthy so finish() runs.
-      if (!reply?.trim()) reply = OUTAGE_REPLY;
+      // format_state — not customer-visible). Never a sendable canned line.
+      if (!reply?.trim()) reply = REPLY_PLACEHOLDER;
       let customerOutboxId: string | null = null;
       customerOutboxId = await this.s.outbound(
         c,
@@ -2197,11 +2281,12 @@ export class Engine {
       } else {
       const ctx = await this.s.context(id);
       const rules = await this.s.loadRulesState(this.s.pool);
-      let text = OUTAGE_REPLY;
+      let text = "";
       let rejected = false;
       let rejectedClaims: string[] = [];
       let replyMeta: Record<string, unknown> | null = null;
       let claims: ReplyClaims = emptyClaims();
+      let phraseFailed = false;
       const changedPaths = (committed.changedFields ?? []).map((field) =>
         field.role
           ? `${field.table}.${field.column}:${field.role}`
@@ -2245,7 +2330,6 @@ export class Engine {
             }
           ).turnBoundary ?? null,
         notices: [] as NoticeFact[],
-        fallback: OUTAGE_REPLY,
       };
       try {
         const metaRow = await this.s.pool.query<{
@@ -2311,9 +2395,8 @@ export class Engine {
             noticesFromTools ||
             primaryContactQueued;
           claimFacts.requireContactClaim = primaryContactQueued;
-          // Phrase already claim-checked in finishWithAgentTools. Trust that
-          // AI text — never replace with a canned line (conv#10 overclaim).
-          if (rejected && !text.trim()) text = OUTAGE_REPLY;
+          // Phrase already claim-checked in finishWithAgentTools. Trust AI text.
+          if (!text.trim()) phraseFailed = true;
           replyMeta = {
             provider: "openai_responses_agent",
             prompt_id: agentMeta.prompt_id ?? null,
@@ -2333,6 +2416,7 @@ export class Engine {
           rejected = phrased.rejected;
           rejectedClaims = phrased.rejectedClaims;
           text = phrased.text;
+          if (!text.trim()) phraseFailed = true;
         }
       } catch (e) {
         this.log.error({
@@ -2340,7 +2424,47 @@ export class Engine {
           outbox_id: committed.customerOutboxId,
           stage: "customer_reply",
         });
-        text = OUTAGE_REPLY;
+        phraseFailed = true;
+      }
+      if (phraseFailed) {
+        await this.s.transaction(async (c) => {
+          await c.query(
+            `UPDATE outbox SET state='cancelled',format_state='ready',error_code='ai_fault_silence'
+              WHERE id=$1 AND state='pending'`,
+            [committed.customerOutboxId],
+          );
+          await c.query(
+            "UPDATE messages SET reply=NULL,error_code=$2 WHERE id=$1",
+            [id, "openai_failure_escalated"],
+          );
+          const open =
+            ctx.requests.find((r) => r.id === committed.requestId) ??
+            ctx.requests.find(
+              (r) =>
+                !["coordinated", "closed", "cancelled", "rejected"].includes(
+                  r.status,
+                ),
+            ) ??
+            null;
+          if (open && open.status !== "human") {
+            open.status = "human";
+            open.human_reason = "ai_fault_after_retries";
+            await this.s.save(c, open);
+          }
+          await this.alert(c, ctx, "ai_fault_after_retries", null, open);
+          await this.s.event(c, ctx.message, "system", "ai_fault", {
+            code: "phrase_unreachable_or_empty",
+            silence: true,
+          });
+        });
+        auditedReply = null;
+        await this.auditTurn(id, {
+          fate: "failed",
+          fate_detail: { path: "finish_phrase_silence" },
+          error_code: "openai_failure_escalated",
+          intent: "fault",
+        });
+        return;
       }
       const priorOutbox = await this.s.pool.query<{ n: number; intro: number }>(
         `SELECT count(*)::int AS n,

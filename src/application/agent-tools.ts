@@ -133,6 +133,12 @@ export function parseAgentToolCall(
   return commandSchema.parse(object);
 }
 
+export interface DroppedField {
+  path: string;
+  reason: string;
+  value?: unknown;
+}
+
 export interface AgentToolResult {
   ok: boolean;
   command: Command;
@@ -143,6 +149,225 @@ export interface AgentToolResult {
   notices_queued: number;
   human_reason?: string;
   error?: string;
+  /** Paths the model asked to write (write→DB ack). */
+  requested: string[];
+  /** Paths that appear in changed_fields after save. */
+  applied: string[];
+  /** Requested but not applied (or cleared), with reason codes. */
+  dropped: DroppedField[];
+}
+
+function pathOf(field: ChangedField): string {
+  return field.role
+    ? `${field.table}.${field.column}:${field.role}`
+    : `${field.table}.${field.column}`;
+}
+
+function partyRole(command: Command, after: Request | null): string | null {
+  if (command.type === "details" && command.role) return command.role;
+  if (!after) return null;
+  return after.parties[0]?.role ?? null;
+}
+
+/** Paths the command intended to write (best-effort from tool args). */
+export function requestedPathsFromCommand(
+  command: Command,
+  after: Request | null = null,
+): { path: string; value: unknown }[] {
+  const out: { path: string; value: unknown }[] = [];
+  const push = (path: string, value: unknown) => {
+    if (value === null || value === undefined || value === "") return;
+    out.push({ path, value });
+  };
+  if (command.type === "details") {
+    const role = command.role ?? partyRole(command, after) ?? "donor";
+    push(`request_parties.name:${role}`, command.name);
+    push(`request_parties.settlement:${role}`, command.settlement);
+    push(`request_parties.address:${role}`, command.address);
+    if (command.floor !== null && command.floor !== undefined)
+      push(`request_parties.floor:${role}`, command.floor);
+    push("requests.preferred_time", command.preferred_time);
+    push("requests.earliest_run_date", command.earliest_run_date);
+  } else if (command.type === "seek") {
+    push("searches.kind", command.kind);
+    push("searches.settlement", command.settlement);
+    push("searches.address", command.address);
+    if (command.floor !== null && command.floor !== undefined)
+      push("searches.floor", command.floor);
+    push("searches.name", command.name);
+  } else if (command.type === "item_facts") {
+    if (command.items?.length) {
+      push("request_items.kind", command.items.map((i) => i.kind).join(","));
+      push(
+        "request_items.description",
+        command.items.map((i) => i.description).join(","),
+      );
+    }
+    if (command.free !== null) push("request_items.free", command.free);
+    if (command.working !== null) push("request_items.working", command.working);
+    if (command.needs_disassembly !== null)
+      push("request_items.needs_disassembly", command.needs_disassembly);
+    if (command.wardrobe_small_whole !== null)
+      push("request_items.wardrobe_small_whole", command.wardrobe_small_whole);
+    if (command.oven_type) push("request_items.oven_type", command.oven_type);
+    if (command.evacuation)
+      push("request_items.evacuation", command.evacuation);
+  } else if (command.type === "counterparty") {
+    push("request_parties.name:receiver", command.name);
+    push("request_parties.phone:receiver", command.phone);
+  } else if (command.type === "donate" || command.type === "receive_from_donor") {
+    if (command.items?.length) {
+      push("request_items.kind", command.items.map((i) => i.kind).join(","));
+      push(
+        "request_items.description",
+        command.items.map((i) => i.description).join(","),
+      );
+    }
+    if (command.type === "donate") {
+      push("request_parties.name:receiver", command.counterparty_name);
+      push("request_parties.phone:receiver", command.counterparty_phone);
+    }
+  } else if (command.type === "escalate") {
+    push("requests.human_reason", command.reason);
+    push("requests.status", "human");
+  }
+  return out;
+}
+
+function valuePresentInState(
+  path: string,
+  value: unknown,
+  after: Request | null,
+  afterSearch: {
+    kind?: string;
+    settlement?: string | null;
+    address?: string | null;
+    floor?: number | null;
+    name?: string | null;
+  } | null,
+): boolean {
+  if (!after && !afterSearch) return false;
+  const [tableCol, role] = path.split(":");
+  const [table, column] = (tableCol ?? "").split(".");
+  if (table === "searches" && afterSearch) {
+    const current = (afterSearch as Record<string, unknown>)[column ?? ""];
+    return current != null && String(current) === String(value);
+  }
+  if (!after) return false;
+  if (table === "requests") {
+    const current = (after as unknown as Record<string, unknown>)[column ?? ""];
+    return current != null && String(current) === String(value);
+  }
+  if (table === "request_parties") {
+    const party = after.parties.find((p) => !role || p.role === role);
+    if (!party) return false;
+    if (column === "phone")
+      return party.phone != null && String(party.phone) === String(value);
+    const current = (party as unknown as Record<string, unknown>)[column ?? ""];
+    return current != null && String(current) === String(value);
+  }
+  if (table === "request_items") {
+    if (column === "kind" || column === "description")
+      return after.items.some((item) =>
+        String(value)
+          .split(",")
+          .some((part) =>
+            column === "kind"
+              ? item.kind === part
+              : item.description === part,
+          ),
+      );
+    return after.items.some((item) => {
+      const current = (item as unknown as Record<string, unknown>)[column ?? ""];
+      return current != null && String(current) === String(value);
+    });
+  }
+  return false;
+}
+
+export function buildWriteAck(input: {
+  command: Command;
+  changed: ChangedField[];
+  after: Request | null;
+  before: Request | null;
+  afterSearch?: {
+    kind?: string;
+    settlement?: string | null;
+    address?: string | null;
+    floor?: number | null;
+    name?: string | null;
+  } | null;
+  softDrops?: DroppedField[];
+  error?: string;
+}): {
+  requested: string[];
+  applied: string[];
+  dropped: DroppedField[];
+} {
+  const requestedEntries = requestedPathsFromCommand(input.command, input.after);
+  const requested = requestedEntries.map((entry) => entry.path);
+  const applied = input.changed.map(pathOf);
+  const appliedSet = new Set(applied);
+  const dropped: DroppedField[] = [...(input.softDrops ?? [])];
+  const droppedPaths = new Set(dropped.map((d) => d.path));
+
+  if (input.error) {
+    for (const entry of requestedEntries) {
+      if (droppedPaths.has(entry.path)) continue;
+      dropped.push({
+        path: entry.path,
+        reason: input.error,
+        value: entry.value,
+      });
+      droppedPaths.add(entry.path);
+    }
+  } else {
+    for (const entry of requestedEntries) {
+      if (appliedSet.has(entry.path) || droppedPaths.has(entry.path)) continue;
+      if (
+        valuePresentInState(
+          entry.path,
+          entry.value,
+          input.after,
+          input.afterSearch ?? null,
+        )
+      )
+        continue;
+      dropped.push({
+        path: entry.path,
+        reason: "not_persisted",
+        value: entry.value,
+      });
+      droppedPaths.add(entry.path);
+    }
+  }
+
+  // Floor cleared on address/settlement change without an explicit floor write.
+  if (input.command.type === "details" && input.before && input.after) {
+    const role =
+      input.command.role ??
+      input.after.parties.find((p) => p.phone)?.role ??
+      "donor";
+    const beforeParty = input.before.parties.find((p) => p.role === role);
+    const afterParty = input.after.parties.find((p) => p.role === role);
+    if (
+      beforeParty?.floor != null &&
+      afterParty &&
+      afterParty.floor == null &&
+      (input.command.floor === null || input.command.floor === undefined)
+    ) {
+      const path = `request_parties.floor:${role}`;
+      if (!droppedPaths.has(path)) {
+        dropped.push({
+          path,
+          reason: "floor_cleared_on_address_change",
+          value: beforeParty.floor,
+        });
+      }
+    }
+  }
+
+  return { requested, applied, dropped };
 }
 
 export function snapshotToolResult(input: {
@@ -154,8 +379,25 @@ export function snapshotToolResult(input: {
   humanReason?: string;
   phone: string;
   error?: string;
+  afterSearch?: {
+    kind?: string;
+    settlement?: string | null;
+    address?: string | null;
+    floor?: number | null;
+    name?: string | null;
+  } | null;
+  softDrops?: DroppedField[];
 }): AgentToolResult {
   const after = input.after;
+  const ack = buildWriteAck({
+    command: input.command,
+    changed: input.changed,
+    after,
+    before: input.before,
+    afterSearch: input.afterSearch,
+    softDrops: input.softDrops,
+    error: input.error,
+  });
   return {
     ok: !input.error,
     command: input.command,
@@ -166,8 +408,17 @@ export function snapshotToolResult(input: {
     notices_queued: input.notices.length,
     human_reason: input.humanReason,
     error: input.error,
+    requested: ack.requested,
+    applied: ack.applied,
+    dropped: ack.dropped,
   };
 }
+
+export const persistenceGapSchema = z.strictObject({
+  path: z.string().trim().min(1).max(120),
+  evidence: z.string().trim().min(1).max(500),
+  missing_in_state: z.string().trim().min(1).max(500),
+});
 
 export const agentFinalReplySchema = z.strictObject({
   reply: z.string().trim().min(1).max(4000),
@@ -179,6 +430,8 @@ export const agentFinalReplySchema = z.strictObject({
     cancelled: z.boolean(),
     human_handoff: z.boolean(),
   }),
+  persistence_gaps: z.array(persistenceGapSchema).max(20),
 });
 
+export type PersistenceGap = z.infer<typeof persistenceGapSchema>;
 export type AgentFinalReply = z.infer<typeof agentFinalReplySchema>;

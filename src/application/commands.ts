@@ -34,11 +34,19 @@ import {
   draftCounterpartyVerification,
   draftCounterpartyCorrection,
 } from "../domain/notices.js";
+export interface SoftDrop {
+  path: string;
+  reason: string;
+  value?: unknown;
+}
+
 export interface Outcome {
   reply: string | null;
   request: Request | null;
   notices: Notice[];
   humanReason?: string;
+  /** Fields the model asked to write that were rejected without failing the whole tool. */
+  drops?: SoftDrop[];
 }
 
 /**
@@ -469,7 +477,13 @@ export class Commands {
     const output = (
       _reply: string | null,
       request: Request | null = null,
-    ): Outcome => ({ reply: null, request, notices });
+      drops?: SoftDrop[],
+    ): Outcome => ({
+      reply: null,
+      request,
+      notices,
+      ...(drops?.length ? { drops } : {}),
+    });
     const invalidateProposal = (request: Request) => {
       request.proposed_run_date = null;
       for (const party of request.parties) {
@@ -586,10 +600,17 @@ export class Commands {
       let settlement = cmd.settlement ?? null;
       if (settlement) {
         const reg = await this.s.region(c, settlement);
-        if (reg.decision === "outside") return output(null);
-        if (reg.decision === "review") {
+        if (reg.decision === "outside") {
+          settlement = await this.s.ensureLocation(c, reg.name, "outside");
+        } else if (reg.decision === "review") {
           settlement = await this.s.ensureLocation(c, reg.name, "review");
-        } else settlement = reg.name;
+        } else {
+          settlement = await this.s.ensureLocation(
+            c,
+            reg.name || settlement,
+            "allowed",
+          );
+        }
       }
       const floor = cmd.floor ?? null;
       const address = cmd.address ?? null;
@@ -1476,10 +1497,12 @@ export class Commands {
     }
     mutable(r);
     let distanceReviewThisTurn = false;
+    const softDrops: SoftDrop[] = [];
     if (cmd.type === "details") {
       if (cmd.name || cmd.settlement || cmd.address || cmd.floor !== null)
         invalidateProposal(r);
       const p = ownParty(r, phone, cmd.role ?? undefined);
+      const role = p.role;
       const settlementIsTheStreet =
         Boolean(cmd.settlement) &&
         Boolean(cmd.address) &&
@@ -1487,8 +1510,20 @@ export class Commands {
         (cmd.address ?? "").includes(cmd.settlement ?? "");
       const prevSettlement = p.settlement;
       const prevAddress = p.address;
-      if (cmd.settlement && !settlementIsTheStreet) {
-        // Always persist what Action wrote. Outside/review messaging is prompt-owned.
+      if (cmd.settlement && settlementIsTheStreet) {
+        // Model put the street token in settlement (״רחוב אילת״). Keep/restore town.
+        if (prevSettlement) {
+          p.settlement = prevSettlement;
+        } else {
+          p.settlement = await this.s.ensureLocation(c, "בית שאן", "allowed");
+        }
+        softDrops.push({
+          path: `request_parties.settlement:${role}`,
+          reason: "settlement_was_street_token",
+          value: cmd.settlement,
+        });
+      } else if (cmd.settlement) {
+        // Always ensureLocation so FK cannot roll back the whole details write.
         const reg = await this.s.region(c, cmd.settlement);
         if (reg.decision === "review") {
           p.settlement = await this.s.ensureLocation(c, reg.name, "review");
@@ -1508,14 +1543,24 @@ export class Commands {
           r.needs_distance_check = false;
           r.team_notes = stripDistanceCheckNotes(r.team_notes);
         } else {
-          p.settlement = reg.name || cmd.settlement;
+          p.settlement = await this.s.ensureLocation(
+            c,
+            reg.name || cmd.settlement,
+            "allowed",
+          );
           // Correcting to an allowed town clears a prior Holon-style review flag.
           r.needs_distance_check = false;
           r.team_notes = stripDistanceCheckNotes(r.team_notes);
         }
       }
       if (cmd.name) {
-        if (this.assignPersonName(p, cmd.name) && r.represents_both_parties)
+        if (!usablePersonName(cmd.name)) {
+          softDrops.push({
+            path: `request_parties.name:${role}`,
+            reason: "invalid_name",
+            value: cmd.name,
+          });
+        } else if (this.assignPersonName(p, cmd.name) && r.represents_both_parties)
           for (const samePerson of r.parties.filter((entry) => entry.phone === phone))
             samePerson.name = p.name;
       }
@@ -1532,13 +1577,26 @@ export class Commands {
           !isHouseNumberOnlyAddressChange(prevAddress, cmd.address))
       )
         p.floor = null;
-      if (cmd.preferred_time && validTransportPreference(cmd.preferred_time))
-        r.preferred_time = cmd.preferred_time;
+      if (cmd.preferred_time) {
+        if (validTransportPreference(cmd.preferred_time))
+          r.preferred_time = cmd.preferred_time;
+        else
+          softDrops.push({
+            path: "requests.preferred_time",
+            reason: "invalid_preferred_time",
+            value: cmd.preferred_time,
+          });
+      }
       // AI-parsed customer calendar day (YYYY-MM-DD) — code does not parse Hebrew dates.
       if (cmd.earliest_run_date) {
         const day = cmd.earliest_run_date.trim().slice(0, 10);
-        if (/^\d{4}-\d{2}-\d{2}$/.test(day))
-          r.earliest_run_date = day;
+        if (/^\d{4}-\d{2}-\d{2}$/.test(day)) r.earliest_run_date = day;
+        else
+          softDrops.push({
+            path: "requests.earliest_run_date",
+            reason: "invalid_date",
+            value: cmd.earliest_run_date,
+          });
       }
     } else if (cmd.type === "item_facts") {
       invalidateProposal(r);
@@ -1548,16 +1606,29 @@ export class Commands {
         .filter(Boolean)
         .join(", ");
       // Apply AI items directly — replace-vs-add / furniture-count are prompt-only.
+      const mergeItemFacts = (previous: Item, next: Item): Item => {
+        const merged = { ...previous, ...next };
+        if (next.free === null && previous.free !== null) merged.free = previous.free;
+        if (next.working === null && previous.working !== null)
+          merged.working = previous.working;
+        if (next.needs_disassembly === null && previous.needs_disassembly !== null)
+          merged.needs_disassembly = previous.needs_disassembly;
+        if (
+          next.wardrobe_small_whole === null &&
+          previous.wardrobe_small_whole !== null
+        )
+          merged.wardrobe_small_whole = previous.wardrobe_small_whole;
+        if (next.oven_type === null && previous.oven_type !== null)
+          merged.oven_type = previous.oven_type;
+        if (next.evacuation === null && previous.evacuation !== null)
+          merged.evacuation = previous.evacuation;
+        return merged;
+      };
       if (cmd.items) {
         const incoming = cmd.items.map((i, index) => {
           const previous = r.items[index];
           const next = { ...asItem(i), ...i };
-          if (previous) {
-            if (next.free === null && previous.free !== null) next.free = previous.free;
-            if (next.working === null && previous.working !== null)
-              next.working = previous.working;
-          }
-          return next;
+          return previous ? mergeItemFacts(previous, next) : next;
         });
         // Partial fact update (e.g. only wardrobe + needs_disassembly) must not
         // wipe a sibling table_set that donate just saved in this/open request.
@@ -1571,12 +1642,7 @@ export class Commands {
           for (const next of incoming) {
             const idx = r.items.findIndex((item) => item.kind === next.kind);
             if (idx < 0) continue;
-            const previous = r.items[idx]!;
-            const merged = { ...previous, ...next };
-            if (next.free === null && previous.free !== null) merged.free = previous.free;
-            if (next.working === null && previous.working !== null)
-              merged.working = previous.working;
-            r.items[idx] = merged;
+            r.items[idx] = mergeItemFacts(r.items[idx]!, next);
           }
         } else {
           r.items = incoming;
@@ -1590,10 +1656,25 @@ export class Commands {
           i.needs_disassembly = cmd.needs_disassembly;
         if (i.kind === "wardrobe" && cmd.wardrobe_small_whole !== null)
           i.wardrobe_small_whole = cmd.wardrobe_small_whole;
-        if (appliance(i) && cmd.needs_disassembly === null)
+        // Only default appliance disassembly when never set before.
+        if (
+          appliance(i) &&
+          cmd.needs_disassembly === null &&
+          i.needs_disassembly === null
+        )
           i.needs_disassembly = false;
         if (i.kind === "oven" && cmd.oven_type) i.oven_type = cmd.oven_type;
         if (cmd.evacuation) i.evacuation = cmd.evacuation;
+      }
+      if (
+        cmd.wardrobe_small_whole !== null &&
+        !r.items.some((item) => item.kind === "wardrobe")
+      ) {
+        softDrops.push({
+          path: "request_items.wardrobe_small_whole",
+          reason: "not_wardrobe",
+          value: cmd.wardrobe_small_whole,
+        });
       }
       // itemError / evacuation policy are prompt-owned — persist facts as written.
       void itemError(r.items, r.photo_ids.length > 0);
@@ -1635,9 +1716,14 @@ export class Commands {
       } else {
         const targetPhone = contactableCounterpartyPhone(this.s, cmd.phone);
         if (!targetPhone) {
-          // Outside allowlist — keep name only; never attach the unusable phone.
+          // Invalid phone format — keep name only; surface drop for write ack.
+          softDrops.push({
+            path: `request_parties.phone:${role}`,
+            reason: "invalid_phone",
+            value: cmd.phone,
+          });
           const nameOnly =
-            cmd.name ??
+            usablePersonName(cmd.name) ??
             ctx.conversation.pending_counterparty_name ??
             other?.name ??
             null;
@@ -1652,6 +1738,12 @@ export class Commands {
             for (const item of r.items)
               if (item.working === null) item.working = true;
             invalidateProposal(r);
+          } else if (cmd.name) {
+            softDrops.push({
+              path: `request_parties.name:${role}`,
+              reason: "invalid_name",
+              value: cmd.name,
+            });
           }
           await c.query(
             "UPDATE conversations SET pending_counterparty_name=NULL,pending_counterparty_phone=NULL,version=version+1 WHERE id=$1",
@@ -1660,7 +1752,7 @@ export class Commands {
           ctx.conversation.pending_counterparty_name = null;
           ctx.conversation.pending_counterparty_phone = null;
           await this.s.save(c, r);
-          return output(null, r);
+          return output(null, r, softDrops);
         }
         const speakerParty = r.parties.find(
           (entry) => entry.phone === phone && entry.role !== role,
@@ -1792,8 +1884,7 @@ export class Commands {
         });
       }
     }
-    if (distanceReviewThisTurn)
-      return output(null, r);
-    return output(null, r);
+    if (distanceReviewThisTurn) return output(null, r, softDrops);
+    return output(null, r, softDrops);
   }
 }

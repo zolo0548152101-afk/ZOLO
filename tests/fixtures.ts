@@ -182,6 +182,7 @@ export class FakePlanner implements Planner {
     return {
       text: this.phraseReplyText || this.managedReply || input.fallback || "",
       claims: emptyClaims(),
+      persistence_gaps: [],
       metadata: { test_double: true },
     };
   }
@@ -217,6 +218,7 @@ export class FakePlanner implements Planner {
     return {
       text: this.managedReply || this.phraseReplyText || canned || "קיבלתי.",
       claims: emptyClaims(),
+      persistence_gaps: [],
       commands,
       toolResults,
       changedFields,

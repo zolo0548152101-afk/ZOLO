@@ -556,7 +556,7 @@ export class Store {
       const id = p.phone ? await this.contact(c, p.phone) : null;
       await c.query(
         `INSERT INTO request_parties(request_id,role,contact_id,name,settlement,address,floor,floor_note_shown,approved_at,approved_by,schedule_approved,schedule_approved_date,schedule_approved_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-        ON CONFLICT(request_id,role) DO UPDATE SET contact_id=EXCLUDED.contact_id,name=EXCLUDED.name,settlement=EXCLUDED.settlement,address=EXCLUDED.address,floor=EXCLUDED.floor,approved_at=EXCLUDED.approved_at,approved_by=EXCLUDED.approved_by,schedule_approved=EXCLUDED.schedule_approved,schedule_approved_date=EXCLUDED.schedule_approved_date,schedule_approved_at=EXCLUDED.schedule_approved_at`,
+        ON CONFLICT(request_id,role) DO UPDATE SET contact_id=EXCLUDED.contact_id,name=EXCLUDED.name,settlement=EXCLUDED.settlement,address=EXCLUDED.address,floor=EXCLUDED.floor,floor_note_shown=EXCLUDED.floor_note_shown,approved_at=EXCLUDED.approved_at,approved_by=EXCLUDED.approved_by,schedule_approved=EXCLUDED.schedule_approved,schedule_approved_date=EXCLUDED.schedule_approved_date,schedule_approved_at=EXCLUDED.schedule_approved_at`,
         [
           r.id,
           p.role,

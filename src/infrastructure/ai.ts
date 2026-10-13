@@ -23,7 +23,6 @@ import {
 import { conversationLanguage } from "../domain/customer-language.js";
 import {
   conversationAlreadyIntroduced,
-  emptyClaims,
   type ReplyClaims,
 } from "../domain/ai-guards.js";
 import {
@@ -47,6 +46,7 @@ import {
   agentFinalReplySchema,
   parseAgentToolCall,
   type AgentToolResult,
+  type PersistenceGap,
 } from "../application/agent-tools.js";
 
 export function promptSha(text: string): string {
@@ -62,6 +62,7 @@ export interface DecodeResult {
 export interface ReplyResult {
   text: string;
   claims: ReplyClaims;
+  persistence_gaps: PersistenceGap[];
   metadata: Record<string, unknown>;
 }
 
@@ -72,6 +73,14 @@ export interface ReplyInput {
   changed: ChangedField[];
   boundary: TurnFacts["this_turn"]["boundary"];
   notices: NoticeFact[];
+  /** Write-ack drops from this turn — phrase may treat as gap evidence. */
+  tool_acks?: Array<{
+    command: string;
+    ok: boolean;
+    requested: string[];
+    applied: string[];
+    dropped: Array<{ path: string; reason: string; value?: unknown }>;
+  }>;
   /** Only used when AI is disabled — never a customer template under normal path. */
   fallback?: string;
   guardFeedback?: {
@@ -91,12 +100,15 @@ export interface AgentTurnInput {
     safe_mode?: boolean;
     human_handoff?: boolean;
   };
+  /** Phrase-detected history vs DB gaps — one write re-pass only. */
+  persistenceGapFeedback?: PersistenceGap[];
   maxToolCalls?: number;
 }
 
 export interface AgentTurnResult {
   text: string;
   claims: ReplyClaims;
+  persistence_gaps: PersistenceGap[];
   commands: Command[];
   toolResults: AgentToolResult[];
   changedFields: ChangedField[];
@@ -317,18 +329,7 @@ export class OpenAIPlanner implements Planner {
   async agentTurn(ctx: Context, input: AgentTurnInput): Promise<AgentTurnResult> {
     const text = ctx.message.transcript ?? ctx.message.text;
     if (!this.c.AI_ENABLED) {
-      return {
-        text: "קיבלתי.",
-        claims: emptyClaims(),
-        commands: [{ type: "next" }],
-        toolResults: [],
-        changedFields: [],
-        metadata: {
-          provider: "rules",
-          ai_enabled: false,
-          action_source: "unclear_ai_disabled",
-        },
-      };
+      throw new AppError("ai_disabled");
     }
     const started = Date.now();
     const model = this.c.OPENAI_MODEL;
@@ -360,6 +361,9 @@ export class OpenAIPlanner implements Planner {
       untrusted_user_fields: ["current_message", "history"],
       ...(input.guardFeedback
         ? { guard_feedback: input.guardFeedback }
+        : {}),
+      ...(input.persistenceGapFeedback?.length
+        ? { persistence_gap_feedback: input.persistenceGapFeedback }
         : {}),
     };
 
@@ -412,7 +416,27 @@ export class OpenAIPlanner implements Planner {
       }> = [];
 
       for (const call of calls) {
-        if (toolCalls >= maxToolCalls) break;
+        if (toolCalls >= maxToolCalls) {
+          toolOutputs.push({
+            type: "function_call_output",
+            call_id: call.call_id,
+            output: JSON.stringify({
+              ok: false,
+              command: { type: call.name },
+              changed_fields: [],
+              request_number: null,
+              request_status: null,
+              missing_required: null,
+              notices_queued: 0,
+              requested: [],
+              applied: [],
+              dropped: [],
+              error: "tools_truncated",
+              raw_arguments: call.arguments,
+            }),
+          });
+          continue;
+        }
         toolCalls += 1;
         let command: Command;
         let result: AgentToolResult;
@@ -427,14 +451,22 @@ export class OpenAIPlanner implements Planner {
               request_status: null,
               missing_required: null,
               notices_queued: 0,
+              requested: [],
+              applied: [],
+              dropped: [],
             };
           } else {
             result = await input.executeTool(command);
           }
         } catch (error) {
-          command = {
-            type: "next",
-          };
+          const zodIssues =
+            error &&
+            typeof error === "object" &&
+            "issues" in error &&
+            Array.isArray((error as { issues: unknown }).issues)
+              ? (error as { issues: unknown[] }).issues.slice(0, 12)
+              : undefined;
+          command = { type: "next" };
           result = {
             ok: false,
             command: { type: call.name as Command["type"] } as Command,
@@ -443,11 +475,26 @@ export class OpenAIPlanner implements Planner {
             request_status: null,
             missing_required: null,
             notices_queued: 0,
+            requested: [],
+            applied: [],
+            dropped: [],
             error:
               error instanceof Error
                 ? error.message.slice(0, 200)
                 : "tool_failed",
           };
+          toolOutputs.push({
+            type: "function_call_output",
+            call_id: call.call_id,
+            output: JSON.stringify({
+              ...result,
+              raw_arguments: call.arguments,
+              ...(zodIssues ? { zod_issues: zodIssues } : {}),
+            }),
+          });
+          commands.push(command);
+          toolResults.push(result);
+          continue;
         }
         commands.push(command);
         toolResults.push(result);
@@ -502,6 +549,7 @@ export class OpenAIPlanner implements Planner {
     return {
       text: parsed.data.reply,
       claims: parsed.data.claims,
+      persistence_gaps: parsed.data.persistence_gaps,
       commands,
       toolResults,
       changedFields,
@@ -515,6 +563,7 @@ export class OpenAIPlanner implements Planner {
         usage: response.usage,
         tool_call_count: toolCalls,
         claims: parsed.data.claims,
+        persistence_gaps: parsed.data.persistence_gaps,
         model_input: {
           ...promptMeta,
           payload: userPayload,
@@ -632,11 +681,7 @@ export class OpenAIPlanner implements Planner {
 
   async reply(ctx: Context, input: ReplyInput): Promise<ReplyResult> {
     if (!this.c.AI_ENABLED) {
-      return {
-        text: input.fallback?.trim() || "קיבלתי.",
-        claims: emptyClaims(),
-        metadata: { provider: "fallback", ai_enabled: false },
-      };
+      throw new AppError("ai_disabled");
     }
     const started = Date.now();
     const model = this.c.OPENAI_MODEL;
@@ -666,7 +711,10 @@ export class OpenAIPlanner implements Planner {
       state: facts.state,
       rules: facts.rules,
       program_rules: PROGRAM_RULES_HE,
-      this_turn: facts.this_turn,
+      this_turn: {
+        ...facts.this_turn,
+        ...(input.tool_acks?.length ? { tool_acks: input.tool_acks } : {}),
+      },
       /** Exact strings allowed in claims.saved this turn (subset or empty). */
       allowed_saved: allowedSaved,
       data_map: facts.data_map,
@@ -706,6 +754,7 @@ export class OpenAIPlanner implements Planner {
     return {
       text: parsed.data.reply,
       claims: parsed.data.claims,
+      persistence_gaps: parsed.data.persistence_gaps,
       metadata: {
         provider: "openai_responses_agent_reply",
         ...promptMeta,
@@ -714,6 +763,7 @@ export class OpenAIPlanner implements Planner {
         elapsed_ms: Date.now() - started,
         usage: response.usage,
         claims: parsed.data.claims,
+        persistence_gaps: parsed.data.persistence_gaps,
         model_input: {
           ...promptMeta,
           payload: userPayload,
