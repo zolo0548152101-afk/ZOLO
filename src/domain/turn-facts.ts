@@ -10,6 +10,10 @@ import type {
   Request,
   Search,
 } from "./types.js";
+import {
+  furniturePhotoSlots,
+  photosComplete,
+} from "./policies.js";
 
 export type BoundaryCode =
   | "capacity_full"
@@ -46,6 +50,9 @@ export interface RequestFacts {
   status: string;
   origin: string;
   photo_status: string;
+  photo_count: number;
+  photos_needed: number;
+  photos_complete: boolean;
   parties: PartyFacts[];
   items: ItemFacts[];
   schedule: {
@@ -200,6 +207,9 @@ export function requestFacts(request: Request, senderPhone: string): RequestFact
     status: request.status,
     origin: request.origin,
     photo_status: request.photo_status,
+    photo_count: request.photo_ids.length,
+    photos_needed: furniturePhotoSlots(request),
+    photos_complete: photosComplete(request),
     parties: request.parties.map((party) => ({
       role: party.role,
       is_sender: party.phone === senderPhone,
@@ -254,9 +264,9 @@ export function completenessOf(
       else filled.push(path);
     }
   }
-  if (request.origin === "donation" && request.photo_status === "לא בוקשה")
+  if (request.origin === "donation" && !photosComplete(request) && request.photo_status !== "אין תמונה")
     missing.push("photo");
-  else if (request.photo_ids.length) filled.push("photo");
+  else if (photosComplete(request)) filled.push("photo");
   return { request_number: request.number, filled, missing };
 }
 

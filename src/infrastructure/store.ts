@@ -26,6 +26,8 @@ import {
   norm,
   nextTuesday,
   readyToCoordinate,
+  photosComplete,
+  PHOTO_STATUS,
 } from "../domain/policies.js";
 import { tx } from "../db/pool.js";
 import type { Config } from "../config.js";
@@ -974,7 +976,9 @@ export class Store {
       [r.id, m.media_id, m.phone],
     );
     if (!r.photo_ids.includes(m.media_id)) r.photo_ids.push(m.media_id);
-    r.photo_status = "התקבלה";
+    r.photo_status = photosComplete(r)
+      ? PHOTO_STATUS.RECEIVED
+      : PHOTO_STATUS.ASKED;
   }
   async matchPhoto(
     c: pg.PoolClient,

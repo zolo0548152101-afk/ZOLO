@@ -12,6 +12,10 @@ import {
   nextTuesday,
   nextQuestion,
   itemError,
+  wardrobeTransportable,
+  furniturePhotoSlots,
+  photosComplete,
+  photoGate,
   readyToCoordinate,
   statusText,
   explicitApproval,
@@ -44,6 +48,7 @@ import { parseWebhook, verifyHmac } from "../src/infrastructure/webhook.js";
 import {
   LocalMediaStorage,
   allowedMediaUrl,
+  resolveMediaUrl,
   downloadMedia,
 } from "../src/infrastructure/media.js";
 import { WahaChannel, DeliveryError } from "../src/infrastructure/waha.js";
@@ -1499,16 +1504,46 @@ test("an explicit new donation is not confused with an older open request", () =
   const result = rulePlan(context);
   assert.equal(result?.commands[0]?.type, "donate");
 });
-test("wardrobe rejection occurs after photo; only small whole wardrobe allowed", () => {
+test("wardrobe rejection occurs after photo; already dismantled is allowed", () => {
   const r = sampleRequest(),
     i = r.items[0]!;
   i.kind = "wardrobe";
   i.needs_disassembly = true;
+  i.wardrobe_small_whole = false;
   assert.equal(itemError(r.items, false), null);
   assert.match(itemError(r.items, true) ?? "", /אין אצלנו פירוק/);
+  assert.match(itemError(r.items, true) ?? "", /כבר מפורק/);
+  assert.equal(wardrobeTransportable(i), false);
+  // Already dismantled — we can help even if not small/whole.
   i.needs_disassembly = false;
+  i.wardrobe_small_whole = false;
+  assert.equal(itemError(r.items, true), null);
+  assert.equal(wardrobeTransportable(i), true);
   i.wardrobe_small_whole = true;
   assert.equal(readyToCoordinate(r), true);
+});
+
+test("donation photo gate stays open until every furniture item has a photo", () => {
+  const r = sampleRequest();
+  r.origin = "donation";
+  r.photo_status = "לא בוקשה";
+  r.photo_ids = [];
+  r.parties = r.parties.filter((p) => p.role === "donor");
+  r.items = [
+    { ...r.items[0]!, kind: "sofa", description: "ספה", quantity: 1, working: true, free: true, needs_disassembly: false, wardrobe_small_whole: null, oven_type: null, evacuation: null },
+    { ...r.items[0]!, kind: "table", description: "שולחן", quantity: 1, working: true, free: true, needs_disassembly: false, wardrobe_small_whole: null, oven_type: null, evacuation: null },
+  ];
+  assert.equal(furniturePhotoSlots(r), 2);
+  assert.equal(photosComplete(r), false);
+  assert.equal(photoGate(r), true);
+  r.photo_ids = ["photo-1"];
+  r.photo_status = "בוקשה";
+  assert.equal(photosComplete(r), false);
+  assert.equal(photoGate(r), true);
+  r.photo_ids = ["photo-1", "photo-2"];
+  r.photo_status = "התקבלה";
+  assert.equal(photosComplete(r), true);
+  assert.equal(photoGate(r), false);
 });
 test("fridge has no disassembly question; receiver never asked about disassembly", () => {
   const r = sampleRequest();
@@ -1916,6 +1951,26 @@ test("media SSRF, redirects and oversized downloads are blocked", async () => {
       async () => new Response(data),
     ),
   );
+});
+test("WAHA docker-internal /api/files URLs rewrite onto WAHA_BASE_URL", async () => {
+  const c = config({ WAHA_BASE_URL: "http://127.0.0.1:3001" });
+  const resolved = resolveMediaUrl(
+    "http://whatsapp_waha:3000/api/files/session/abc.jpg",
+    c,
+  );
+  assert.equal(resolved.origin, "http://127.0.0.1:3001");
+  assert.equal(resolved.pathname, "/api/files/session/abc.jpg");
+  let fetched: string | null = null;
+  const bytes = await downloadMedia(
+    "http://whatsapp_waha:3000/api/files/session/abc.jpg",
+    c,
+    async (input) => {
+      fetched = String(input);
+      return new Response(Buffer.from([255, 216, 255, 0, 0, 0, 0, 0]));
+    },
+  );
+  assert.equal(fetched, "http://127.0.0.1:3001/api/files/session/abc.jpg");
+  assert.ok(bytes.length >= 3);
 });
 test("a following phone answers the named handoff", () => {
   const opening = rulePlan({

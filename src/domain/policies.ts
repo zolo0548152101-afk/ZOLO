@@ -518,15 +518,32 @@ export function grounded(plan: Plan, text: string): boolean {
     (plan.evidence.length > 0 && evidenceSupportedByText(plan.evidence, text))
   );
 }
+/** One photo slot per transportable item (broken items excluded). */
+export function furniturePhotoSlots(r: Request): number {
+  return r.items.filter((i) => i.working !== false).length;
+}
+
+/** True when saved photos cover every transportable furniture item. */
+export function photosComplete(r: Request): boolean {
+  const slots = furniturePhotoSlots(r);
+  if (slots <= 0) return r.photo_ids.length > 0;
+  return r.photo_ids.length >= slots;
+}
+
 export function photoGate(r: Request): boolean {
-  // Ask at most once while photo_status is still «לא בוקשה».
-  // Once «בוקשה» / «אין תמונה» / «התקבלה», never fire again on this request.
-  return (
-    (r.origin === "donation" || r.origin === "direct") &&
-    r.parties.some((p) => p.role === "donor") &&
-    r.photo_ids.length === 0 &&
-    (r.photo_status ?? PHOTO_STATUS.NOT_ASKED) === PHOTO_STATUS.NOT_ASKED
-  );
+  // Donation: keep asking until every furniture item has a photo (or declined).
+  // Direct: soft optional ask once while still empty / not asked.
+  if (!(r.origin === "donation" || r.origin === "direct")) return false;
+  if (!r.parties.some((p) => p.role === "donor")) return false;
+  if ((r.photo_status ?? PHOTO_STATUS.NOT_ASKED) === PHOTO_STATUS.NO_PHOTO)
+    return false;
+  if (r.origin === "direct") {
+    return (
+      r.photo_ids.length === 0 &&
+      (r.photo_status ?? PHOTO_STATUS.NOT_ASKED) === PHOTO_STATUS.NOT_ASKED
+    );
+  }
+  return !photosComplete(r);
 }
 export function isClosed(r: Request): boolean {
   return ["closed", "cancelled", "rejected"].includes(r.status);
@@ -583,6 +600,12 @@ export function ownParty(
   r.parties.push(created);
   return created;
 }
+/** Wardrobe ready to move: small whole, or already dismantled (no crew work). */
+export function wardrobeTransportable(i: Item): boolean {
+  if (i.kind !== "wardrobe") return true;
+  return i.wardrobe_small_whole === true || i.needs_disassembly === false;
+}
+
 export function itemError(items: Item[], hasPhoto: boolean): string | null {
   // Advisory copy for completeness/prompts only — never used to block writes.
   if (items.some((i) => i.kind === "piano" || i.kind === "house_move"))
@@ -593,13 +616,9 @@ export function itemError(items: Item[], hasPhoto: boolean): string | null {
     return "ניתן למסור רק ציוד תקין ושמיש ב־100%.";
   if (
     hasPhoto &&
-    items.some(
-      (i) =>
-        i.kind === "wardrobe" &&
-        (i.needs_disassembly === true || i.wardrobe_small_whole === false),
-    )
+    items.some((i) => i.kind === "wardrobe" && i.needs_disassembly === true)
   )
-    return "אין אצלנו פירוק והרכבה של ארונות. אפשר להעביר רק ארון קטן שניתן להעביר שלם.";
+    return "אין אצלנו פירוק והרכבה של ארונות. אם הארון כבר מפורק — נוכל לעזור.";
   return null;
 }
 export function appliance(i: Item): boolean {
@@ -636,7 +655,7 @@ export function itemsReadyForHandoff(r: Request): boolean {
     (i) =>
       i.free === true &&
       i.working === true &&
-      (i.kind !== "wardrobe" || i.wardrobe_small_whole === true) &&
+      (i.kind !== "wardrobe" || wardrobeTransportable(i)) &&
       (r.origin === "direct" || i.kind !== "oven" || i.oven_type !== null) &&
       (r.origin === "direct" ||
         appliance(i) ||
@@ -678,7 +697,10 @@ export function nextQuestion(
   if (
     donor &&
     r.items.some(
-      (i) => i.kind === "wardrobe" && i.wardrobe_small_whole !== true,
+      (i) =>
+        i.kind === "wardrobe" &&
+        i.wardrobe_small_whole !== true &&
+        i.needs_disassembly === null,
     )
   )
     return {
@@ -815,7 +837,7 @@ export function readyToProposeSchedule(r: Request): boolean {
       (i) =>
         i.free === true &&
         i.working === true &&
-        (!["wardrobe"].includes(i.kind) || i.wardrobe_small_whole === true) &&
+        (!["wardrobe"].includes(i.kind) || wardrobeTransportable(i)) &&
         (i.kind !== "oven" || i.oven_type !== null) &&
         (r.origin === "direct" ||
           appliance(i) ||

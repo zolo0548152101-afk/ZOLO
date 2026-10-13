@@ -144,12 +144,32 @@ export function allowedMediaUrl(value: string, c: Config): URL {
     throw new AppError("unsafe_waha_media_path");
   return u;
 }
+
+/**
+ * WAHA webhooks often emit docker-internal hosts (whatsapp_waha:3000) while the
+ * host bot reaches WAHA via WAHA_BASE_URL (e.g. http://127.0.0.1:3001). Rewrite
+ * /api/files/* onto the configured base before the origin allow-list check.
+ */
+export function resolveMediaUrl(value: string, c: Config): URL {
+  let candidate = value;
+  try {
+    const raw = new URL(value);
+    if (raw.pathname.startsWith("/api/files/")) {
+      const base = new URL(c.WAHA_BASE_URL);
+      candidate = new URL(raw.pathname + raw.search, base).toString();
+    }
+  } catch {
+    throw new AppError("unsafe_media_url");
+  }
+  return allowedMediaUrl(candidate, c);
+}
+
 export async function downloadMedia(
   url: string,
   c: Config,
   fetcher: typeof fetch = fetch,
 ): Promise<Buffer> {
-  const u = allowedMediaUrl(url, c),
+  const u = resolveMediaUrl(url, c),
     controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), c.MEDIA_TIMEOUT_MS);
   try {

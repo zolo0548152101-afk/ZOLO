@@ -30,6 +30,7 @@ import {
 import {
   isStatus,
   photoGate,
+  photosComplete,
   isQuickTopic,
   statusText,
   PHOTO_STATUS,
@@ -1738,7 +1739,7 @@ export class Engine {
         intent = "human_escalation";
         reply = null;
       } else if (technicalReason || ctx.message.media_state === "failed") {
-        intent = technicalReason ? "clarification" : "human_escalation";
+        intent = "clarification";
         const selected =
           ctx.requests.find((r) => r.id === ctx.conversation.selected_request_id) ??
           (ctx.requests.length === 1 ? ctx.requests[0] : undefined);
@@ -1748,9 +1749,21 @@ export class Engine {
           await this.s.event(c, ctx.message, "system", "automatic_fallback", {
             technical_reason: technicalReason,
           }, selected?.id ?? null);
+        } else if (ctx.message.media_state === "failed") {
+          // Soft: ask to resend the image; do not escalate to human/ops.
+          reply = null;
+          reason = undefined;
+          await this.s.event(
+            c,
+            ctx.message,
+            "system",
+            "media_failure_soft",
+            { kind: ctx.message.kind },
+            selected?.id ?? null,
+          );
         } else {
           reply = null;
-          reason ??= "media_failure";
+          reason ??= technicalReason;
         }
       } else if (isQuickTopic(text)) {
         // FAQ/greeting: no code sentence — Reply manager phrases from state.
@@ -1785,7 +1798,12 @@ export class Engine {
           ].includes(request.status)
         ) {
           await this.s.linkPhoto(c, request, ctx.message);
-          if (request.parties.length === 1) request.status = "available";
+          if (
+            request.parties.length === 1 &&
+            request.origin === "donation" &&
+            photosComplete(request)
+          )
+            request.status = "available";
           await this.s.save(c, request);
           const watchers = await c.query<{ phone: string }>(
             "SELECT co.phone FROM matches m JOIN contacts co ON co.id=m.contact_id WHERE m.request_id=$1 AND m.state=$2",
@@ -1972,9 +1990,13 @@ export class Engine {
                 }
               }
               if (attached.rows.length && request.photo_ids.length) {
-                if (request.parties.length === 1 && request.origin === "donation")
+                if (
+                  request.parties.length === 1 &&
+                  request.origin === "donation" &&
+                  photosComplete(request)
+                )
                   request.status = "available";
-                request.photo_status = PHOTO_STATUS.RECEIVED;
+                // linkPhoto already set ASKED/RECEIVED from completeness.
                 await this.s.save(c, request);
                 reply = null;
               }
