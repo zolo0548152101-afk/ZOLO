@@ -1,38 +1,97 @@
 import {
   AppError,
+  type PhotoStatus,
   type Request,
   type Item,
   type Party,
   type Plan,
+  type Role,
 } from "./types.js";
 export const SERVICE_TOWNS =
-  "בית שאן, מסילות, ירדנה, בית אלפא, טירת צבי, כפר רופין ומחולה";
+  "בית שאן, מסילות, ירדנה, בית אלפא, טירת צבי, שדה אליהו, כפר רופין ומחולה";
 export const OUTSIDE =
   `אנחנו פועלים רק ב${SERVICE_TOWNS}. לא נוכל לסייע בהובלה הזו.`;
-export const PHOTO_THANKS = "תודה, התמונה התקבלה.";
-export const PHOTO_FIRST = "בשמחה. כדי להמשיך, נא לשלוח תמונה של הפריט.";
-/** Same-day pickup is not a promise. Deliveries stay on the Tuesday window. */
-export const SAME_DAY_WINDOW =
-  "אי אפשר לאסוף היום. ההובלות רק ביום שלישי בין 16:00 ל־20:00.";
+/** Persisted request.photo_status values (Hebrew, match DB CHECK). */
+export const PHOTO_STATUS = {
+  NOT_ASKED: "לא בוקשה",
+  ASKED: "בוקשה",
+  NO_PHOTO: "אין תמונה",
+  RECEIVED: "התקבלה",
+} as const satisfies Record<string, PhotoStatus>;
 export function sameDayDemand(text: string): boolean {
   return /(?:^|[^א-ת])היום(?=$|[^א-ת])/u.test(norm(text));
 }
-export const CONDITION_QUESTION = "האם הפריט תקין ושמיש ב־100%?";
+/** Customer declined or deferred a photo — continue to the next missing field. */
+export function photoDeclined(text: string): boolean {
+  const t = norm(text);
+  return (
+    /אין(?:\s+לי)?\s+תמונה|בלי\s+תמונה|לא\s+(?:אשלח|שולח|יש)\s+תמונה|תמונה\s+אין|כרגע\s+אין(?:\s+לי)?(?:\s+תמונה)?|אין\s+כרגע/.test(
+      t,
+    ) || /no\s+photo|don'?t\s+have\s+(?:a\s+)?photo/i.test(text)
+  );
+}
+/** After a one-time ask, any non-photo reply closes the photo gate. */
+export function photoStatusSkipsGate(status: PhotoStatus | undefined): boolean {
+  return (
+    status === PHOTO_STATUS.ASKED ||
+    status === PHOTO_STATUS.NO_PHOTO ||
+    status === PHOTO_STATUS.RECEIVED
+  );
+}
+/**
+ * True when the customer already understands the product path
+ * (donate / receive / item / contact) — no self-intro needed.
+ */
+export function customerIntentClear(text: string): boolean {
+  const t = norm(text).replace(/\s+/gu, " ").trim();
+  if (!t) return false;
+  if (
+    /^(?:שלום|היי|הי|בוקר טוב|ערב טוב|צחרים טובים|צהריים טובים)[.!?]*$/u.test(t)
+  )
+    return false;
+  if (
+    /(?:למסור|לתרום|להעביר|לקבל|מבקש|צריך|מסירה|תרומה|מוסר|מקבל)/u.test(t)
+  )
+    return true;
+  if (
+    /מיטה|(?:^|[^\u05D0-\u05EA])מטה(?=[^\u05D0-\u05EA]|$)|ספה|שידה|מנורה|שולחן|כיסא|מקרר|מכונת|תנור|ארון|פריט|רהיט/u.test(
+      t,
+    )
+  )
+    return true;
+  if (/כרטיס איש קשר|BEGIN:VCARD/i.test(text)) return true;
+  if (/\d{8,10}/.test(t) && /(?:ל|עבור|אל)/u.test(t)) return true;
+  return false;
+}
+export function displayPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, "");
+  const local =
+    digits.length === 12 && digits.startsWith("972")
+      ? digits.slice(3)
+      : digits.length === 10 && digits.startsWith("0")
+        ? digits.slice(1)
+        : digits;
+  if (local.length === 9 && local.startsWith("5"))
+    return `0${local.slice(0, 2)}-${local.slice(2)}`;
+  return phone;
+}
+export function photoAskAlreadySent(
+  history: { role: string; content: string }[],
+): boolean {
+  return history.some(
+    (entry) =>
+      entry.role === "assistant" &&
+      /תמונה/.test(entry.content) &&
+      /(?:שלח|לשלוח|אפשר לשלוח|נא לשלוח|אם יש)/u.test(entry.content),
+  );
+}
 export const DEFAULT_TRANSPORT_CAPACITY = 10;
 export const MAX_TRANSPORT_CAPACITY = 100;
-export const GREETING =
-  "שלום, שמחים שפניתם אלינו 😊\nנוכל לעזור בימי שלישי בין השעות 16:00–20:00. ניתן לתאם עד 10 הובלות בכל יום שלישי; מעבר לכך נבקש אישור מנהל לפני תיאום נוסף.\n\nלהמשך התיאום, נא לוודא שהמוסר והמקבל — כל אחד לחוד ובעצמו — ישלחו הודעה עם הפרטים הבאים:\n\n1. שם מלא\n2. תמונה ושם של החפץ\n3. כתובת\n\nכמה הבהרות:\n\n- אנו לא מפרקים ומרכיבים ארונות\n- אנו מעבירים עד 2 רהיטים לאדם\n- הפעילות בהתנדבות\n- אנו מעבירים רק רהיטים שנמסרו ולא נקנו\n- הפעילות מתקיימת בבית שאן ובעמק הקרוב";
-export const HUMAN_REPLY = "העברתי את הפנייה לטיפול אנושי. נעדכן.";
 /** Internal monitor text. It may be delivered only to the configured admin phone. */
 export const OPS_ALERT_PREFIX = "נדרשת בדיקת מערכת";
 export function isOperationsAlert(text: string): boolean {
   return text.startsWith(OPS_ALERT_PREFIX);
 }
-export const SUKKAH =
-  "בשמחה. נא למלא את הטופס הבא, ולאחר מכן יצרו איתכם קשר להמשך:\nhttps://docs.google.com/forms/d/e/1FAIpQLSd-lls8Yp8pstD3M_OsBAV9JK-FbDHHTLatPZbqnGtmhUN1vA/viewform";
-export const DONATION = "https://pe4ch.com/ref/av01FlQj2che?lang=he";
-export const ABOUT =
-  "תוכנית חיים יחד נוסדה על ידי נועם גומעה, בשיתוף גרעין יחד בית שאן, ופועלת מאז 2018 בהתנדבות. הפעילות משלבת נוער מתנדב, ערבות הדדית ושימוש חוזר ברהיטים ובמכשירי חשמל.";
 export const ACTIVE = [
   "collecting",
   "available",
@@ -43,15 +102,51 @@ export const ACTIVE = [
   "cancel_pending",
 ] as const;
 export function canonicalPhone(value: string): string {
-  if (value.includes("@lid")) throw new AppError("lid_is_not_phone");
-  if (!/^[+\d\s().-]+(?:@c\.us|@s\.whatsapp\.net)?$/.test(value))
+  const cleaned = value
+    .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+    .trim();
+  if (cleaned.includes("@lid")) throw new AppError("lid_is_not_phone");
+  if (!/^[+\d\s().-]+(?:@c\.us|@s\.whatsapp\.net)?$/.test(cleaned))
     throw new AppError("invalid_phone");
-  let s = value.split("@")[0]!.replace(/\D/g, "");
+  let s = cleaned.split("@")[0]!.replace(/\D/g, "");
   if (s.startsWith("00972")) s = s.slice(5);
   else if (s.startsWith("972")) s = s.slice(3);
   if (s.startsWith("0")) s = s.slice(1);
   if (!/^[2-9]\d{7,8}$/.test(s)) throw new AppError("invalid_phone");
   return s;
+}
+
+/** Parse LIVE_ALLOWLIST (comma/whitespace). Empty → open (all phones allowed). */
+export function parseLiveAllowlist(raw: string | null | undefined): string[] {
+  return (raw ?? "")
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      try {
+        return canonicalPhone(s);
+      } catch {
+        return s.replace(/\D/g, "").replace(/^0/, "");
+      }
+    })
+    .filter(Boolean);
+}
+
+/**
+ * When LIVE_ALLOWLIST is non-empty (canary/live QA), only listed phones may
+ * receive WhatsApp traffic. Open mode (empty allowlist) allows every phone.
+ */
+export function isLiveOutboundAllowed(
+  phone: string,
+  allowlistRaw: string | null | undefined,
+): boolean {
+  const allow = parseLiveAllowlist(allowlistRaw);
+  if (!allow.length) return true;
+  try {
+    return allow.includes(canonicalPhone(phone));
+  } catch {
+    return false;
+  }
 }
 export function norm(s: string): string {
   return s
@@ -60,29 +155,91 @@ export function norm(s: string): string {
     .replace(/\s+/g, " ")
     .trim();
 }
+
+/**
+ * Trim a party name for storage. Kinship/role rejection («אמא») is prompt-owned —
+ * code must not maintain a forbidden-name list.
+ */
+export function usablePersonName(name: string | null | undefined): string | null {
+  if (!name) return null;
+  const trimmed = name.trim().replace(/\s+/g, " ");
+  return trimmed.length >= 2 ? trimmed : null;
+}
+
+const HEBREW_MONTHS: Record<string, number> = {
+  ינואר: 1,
+  פברואר: 2,
+  מרץ: 3,
+  מרס: 3,
+  אפריל: 4,
+  מאי: 5,
+  יוני: 6,
+  יולי: 7,
+  אוגוסט: 8,
+  ספטמבר: 9,
+  אוקטובר: 10,
+  נובמבר: 11,
+  דצמבר: 12,
+};
+
+/** Parse a customer-requested calendar day (ISO / dd.mm / «27 באוקטובר»). */
+export function preferredDeliveryDate(
+  text: string,
+  now: Date = new Date(),
+): string | null {
+  const t = norm(text);
+  const iso = t.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const numbered = t.match(/\b(\d{1,2})[./](\d{1,2})(?:[./](20\d{2}))?\b/);
+  if (numbered) {
+    const day = Number(numbered[1]);
+    const month = Number(numbered[2]);
+    const year = numbered[3] ? Number(numbered[3]) : now.getUTCFullYear();
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12)
+      return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+  const hebrew = t.match(
+    /(\d{1,2})\s*(?:ב|ל)?\s*(ינואר|פברואר|מרץ|מרס|אפריל|מאי|יוני|יולי|אוגוסט|ספטמבר|אוקטובר|נובמבר|דצמבר)(?:\s*(20\d{2}))?/u,
+  );
+  if (!hebrew) return null;
+  const day = Number(hebrew[1]);
+  const month = HEBREW_MONTHS[hebrew[2]!]!;
+  let year = hebrew[3] ? Number(hebrew[3]) : now.getUTCFullYear();
+  // If the month already passed this year and no year was given, assume next year.
+  if (!hebrew[3]) {
+    const probe = new Date(Date.UTC(year, month - 1, day));
+    const today = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+    );
+    if (probe < today) year += 1;
+  }
+  if (day < 1 || day > 31) return null;
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
 export function isStatus(s: string): boolean {
   return /^(?:מה\s+(?:מצב\s+(?:הפנייה|הפניה|התיאום|ההובלה)|(?:ה)?סטטוס)|מה קורה עם (?:הפנייה|הפניה|ההובלה)|זה כבר מתואם|מה מצב הפנייה|מתי (?:ההובלה|מגיעים))(?:\s+\d+)?[?？!\s]*$/.test(
     norm(s),
   );
 }
-export function quickReply(s: string): string | null {
+/** Detect FAQ/greeting topics — wording is owned by Reply manager. */
+export function isQuickTopic(s: string): boolean {
   const t = norm(s);
   if (/^(שלום|היי|הי|אהלן|בוקר טוב|ערב טוב|שלום וברכה)[!.,?\s]*$/.test(t))
-    return GREETING;
-  if (/(?:סוכה|סוכות)/.test(t) && !isStatus(t)) return SUKKAH;
+    return true;
+  if (/(?:סוכה|סוכות)/.test(t) && !isStatus(t)) return true;
   if (
     /(?:איך|אפשר|רוצה|לינק|קישור).*(?:לתרום כסף|תרומה כספית|לתרומה)|תרומה כספית/.test(
       t,
     )
   )
-    return DONATION;
+    return true;
   if (
     /(?:מי (?:הקים|ייסד)|מידע על התוכנית|מה זה חיים יחד|ספר.*על (?:התוכנית|חיים יחד))/.test(
       t,
     )
   )
-    return ABOUT;
-  return null;
+    return true;
+  return false;
 }
 export function explicitApproval(t: string): boolean {
   const text = norm(t);
@@ -142,59 +299,17 @@ export function cityOutsideStreet(text: string, name: string): boolean {
   return rest.includes(name);
 }
 
-const OUTSIDE_PLACES: { name: string; pattern: RegExp }[] = [
-  { name: "תל אביב", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?תל\s+אביב(?=$|[^א-ת])/u },
-  { name: "תל אביב", pattern: /\btel\s*aviv\b/i },
-  { name: "ראשון לציון", pattern: /ראשון\s+לציון/u },
-  { name: "באר שבע", pattern: /באר\s+שבע/u },
-  { name: "ירושלים", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?ירושלים(?=$|[^א-ת])/u },
-  { name: "ירושלים", pattern: /\bjerusalem\b/i },
-  { name: "טבריה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?טברי[הא](?=$|[^א-ת])/u },
-  { name: "טבריה", pattern: /\btiberias\b/i },
-  { name: "טבריה", pattern: /طبري[اة]/u },
-  { name: "עפולה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?עפול[הא](?=$|[^א-ת])/u },
-  { name: "עפולה", pattern: /\bafula\b/i },
-  { name: "חיפה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?חיפה(?=$|[^א-ת])/u },
-  { name: "חיפה", pattern: /\bhaifa\b/i },
-  { name: "אשדוד", pattern: /אשדוד/u },
-  { name: "אשקלון", pattern: /אשקלון/u },
-  { name: "נתניה", pattern: /נתניה/u },
-  { name: "ניר דוד", pattern: /ניר\s+דוד/u },
-  { name: "בית השיטה", pattern: /בית\s+השיטה/u },
-  { name: "חמדיה", pattern: /חמדיה/u },
-  { name: "שדה אליהו", pattern: /שדה\s+אליהו/u },
-  { name: "עין הנציב", pattern: /עין\s+הנציב/u },
-  { name: "מנחמיה", pattern: /מנחמיה/u },
-  { name: "בית יוסף", pattern: /בית\s+יוסף/u },
-  { name: "נווה אור", pattern: /נווה\s+אור/u },
-  { name: "דגניה", pattern: /דגניה/u },
-  { name: "יבנאל", pattern: /יבנאל/u },
-  { name: "נצרת", pattern: /נצרת/u },
-  { name: "צמח", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?צמח(?=$|[^א-ת])/u },
-];
-
 function mentionIsNegated(text: string, index: number): boolean {
   return /(?:לא|אינני|איני)\s*(?:גר(?:ה)?\s*)?(?:ב|מ|ל|in\s+)?$/iu.test(
     text.slice(Math.max(0, index - 20), index),
   );
 }
 
-/** A named town outside the service area, from the customer text itself. */
-export function namedOutsideSettlement(text: string): string | null {
-  const normalized = norm(text);
-  for (const place of OUTSIDE_PLACES) {
-    place.pattern.lastIndex = 0;
-    const match = place.pattern.exec(normalized);
-    if (!match || mentionIsNegated(normalized, match.index)) continue;
-    const matchedHebrew = /[\u0590-\u05FF]/.test(match[0]);
-    if (
-      matchedHebrew &&
-      /[\u0590-\u05FF]/.test(place.name) &&
-      !cityOutsideStreet(normalized, place.name)
-    )
-      continue;
-    return place.name;
-  }
+/**
+ * @deprecated Outside-area city lists live in write/phrase prompts only.
+ * Always returns null so code cannot hard-reject Holon/Gush Dan/etc.
+ */
+export function namedOutsideSettlement(_text: string): string | null {
   return null;
 }
 
@@ -206,13 +321,47 @@ const ALLOWED_PLACES: { name: string; pattern: RegExp }[] = [
   { name: "ירדנה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?ירדנה(?=$|[^א-ת])/u },
   { name: "בית אלפא", pattern: /בית\s*[-־]?\s*אלפא/u },
   { name: "טירת צבי", pattern: /(?:קיבוץ\s+)?טירת\s+צבי/u },
+  { name: "שדה אליהו", pattern: /(?:קיבוץ\s+)?שדה\s+אליהו/u },
   { name: "כפר רופין", pattern: /כפר\s+רופין/u },
   { name: "מחולה", pattern: /(?:^|[^א-ת])(?:ב|מ|ל)?מחולה(?=$|[^א-ת])/u },
 ];
 
+/** Customer keeps pushing after a clear denial (outside area / policy). */
+export function customerInsistsAfterDenial(text: string): boolean {
+  const t = norm(text);
+  return (
+    /בכל\s*זאת|עדיין\s+(?:רוצה|מבקש)|אני\s+מתעקש|תעשו\s+(?:לי|בכל)|חייבים|אין\s+ברירה|למה\s+לא|אני\s+צריך\s+ש|תמצאו\s+דרך/.test(
+      t,
+    ) || /insist|anyway|still\s+want/i.test(text)
+  );
+}
+
+export function appendTeamNote(
+  existing: string | null | undefined,
+  note: string,
+): string {
+  const clean = note.trim();
+  if (!clean) return (existing ?? "").trim();
+  if (!existing?.trim()) return clean;
+  if (existing.includes(clean)) return existing.trim();
+  return `${existing.trim()}\n${clean}`;
+}
+
+/** Drop stale distance-check notes after a settlement is corrected to allowed. */
+export function stripDistanceCheckNotes(
+  existing: string | null | undefined,
+): string | null {
+  if (!existing?.trim()) return null;
+  const kept = existing
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !/בדיקת\s*מרחק/u.test(line));
+  return kept.length ? kept.join("\n") : null;
+}
+
 /** An allowed town named as the place itself, not merely "near Beit She'an". */
 export function mentionedAllowedSettlement(text: string): string | null {
-  if (namedOutsideSettlement(text)) return null;
+  // Far-city lists are prompt-owned; do not veto allowed-town mentions here.
   const normalized = norm(text)
     .replace(/(?:ליד|קרוב ל|באזור|סמוך ל)\s*בית\s*[-־]?\s*שאן/gu, " ")
     .replace(/\bnear\s+beit\s+she'?an\b/gi, " ");
@@ -288,7 +437,7 @@ const NOT_A_PLACE = new Set([
  */
 export function mentionedReviewSettlement(text: string): string | null {
   if (!text.trim()) return null;
-  if (namedOutsideSettlement(text) || mentionedAllowedSettlement(text)) return null;
+  if (mentionedAllowedSettlement(text)) return null;
   // Only a transport/donation sentence. Bare ב-words such as ביטול or ברורה are not towns.
   if (!donationIntent(text) && !/(?:הובלה|הובלות)/u.test(norm(text))) return null;
   const normalized = norm(text);
@@ -321,7 +470,8 @@ export function directHandoffIntent(t: string): boolean {
     return true;
   // "אולי יעזור למישהו" is an open donation, not a named/direct handoff.
   // Require an explicit qualifier when no real recipient name/phone exists.
-  if (/(?:מקבל(?:ת)?\s+(?:מסוים|מוגדר)|ל(?:מישהו|מישהי|אדם)\s+(?:מסוים|מסוימת|ספציפי(?:ת)?|מוגדר(?:ת)?))/ .test(text))
+  // "מישו" is a common typo for "מישהו".
+  if (/(?:מקבל(?:ת)?\s+(?:מסוים|מוגדר)|ל(?:מישהו|מישהי|מישו|אדם)\s+(?:מסוים|מסוימת|ספציפי(?:ת)?|מוגדר(?:ת)?))/ .test(text))
     return /(?:להעביר|למסור|מסירה|מסירה ישירה)/.test(text);
   // A named recipient is often written naturally as "למסור מיטה לטל" or
   // "למסירה לטל". Bare "למסירה" / place names stay open donations.
@@ -336,70 +486,139 @@ export function directHandoffIntent(t: string): boolean {
     )
   );
 }
+/**
+ * Evidence must come from the customer message. The action manager owns field
+ * values (spelling, kind labels, normalized addresses), so a light typo fix in
+ * the quote — e.g. מטה→מיטה — is allowed. Inventing a different sentence is not.
+ */
+function foldEvidence(value: string): string {
+  return value
+    .normalize("NFKC")
+    .replace(/[\s,.!?;:״׳"'`\-–—]+/gu, "")
+    .replace(/[יו]/gu, "")
+    .toLowerCase();
+}
+
+function evidenceSupportedByText(evidence: string, text: string): boolean {
+  const quote = evidence.trim();
+  const message = text.trim();
+  if (!quote || !message) return false;
+  if (message.includes(quote)) return true;
+  const foldedQuote = foldEvidence(quote);
+  const foldedMessage = foldEvidence(message);
+  if (!foldedQuote || !foldedMessage) return false;
+  return (
+    foldedMessage.includes(foldedQuote) || foldedQuote.includes(foldedMessage)
+  );
+}
+
 export function grounded(plan: Plan, text: string): boolean {
   return (
     plan.commands.every((c) => c.type === "status" || c.type === "next") ||
-    (plan.evidence.length > 0 && text.includes(plan.evidence))
+    (plan.evidence.length > 0 && evidenceSupportedByText(plan.evidence, text))
   );
 }
+/** One photo slot per transportable item (broken items excluded). */
+export function furniturePhotoSlots(r: Request): number {
+  return r.items.filter((i) => i.working !== false).length;
+}
+
+/** True when saved photos cover every transportable furniture item. */
+export function photosComplete(r: Request): boolean {
+  const slots = furniturePhotoSlots(r);
+  if (slots <= 0) return r.photo_ids.length > 0;
+  return r.photo_ids.length >= slots;
+}
+
 export function photoGate(r: Request): boolean {
-  return (
-    r.origin === "donation" &&
-    r.parties.some((p) => p.role === "donor") &&
-    !r.parties.some((p) => p.role === "receiver") &&
-    r.photo_ids.length === 0
-  );
+  // Donation: keep asking until every furniture item has a photo (or declined).
+  // Direct: soft optional ask once while still empty / not asked.
+  if (!(r.origin === "donation" || r.origin === "direct")) return false;
+  if (!r.parties.some((p) => p.role === "donor")) return false;
+  if ((r.photo_status ?? PHOTO_STATUS.NOT_ASKED) === PHOTO_STATUS.NO_PHOTO)
+    return false;
+  if (r.origin === "direct") {
+    return (
+      r.photo_ids.length === 0 &&
+      (r.photo_status ?? PHOTO_STATUS.NOT_ASKED) === PHOTO_STATUS.NOT_ASKED
+    );
+  }
+  return !photosComplete(r);
 }
 export function isClosed(r: Request): boolean {
   return ["closed", "cancelled", "rejected"].includes(r.status);
 }
-export function mutable(r: Request): void {
-  if (
-    r.status === "coordinated" ||
-    isClosed(r) ||
-    r.status === "cancel_pending"
-  )
-    throw new AppError(
-      "request_protected",
-      409,
-      "הפנייה מוגנת משינוי. לפנייה חדשה יש לציין שמדובר בבקשה חדשה; לשינוי התיאום נעביר לטיפול אנושי.",
-    );
+/** No-op: write path never blocks on status. Program rules live in prompts. */
+export function mutable(_r: Request): void {}
+
+function blankParty(
+  role: "donor" | "receiver",
+  phone: string | null,
+): Party {
+  return {
+    role,
+    phone,
+    name: null,
+    settlement: null,
+    address: null,
+    floor: null,
+    floor_note_shown: false,
+    approved_at: null,
+    approved_by: null,
+    schedule_approved: false,
+    schedule_approved_date: null,
+    schedule_approved_at: null,
+  };
 }
+
+/**
+ * Resolve (or create) the party row Action wants to write.
+ * Code never enforces authorization — prompts own who may update whom.
+ * Missing role rows are created so details/donate plans can persist.
+ */
 export function ownParty(
   r: Request,
   phone: string,
   role?: "donor" | "receiver",
 ): Party {
-  const own = r.parties.filter(
-    (p) => p.phone === phone && (!role || p.role === role),
-  );
-  const p = own.find((x) => !x.name || !x.settlement || !x.address) ?? own[0];
-  if (!p)
-    throw new AppError(
-      "forbidden_party",
-      403,
-      "אפשר לעדכן רק את הצד שלך בפנייה.",
+  if (role) {
+    const target = r.parties.find((p) => p.role === role);
+    if (target) return target;
+    const speaker = r.parties.find((p) => p.phone === phone);
+    // Counterparty side stays phone-null until Action/contact supplies it.
+    const created = blankParty(
+      role,
+      speaker && speaker.role !== role ? null : phone,
     );
-  return p;
+    r.parties.push(created);
+    return created;
+  }
+  const own = r.parties.filter((p) => p.phone === phone);
+  const p = own.find((x) => !x.name || !x.settlement || !x.address) ?? own[0];
+  if (p) return p;
+  const created = blankParty("donor", phone);
+  r.parties.push(created);
+  return created;
 }
+/** Wardrobe ready to move: small whole, or already dismantled (no crew work). */
+export function wardrobeTransportable(i: Item): boolean {
+  if (i.kind !== "wardrobe") return true;
+  return i.wardrobe_small_whole === true || i.needs_disassembly === false;
+}
+
 export function itemError(items: Item[], hasPhoto: boolean): string | null {
+  // Advisory copy for completeness/prompts only — never used to block writes.
   if (items.some((i) => i.kind === "piano" || i.kind === "house_move"))
     return "לא ניתן לסייע בהובלת פסנתרים או בהובלות דירה.";
-  if (items.reduce((n, i) => n + i.quantity, 0) > 2)
-    return "ניתן לסייע בהובלת עד שני פריטים. שולחן וכיסאות נחשבים פריט אחד.";
   if (items.some((i) => i.free === false))
     return "התוכנית מסייעת במסירה בחינם בלבד.";
   if (items.some((i) => i.working === false))
     return "ניתן למסור רק ציוד תקין ושמיש ב־100%.";
   if (
     hasPhoto &&
-    items.some(
-      (i) =>
-        i.kind === "wardrobe" &&
-        (i.needs_disassembly === true || i.wardrobe_small_whole === false),
-    )
+    items.some((i) => i.kind === "wardrobe" && i.needs_disassembly === true)
   )
-    return "אין אצלנו פירוק והרכבה של ארונות. אפשר להעביר רק ארון קטן שניתן להעביר שלם.";
+    return "אין אצלנו פירוק והרכבה של ארונות. אם הארון כבר מפורק — נוכל לעזור.";
   return null;
 }
 export function appliance(i: Item): boolean {
@@ -412,111 +631,192 @@ export function appliance(i: Item): boolean {
     "dishwasher",
   ].includes(i.kind);
 }
+export type MissingRequired = {
+  field: string;
+  role: Role | null;
+  request_number: number;
+} | null;
+
+function missingOf(
+  r: Request,
+  field: string,
+  role: Role | null,
+): MissingRequired {
+  return { field, role, request_number: r.number };
+}
+
+/**
+ * Own-party identity/location must be complete and items must already pass
+ * program rules before we ask consent to contact the other party.
+ */
+export function itemsReadyForHandoff(r: Request): boolean {
+  if (itemError(r.items, r.photo_ids.length > 0)) return false;
+  return r.items.every(
+    (i) =>
+      i.free === true &&
+      i.working === true &&
+      (i.kind !== "wardrobe" || wardrobeTransportable(i)) &&
+      (r.origin === "direct" || i.kind !== "oven" || i.oven_type !== null) &&
+      (r.origin === "direct" ||
+        appliance(i) ||
+        i.kind === "wardrobe" ||
+        i.needs_disassembly !== null) &&
+      i.evacuation !== "different",
+  );
+}
+
+export function ownPartyDetailsComplete(r: Request, phone: string): boolean {
+  try {
+    const p = ownParty(r, phone);
+    return Boolean(
+      p.approved_at &&
+        p.approved_by === p.phone &&
+        usablePersonName(p.name) &&
+        p.settlement &&
+        p.address &&
+        p.floor !== null,
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Structural missing-field probe. `text` is always empty — Reply manager owns wording. */
 export function nextQuestion(
   r: Request,
   phone: string,
-): { text: string; floorNote: boolean } {
+): { text: string; floorNote: boolean; missing: MissingRequired } {
   if (r.status === "coordinated")
-    return { text: statusText([r]), floorNote: false };
+    return { text: "", floorNote: false, missing: null };
   if (isClosed(r))
-    return { text: `פנייה ${r.number} סגורה.`, floorNote: false };
-  if (r.status === "human") return { text: HUMAN_REPLY, floorNote: false };
+    return { text: "", floorNote: false, missing: null };
+  if (r.status === "human")
+    return { text: "", floorNote: false, missing: null };
   const p = ownParty(r, phone);
   const donor = p.role === "donor";
   if (
-    r.origin === "direct" &&
-    !r.represents_both_parties &&
-    !r.verification_contacted &&
-    r.parties.some((x) => x.role !== p.role)
-  )
-    return {
-      text: `האם תרצה שנפנה ל${donor ? "מקבל" : "מוסר"} לצורך אימות הפרטים?`,
-      floorNote: false,
-    };
-  if (r.origin === "direct" && !r.parties.some((x) => x.role !== p.role))
-    return {
-      text: `האם תרצה שנפנה ל${donor ? "מקבל" : "מוסר"} לצורך אימות הפרטים? אם כן, נא לשלוח מספר טלפון או כרטיס איש קשר.`,
-      floorNote: false,
-    };
-  if (
     donor &&
     r.items.some(
-      (i) => i.kind === "wardrobe" && i.wardrobe_small_whole !== true,
+      (i) =>
+        i.kind === "wardrobe" &&
+        i.wardrobe_small_whole !== true &&
+        i.needs_disassembly === null,
     )
   )
     return {
-      text: "אפשר להעביר רק ארון קטן שניתן להעביר שלם, ללא פירוק והרכבה. האם זה ארון כזה?",
+      text: "",
       floorNote: false,
+      missing: missingOf(r, "wardrobe_small_whole", "donor"),
     };
   if (donor && r.items.some((i) => i.working === null))
     return {
-      text: CONDITION_QUESTION,
+      text: "",
       floorNote: false,
+      missing: missingOf(r, "working", "donor"),
     };
   if (
     donor &&
     r.origin !== "direct" &&
     r.items.some((i) => i.kind === "oven" && i.oven_type === null)
   )
-    return { text: "האם זה תנור בילט־אין או תנור משולב?", floorNote: false };
-  if (
-    donor &&
-    r.origin !== "direct" &&
-    r.items.some(
-      (i) =>
-        !appliance(i) && i.kind !== "wardrobe" && i.needs_disassembly === null,
-    )
-  )
-    return { text: "האם נדרש פירוק של הפריט לצורך ההובלה?", floorNote: false };
+    return {
+      text: "",
+      floorNote: false,
+      missing: missingOf(r, "oven_type", "donor"),
+    };
+  // Disassembly prompts are owned by write/phrase — code does not force
+  // needs_disassembly as missing_required for chairs/sofa/etc.
   if (!p.approved_at)
     return {
-      text: `נא לאשר את חלקך ב${p.role === "donor" ? "מסירה" : "קבלה"} בפנייה ${r.number}. אישור חלקך נפרד מאישור מועד ההובלה.`,
+      text: "",
       floorNote: false,
+      missing: missingOf(r, "approved_at", p.role),
     };
   if (!p.settlement)
     return {
-      text: donor
-        ? "באיזה יישוב נמצא הפריט?"
-        : "לאיזה יישוב צריך להעביר את הפריט?",
+      text: "",
       floorNote: false,
+      missing: missingOf(r, "settlement", p.role),
     };
-  if (!p.name || !p.address)
+  if (!p.name?.trim() || !p.address)
     return {
-      text:
-        p.settlement === "בית שאן"
-          ? (!p.name
-              ? p.address
-                ? "תודה. חסר רק השם."
-                : "נא לציין שם וכתובת."
-              : "תודה. חסרה רק הכתובת המדויקת.") +
-            (!p.floor_note_shown && p.floor === null
-              ? " בבניין עם קומות — לציין קומה."
-              : "")
-          : !p.name
-            ? "נא לציין שם ותיאור כללי של המקום ביישוב, למשל ״בכניסה״ או ״ליד המזכירות״."
-            : "תודה. חסר רק תיאור כללי של המקום ביישוב, למשל ״בכניסה״ או ״ליד המזכירות״.",
-      floorNote:
-        p.settlement === "בית שאן" && !p.floor_note_shown && p.floor === null,
-    };
-  if (!r.parties.some((x) => x.role !== p.role))
-    return {
-      text: donor
-        ? "האם יש מקבל מסוים? אם כן, נא לשלוח את מספרו או כרטיס איש קשר."
-        : "נא לשלוח את מספר המוסר או כרטיס איש קשר.",
+      text: "",
       floorNote: false,
+      missing: missingOf(r, !p.name?.trim() ? "name" : "address", p.role),
+    };
+  // Always ask floor — never invent קומה 0.
+  if (p.floor === null)
+    return {
+      text: "",
+      floorNote: !p.floor_note_shown,
+      missing: missingOf(r, "floor", p.role),
+    };
+  if (r.items.some((i) => i.free === null))
+    return {
+      text: "",
+      floorNote: false,
+      missing: missingOf(r, "free", "donor"),
+    };
+  const counterpart = r.parties.find((x) => x.role !== p.role);
+  // A name-only recipient is not contactable yet — ask for the phone first.
+  if (
+    r.origin === "direct" &&
+    !r.represents_both_parties &&
+    counterpart &&
+    !counterpart.phone
+  )
+    return {
+      text: "",
+      floorNote: false,
+      missing: missingOf(r, "counterparty", p.role),
+    };
+  // Contact / counterparty only after own details + item rules above.
+  if (
+    r.origin === "direct" &&
+    !r.represents_both_parties &&
+    !r.verification_contacted &&
+    counterpart &&
+    itemsReadyForHandoff(r)
+  )
+    return {
+      text: "",
+      floorNote: false,
+      missing: missingOf(r, "contact_counterparty", p.role),
+    };
+  if (!counterpart)
+    return {
+      text: "",
+      floorNote: false,
+      missing: missingOf(r, "counterparty", p.role),
+    };
+  const other = r.parties.find((x) => x.phone !== p.phone);
+  // After consent to contact the other party — wait for their role approval.
+  if (
+    r.origin === "direct" &&
+    r.verification_contacted &&
+    other &&
+    !other.approved_at
+  )
+    return {
+      text: "",
+      floorNote: false,
+      missing: missingOf(r, "approved_at", other.role),
     };
   const proposal = r.proposed_run_date;
   if (proposal && p.schedule_approved_date !== proposal) {
-    const [year, month, day] = proposal.split("-");
     return {
-      text: `הוצע מועד ההובלה ליום שלישי ${day}/${month}/${year}, בין 16:00–20:00. נא לאשר את המועד במפורש.`,
+      text: "",
       floorNote: false,
+      missing: missingOf(r, "schedule_approved_date", p.role),
     };
   }
-  const other = r.parties.find((x) => x.phone !== p.phone);
   if (proposal && other && other.schedule_approved_date !== proposal)
-    return { text: `אישרת את מועד ההובלה בפנייה ${r.number}. ממתינים לאישור המועד של הצד השני.`, floorNote: false };
-  return { text: "הפרטים נשמרו. נעדכן.", floorNote: false };
+    return {
+      text: "",
+      floorNote: false,
+      missing: missingOf(r, "schedule_approved_date", other.role),
+    };
+  return { text: "", floorNote: false, missing: null };
 }
 export function readyToProposeSchedule(r: Request): boolean {
   if (
@@ -537,7 +837,7 @@ export function readyToProposeSchedule(r: Request): boolean {
       (i) =>
         i.free === true &&
         i.working === true &&
-        (!["wardrobe"].includes(i.kind) || i.wardrobe_small_whole === true) &&
+        (!["wardrobe"].includes(i.kind) || wardrobeTransportable(i)) &&
         (i.kind !== "oven" || i.oven_type !== null) &&
         (r.origin === "direct" ||
           appliance(i) ||
@@ -589,6 +889,52 @@ export function nextTuesday(
   const d = new Date(x.date + "T12:00:00Z");
   d.setUTCDate(d.getUTCDate() + delta);
   return { date: d.toISOString().slice(0, 10), sameDay: delta === 0 };
+}
+
+/** Strong consent to message the other party (not bare «כן» alone). */
+export function strongContactConsent(text: string): boolean {
+  const t = norm(text);
+  if (
+    /אל\s+תפנ|לא\s+(?:לפנות|לכתוב|לשלוח|תיצרי?\s+קשר)|don'?t\s+contact/iu.test(
+      t,
+    )
+  )
+    return false;
+  return (
+    /מאשר(?:ת)?\s+(?:ליצור(?:\s+אית(?:ה|ו))?\s+קשר|לפנות|לכתוב)/u.test(t) ||
+    /(?:תפנו|תכתבו|תשלחו|דבר(?:י)?\s+אית|כתוב(?:י)?\s+(?:ל|אלי)|פנה\s+(?:ל|אלי)|יאללה\s+(?:תכתב|תפנ|תשלח))/u.test(
+      t,
+    ) ||
+    /(?:please\s+)?(?:contact|message|text)\s+(?:them|him|her|tal)/i.test(text)
+  );
+}
+
+/**
+ * True when the customer consented to counterparty contact — strong phrasing,
+ * or bare yes only right after we asked (conv#10 auto-contacted without ask/yes).
+ */
+export function contactConsentGiven(
+  text: string,
+  history: Array<{ role: string; content: string }> = [],
+): boolean {
+  if (strongContactConsent(text)) return true;
+  const bareYes = /^(?:כן|בטח|בוודאי|סבבה|בסדר|יאללה)(?:[\s,!.]|$)/u.test(
+    norm(text),
+  );
+  if (!bareYes) {
+    for (const entry of history.filter((e) => e.role === "user").slice(-6))
+      if (strongContactConsent(entry.content)) return true;
+    return false;
+  }
+  const lastAssistant = [...history]
+    .reverse()
+    .find((entry) => entry.role === "assistant");
+  return Boolean(
+    lastAssistant &&
+      /לכתוב\s+ל|לאמת|לפנות|כן\s+או\s+לא|שאכתוב|ליצור\s+קשר|לכתוב\s+אלי/u.test(
+        lastAssistant.content,
+      ),
+  );
 }
 export function statusText(requests: Request[]): string {
   if (!requests.length) return "לא נמצאו פניות פעילות עבורך.";

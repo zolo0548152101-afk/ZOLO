@@ -10,3 +10,4 @@ artifacts/qa/reviewer-watcher*.json
 artifacts/qa/reviewer-watcher*.lock
 artifacts/qa/codex-review-run-*.log
 artifacts/qa/t21-t22-backup-drill/
+scripts/__pycache__/

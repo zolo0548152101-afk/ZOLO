@@ -19,7 +19,8 @@ import {
   type Log,
   type Request,
 } from "../domain/types.js";
-import { localDate, nextQuestion, statusText } from "../domain/policies.js";
+import { localDate, statusText } from "../domain/policies.js";
+import { draftScheduleProposal } from "../domain/notices.js";
 import {
   integrationAdapters,
   IntegrationDeliveryError,
@@ -143,7 +144,15 @@ export class Runtime {
           "send",
           settings,
           async (jobs) => {
-            for (const j of jobs) await engine.send(j.data.id);
+            for (const j of jobs) {
+              try {
+                await engine.send(j.data.id);
+              } catch (error) {
+                // Never leave a failed send job freezing this phone's FIFO.
+                if (j.retryCount < j.retryLimit) throw error;
+                await engine.releaseFailedSend(j.data.id, error);
+              }
+            }
           },
         );
         if (this.config.INTEGRATION_DISPATCH) {
@@ -395,6 +404,7 @@ export class Runtime {
       [this.workerId],
     );
     await this.unblockFailedConversations();
+    await this.unblockFailedSends();
     if (this.config.INTEGRATION_DISPATCH) await this.recoverIntegrationQueue();
   }
   /**
@@ -408,6 +418,67 @@ export class Runtime {
       if (job.messageId)
         await this.engine.releaseFailedTurn(job.messageId, new Error("fifo_failed_job"));
       await this.queue.releaseSingleton("conversation", job.singletonKey, ["failed"]);
+    }
+  }
+  /**
+   * key_strict_fifo on send means a failed delivery job blocks every later
+   * WhatsApp reply for that phone. Release the singleton, cancel ops-alert
+   * rows that should never reach customers, and re-queue the head pending
+   * customer outbox so chat replies resume.
+   */
+  private async unblockFailedSends(): Promise<void> {
+    if (!this.queue || !this.store) return;
+    const failed = await this.queue.failedJobs("send");
+    const phones = new Set<string>();
+    for (const job of failed) {
+      phones.add(job.singletonKey);
+      if (job.messageId) {
+        await this.pool.query(
+          `UPDATE outbox
+              SET state=CASE
+                    WHEN state IN ('sending','uncertain') THEN 'pending'
+                    ELSE state
+                  END,
+                  error_code=COALESCE(NULLIF(error_code,''), 'send_fifo_released'),
+                  format_state=CASE
+                    WHEN format_state='pending' THEN 'ready'
+                    ELSE format_state
+                  END
+            WHERE id=$1 AND state IN ('pending','sending','uncertain','failed')`,
+          [job.messageId],
+        );
+      }
+      await this.queue.releaseSingleton("send", job.singletonKey, ["failed"]);
+    }
+    // Ops alerts must never occupy a customer send FIFO head.
+    await this.pool.query(
+      `UPDATE outbox
+          SET state='cancelled', error_code='ops_alert_customer_blocked'
+        WHERE state IN ('pending','sending','uncertain','failed')
+          AND text LIKE $1
+          AND phone <> $2`,
+      [`${"נדרשת בדיקת מערכת"}%`, this.config.ADMIN_PHONE],
+    );
+    for (const phone of phones) {
+      const head = await this.pool.query<{ id: string }>(
+        `SELECT id FROM outbox
+          WHERE phone=$1 AND state='pending' AND format_state='ready'
+          ORDER BY seq LIMIT 1`,
+        [phone],
+      );
+      if (!head.rows[0]) continue;
+      await this.store.transaction(async (c) => {
+        const jobId = await this.queue!.send(
+          c,
+          "send",
+          { id: head.rows[0]!.id },
+          phone,
+        );
+        await c.query("UPDATE outbox SET job_id=$2 WHERE id=$1", [
+          head.rows[0]!.id,
+          jobId,
+        ]);
+      });
     }
   }
   async check(): Promise<void> {
@@ -455,7 +526,7 @@ export class Runtime {
       "SELECT count(*)::int n FROM outbox WHERE state='uncertain'",
     );
     const formatting = await this.pool.query<{ n: number }>(
-      "SELECT count(*)::int n FROM outbox WHERE format_state='pending' AND created_at<clock_timestamp()-interval '30 seconds'",
+      "SELECT count(*)::int n FROM outbox WHERE format_state='pending' AND state <> 'cancelled' AND created_at<clock_timestamp()-interval '30 seconds'",
     );
     const failedMedia = await this.pool.query<{ n: number }>(
       "SELECT count(*)::int n FROM messages WHERE media_state='pending' AND received_at<clock_timestamp()-interval '60 seconds'",
@@ -519,13 +590,21 @@ export class Runtime {
           const trace_id = randomUUID();
           await store.event(c, { trace_id }, "system", "schedule_proposed_after_capacity_approval", { date: proposed }, r.id);
           for (const p of r.parties) {
+            if (!p.phone) continue;
             const permission = await c.query<{ state: string }>(
               "SELECT state FROM request_verifications WHERE request_id=$1 AND role=$2",
               [r.id, p.role],
             );
             const authorized = ["consented", "queued", "provider_accepted", "delivered", "approved"].includes(permission.rows[0]?.state ?? "");
             if (!authorized) continue;
-            const notice = { phone: p.phone, text: nextQuestion(r, p.phone).text };
+            const notice = {
+              phone: p.phone,
+              text: draftScheduleProposal({
+                request: r,
+                recipient: p,
+                date: proposed,
+              }),
+            };
             await store.outbound(
               c,
               { trace_id, mode: this.config.BOT_MODE },
@@ -548,7 +627,8 @@ export class Runtime {
             { date: r.run_date },
             r.id,
           );
-          for (const p of r.parties)
+          for (const p of r.parties) {
+            if (!p.phone) continue;
             await store.outbound(
               c,
               { trace_id, mode: this.config.BOT_MODE },
@@ -556,6 +636,7 @@ export class Runtime {
               `coordination:${r.id}:${r.run_date}:${p.phone}`,
               r.id,
             );
+          }
         }
       });
     await this.pool.query(

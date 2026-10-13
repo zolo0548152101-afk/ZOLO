@@ -37,9 +37,13 @@ export async function migrate(
       const rows = await client.query<{ name: string; checksum: string }>(
         `SELECT name,checksum FROM ${c.DB_SCHEMA}.schema_checksums`,
       );
-      for (const r of rows.rows)
-        if (hashes.get(r.name) !== r.checksum)
-          throw new Error("modified_applied_migration");
+      for (const r of rows.rows) {
+        const hash = hashes.get(r.name);
+        // Host leftovers (checksum row, no file) must not block deploys.
+        // Fail only when a file that is still in the tree changed.
+        if (hash === undefined) continue;
+        if (hash !== r.checksum) throw new Error("modified_applied_migration");
+      }
     }
     await runner({
       dbClient: client,

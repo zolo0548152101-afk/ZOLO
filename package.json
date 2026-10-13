@@ -1,6 +1,6 @@
 {
   "name": "haim-yahad-bot-core",
-  "version": "0.5.2",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -36,7 +36,8 @@
     "check:legacy-mapping": "node scripts/validate-legacy-mapping.mjs --file tests/fixtures/legacy-sheets-v9-source.gs",
     "check:ai-eval": "node scripts/validate-ai-eval.mjs",
     "check:prompt-wiring": "node scripts/validate-prompt-wiring.mjs",
-    "check": "npm run build && npm test",
+    "check:no-code-sentences": "node scripts/validate-no-code-sentences.mjs",
+    "check": "npm run build && npm run check:prompt-wiring && npm run check:no-code-sentences && npm test",
     "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {

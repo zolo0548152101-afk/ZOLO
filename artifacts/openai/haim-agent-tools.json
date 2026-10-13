@@ -1,0 +1,987 @@
+[
+  {
+    "type": "function",
+    "name": "donate",
+    "description": "Open or update a donation / direct handoff request with items.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "minItems": 1,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "bed",
+                  "sofa",
+                  "wardrobe",
+                  "fridge",
+                  "oven",
+                  "table_set",
+                  "table",
+                  "chairs",
+                  "washing_machine",
+                  "dryer",
+                  "freezer",
+                  "dishwasher",
+                  "other",
+                  "piano",
+                  "house_move"
+                ]
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "kind",
+              "description",
+              "quantity"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "counterparty_phone": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "counterparty_name": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "direct": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "free": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "working": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "counterparty_phone",
+        "counterparty_name",
+        "direct",
+        "free",
+        "working"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "receive_from_donor",
+    "description": "Receiver opens a request linked to a known donor phone.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "minItems": 1,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "bed",
+                  "sofa",
+                  "wardrobe",
+                  "fridge",
+                  "oven",
+                  "table_set",
+                  "table",
+                  "chairs",
+                  "washing_machine",
+                  "dryer",
+                  "freezer",
+                  "dishwasher",
+                  "other",
+                  "piano",
+                  "house_move"
+                ]
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "kind",
+              "description",
+              "quantity"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "donor_phone": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "donor_phone"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "seek",
+    "description": "Start a seeker search for an item kind.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "bed",
+            "sofa",
+            "wardrobe",
+            "fridge",
+            "oven",
+            "table_set",
+            "table",
+            "chairs",
+            "washing_machine",
+            "dryer",
+            "freezer",
+            "dishwasher",
+            "other",
+            "piano",
+            "house_move"
+          ]
+        },
+        "name": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "settlement": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "address": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "floor": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": -3,
+                  "maximum": 100
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "settlement",
+        "address",
+        "floor"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "interest",
+    "description": "Seeker expresses interest in a presented match by request number.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_number": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "request_number"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "details",
+    "description": "Save name/settlement/address/floor/preferred_time for a party role.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_number": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "donor",
+                "receiver"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "settlement": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "address": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "floor": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -3,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preferred_time": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "request_number",
+        "role",
+        "name",
+        "settlement",
+        "address",
+        "floor",
+        "preferred_time"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "item_facts",
+    "description": "Update item facts (free/working/disassembly/oven/evacuation).",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_number": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "items": {
+          "anyOf": [
+            {
+              "minItems": 1,
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "bed",
+                      "sofa",
+                      "wardrobe",
+                      "fridge",
+                      "oven",
+                      "table_set",
+                      "table",
+                      "chairs",
+                      "washing_machine",
+                      "dryer",
+                      "freezer",
+                      "dishwasher",
+                      "other",
+                      "piano",
+                      "house_move"
+                    ]
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  },
+                  "quantity": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20
+                  }
+                },
+                "required": [
+                  "kind",
+                  "description",
+                  "quantity"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "free": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "working": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "needs_disassembly": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "wardrobe_small_whole": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "oven_type": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "built_in",
+                "combined"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evacuation": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "none",
+                "equivalent",
+                "different"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "request_number",
+        "items",
+        "free",
+        "working",
+        "needs_disassembly",
+        "wardrobe_small_whole",
+        "oven_type",
+        "evacuation"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "counterparty",
+    "description": "Link or update the other party name/phone on a request.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_number": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "phone": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 40
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "request_number",
+        "phone",
+        "name"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "approve_self",
+    "description": "Speaker approves their own participation.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_number": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "request_number"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "approve_schedule",
+    "description": "Speaker approves the proposed run date.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_number": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "date": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        }
+      },
+      "required": [
+        "request_number",
+        "date"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "select",
+    "description": "Select which open request is active.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_number": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "request_number"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "cancel",
+    "description": "Cancel flow: ask / next_week / final.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_number": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "choice": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "next_week",
+            "final"
+          ]
+        }
+      },
+      "required": [
+        "request_number",
+        "choice"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "escalate",
+    "description": "Escalate for human review with a reason.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_number": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "borderline_area",
+            "unusual_access",
+            "evacuation",
+            "customer_request",
+            "unclear",
+            "technical"
+          ]
+        }
+      },
+      "required": [
+        "request_number",
+        "reason"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "status",
+    "description": "Customer asked for status of their requests (read-only).",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false,
+      "required": []
+    }
+  },
+  {
+    "type": "function",
+    "name": "contact_counterparty",
+    "description": "Record consent to message the other party (true/false).",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_number": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "contact": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "request_number",
+        "contact"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "counterparty_candidate",
+    "description": "Store a pending contact-card candidate for confirmation.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_number": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "phone": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 40
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "request_number",
+        "phone",
+        "name"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "confirm_counterparty",
+    "description": "Accept or reject the pending counterparty candidate.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_number": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "accept": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "request_number",
+        "accept"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "next",
+    "description": "No DB write this turn — only ask/acknowledge in the final reply.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false,
+      "required": []
+    }
+  },
+  {
+    "type": "function",
+    "name": "clarify_duplicate",
+    "description": "Ask whether this is another delivery for a duplicate shape.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_number": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "request_number"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "resolve_extra_item",
+    "description": "Customer chose replace or add for an extra item.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "choice": {
+          "type": "string",
+          "enum": [
+            "replace",
+            "add"
+          ]
+        }
+      },
+      "required": [
+        "choice"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "resolve_extra_recipient",
+    "description": "Customer chose same or other recipient for an extra item.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "choice": {
+          "type": "string",
+          "enum": [
+            "same",
+            "other"
+          ]
+        }
+      },
+      "required": [
+        "choice"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

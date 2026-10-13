@@ -3,12 +3,8 @@ name: deploy-bluehost
 on:
   workflow_dispatch:
     inputs:
-      image_tag:
-        description: Docker image tag on the VPS (e.g. slim-handoff-f0b6243)
-        required: true
-        type: string
       branch:
-        description: Git branch to build from
+        description: Git branch to deploy to the host systemd process
         required: false
         default: cursor/cloud-agent-1791198556831-78zb7
         type: string
@@ -40,32 +36,80 @@ jobs:
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
           echo "SSH_TARGET=${USER}@${HOST}" >> "$GITHUB_ENV"
 
-      - name: Sync source and build image on VPS
-        env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
+      - name: Sync source, build, migrate, restart systemd
         run: |
           tar czf /tmp/haim-src.tgz --exclude=node_modules --exclude=dist --exclude=dist-tests --exclude=.git .
           scp -i ~/.ssh/bluehost -o BatchMode=yes /tmp/haim-src.tgz "${SSH_TARGET}:/tmp/haim-src.tgz"
-          ssh -i ~/.ssh/bluehost -o BatchMode=yes "${SSH_TARGET}" bash -s <<EOF
+          ssh -i ~/.ssh/bluehost -o BatchMode=yes "${SSH_TARGET}" bash -s <<'EOF'
           set -euo pipefail
-          rm -rf /root/haim-slim-build && mkdir -p /root/haim-slim-build
-          tar xzf /tmp/haim-src.tgz -C /root/haim-slim-build
-          cd /root/haim-slim-build
-          docker build -t "haim-bot-core:${IMAGE_TAG}" .
-          EOF
+          CODE_DIR=/opt/haim-bot
+          mkdir -p "$CODE_DIR" /var/lib/haim-yahad-media
+          tar xzf /tmp/haim-src.tgz -C "$CODE_DIR"
+          cd "$CODE_DIR"
+          SHA=$(git rev-parse HEAD 2>/dev/null || echo unknown)
+          # Prefer env file; keep ACTION/REPLY prompt ids.
+          set -a
+          # shellcheck disable=SC1091
+          . /root/haim-bot.env
+          set +a
+          # Stamp deploy metadata into the env file.
+          sed -i '/^GIT_SHA=/d;/^DEPLOY_TIMESTAMP=/d' /root/haim-bot.env
+          echo "GIT_SHA=${SHA}" >> /root/haim-bot.env
+          echo "DEPLOY_TIMESTAMP=$(date +%s)000" >> /root/haim-bot.env
+          npm ci
+          npm run build
+          npm run migrate
+          # Ensure Traefik host route file exists (owned by us, not Easypanel).
+          mkdir -p /etc/easypanel/traefik/config
+          cat > /etc/easypanel/traefik/config/haim-bot-host.yaml <<'YAML'
+          http:
+            routers:
+              haim-bot-host-http:
+                rule: "Host(`whatsapp-haim-bot-core.cdpvmq.easypanel.host`)"
+                entryPoints: [http]
+                middlewares: [redirect-to-https]
+                service: haim-bot-host
+                priority: 100
+              haim-bot-host-https:
+                rule: "Host(`whatsapp-haim-bot-core.cdpvmq.easypanel.host`)"
+                entryPoints: [https]
+                service: haim-bot-host
+                tls:
+                  certResolver: letsencrypt
+                priority: 100
+            services:
+              haim-bot-host:
+                loadBalancer:
+                  passHostHeader: true
+                  servers:
+                    - url: "http://172.17.0.1:3010/"
+          YAML
+          # Point systemd unit at /opt/haim-bot if not already.
+          cat > /etc/systemd/system/haim-bot.service <<'UNIT'
+          [Unit]
+          Description=Haim Yahad WhatsApp bot (host process, not Docker)
+          After=network-online.target
+          Wants=network-online.target
 
-      - name: Update Swarm service with rollback
-        env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
-        run: |
-          ssh -i ~/.ssh/bluehost -o BatchMode=yes "${SSH_TARGET}" bash -s <<EOF
-          set -euo pipefail
-          docker service update \
-            --image "haim-bot-core:${IMAGE_TAG}" \
-            --update-order start-first \
-            --update-failure-action rollback \
-            whatsapp_haim-bot-core
-          docker service ps whatsapp_haim-bot-core --no-trunc | head -5
+          [Service]
+          Type=simple
+          WorkingDirectory=/opt/haim-bot
+          EnvironmentFile=/root/haim-bot.env
+          ExecStart=/usr/bin/node dist/server.js
+          Restart=always
+          RestartSec=3
+          User=root
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          systemctl daemon-reload
+          # Keep Swarm replica at 0 so the old container cannot resurrect.
+          docker service scale whatsapp_haim-bot-core=0 || true
+          systemctl restart haim-bot.service
+          sleep 3
+          systemctl is-active haim-bot.service
+          curl -fsS http://127.0.0.1:3010/health
           EOF
 
       - name: Verify public health
